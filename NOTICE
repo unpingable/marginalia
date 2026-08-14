@@ -4,4 +4,8 @@ Copyright 2026 James Beck
 This product includes software derived from Phosphor (gov-webui), developed at
 https://github.com/unpingable/governor_webui
 
+The local appliance includes Codex CLI 0.146.1, developed by OpenAI at
+https://github.com/openai/codex and licensed under the Apache License, Version
+2.0.
+
 Licensed under the Apache License, Version 2.0.

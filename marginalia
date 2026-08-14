@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+set -euo pipefail
+
+MARGINALIA_VERSION="0.1.0"
+DEFAULT_IMAGE="ghcr.io/unpingable/marginalia:${MARGINALIA_VERSION}"
+IMAGE="${MARGINALIA_IMAGE:-$DEFAULT_IMAGE}"
+CONTAINER="${MARGINALIA_CONTAINER:-marginalia}"
+DATA_VOLUME="${MARGINALIA_DATA_VOLUME:-marginalia_data}"
+CODEX_VOLUME="${MARGINALIA_CODEX_VOLUME:-marginalia_codex_home}"
+PORT="${MARGINALIA_PORT:-8000}"
+CONTEXT_ID="${GOVERNOR_CONTEXT_ID:-marginalia-writing}"
+NO_OPEN="${MARGINALIA_NO_OPEN:-0}"
+SKIP_PULL="${MARGINALIA_SKIP_PULL:-0}"
+
+usage() {
+  cat <<'EOF'
+Marginalia — a governed creative-writing room
+
+Usage:
+  marginalia [start] [--no-open] [--no-pull] [--port PORT] [--context ID]
+  marginalia login [--no-pull]
+  marginalia stop
+  marginalia status
+  marginalia doctor
+  marginalia open
+  marginalia update
+  marginalia logs
+  marginalia version
+
+The default command is `start`. Marginalia stores writing and Codex login
+state in Docker volumes; stop/update operations do not delete either volume.
+EOF
+}
+
+fail() {
+  printf 'Marginalia: %s\n' "$*" >&2
+  exit 1
+}
+
+validate_settings() {
+  [[ "$PORT" =~ ^[0-9]+$ ]] || fail "port must be a number (received: $PORT)"
+  ((PORT >= 1 && PORT <= 65535)) || fail "port must be between 1 and 65535"
+  [ -n "$CONTAINER" ] || fail "container name cannot be empty"
+  [ -n "$CONTEXT_ID" ] || fail "writing context cannot be empty"
+}
+
+require_docker() {
+  command -v docker >/dev/null 2>&1 \
+    || fail "Docker is required. Install Docker Desktop or Docker Engine, then retry."
+  docker info >/dev/null 2>&1 \
+    || fail "Docker is installed but its daemon is unavailable. Start Docker and retry."
+}
+
+image_present() {
+  docker image inspect "$IMAGE" >/dev/null 2>&1
+}
+
+prepare_image() {
+  if [ "$SKIP_PULL" = "1" ]; then
+    image_present || fail "image $IMAGE is not available locally"
+    return
+  fi
+  printf 'Fetching Marginalia %s…\n' "$MARGINALIA_VERSION"
+  docker pull "$IMAGE" >/dev/null
+}
+
+container_present() {
+  docker container inspect "$CONTAINER" >/dev/null 2>&1
+}
+
+container_managed() {
+  [ "$(docker container inspect --format '{{index .Config.Labels "io.marginalia.managed"}}' "$CONTAINER" 2>/dev/null || true)" = "true" ]
+}
+
+container_status() {
+  docker container inspect --format '{{.State.Status}}' "$CONTAINER"
+}
+
+codex_login_present() {
+  docker run --rm --network none \
+    --volume "$CODEX_VOLUME:/root/.codex" \
+    --entrypoint /opt/codex/codex \
+    "$IMAGE" login status >/dev/null 2>&1
+}
+
+login_codex() {
+  require_docker
+  prepare_image
+  if codex_login_present; then
+    printf 'Codex is already connected.\n'
+    return
+  fi
+
+  printf '\nMarginalia uses Codex for its writing model.\n'
+  printf 'The next step displays a one-time code and an OpenAI sign-in URL.\n\n'
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    docker run --rm -it \
+      --volume "$CODEX_VOLUME:/root/.codex" \
+      --entrypoint /opt/codex/codex \
+      "$IMAGE" login --device-auth </dev/tty >/dev/tty
+  else
+    fail "interactive login needs a terminal; run 'marginalia login' in one"
+  fi
+  codex_login_present || fail "Codex login did not create an authentication record"
+  printf 'Codex connected.\n'
+}
+
+ensure_codex_login() {
+  codex_login_present && return
+  if [ "${MARGINALIA_NONINTERACTIVE:-0}" = "1" ]; then
+    fail "Codex is not connected; run 'marginalia login' first"
+  fi
+  if [ ! -r /dev/tty ]; then
+    fail "Codex is not connected; run 'marginalia login' in a terminal"
+  fi
+
+  local answer
+  read -r -p "Codex is not connected. Connect it now? [Y/n] " answer </dev/tty
+  case "$answer" in
+    ""|y|Y|yes|YES|Yes) login_codex ;;
+    *) fail "Codex login is required before Marginalia can write" ;;
+  esac
+}
+
+wait_until_ready() {
+  local health="starting"
+  local attempt
+  for attempt in $(seq 1 90); do
+    health="$(docker container inspect \
+      --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+      "$CONTAINER" 2>/dev/null || true)"
+    case "$health" in
+      healthy) return ;;
+      unhealthy|exited|dead)
+        docker logs --tail 80 "$CONTAINER" >&2 || true
+        fail "the local appliance became $health during startup"
+        ;;
+    esac
+    sleep 1
+  done
+  docker logs --tail 80 "$CONTAINER" >&2 || true
+  fail "the local appliance did not become healthy within 90 seconds (last state: $health)"
+}
+
+open_browser() {
+  local url="http://127.0.0.1:${PORT}"
+  if [ "$NO_OPEN" = "1" ]; then
+    printf 'Marginalia: %s\n' "$url"
+    return
+  fi
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" >/dev/null 2>&1 &
+  elif command -v open >/dev/null 2>&1; then
+    open "$url" >/dev/null 2>&1 &
+  else
+    printf 'Marginalia: %s\n' "$url"
+    return
+  fi
+  printf 'Marginalia opened at %s\n' "$url"
+}
+
+start_app() {
+  validate_settings
+  require_docker
+  prepare_image
+  SKIP_PULL=1
+  ensure_codex_login
+
+  if container_present; then
+    container_managed \
+      || fail "container name '$CONTAINER' is already used by an unmanaged container"
+    case "$(container_status)" in
+      running) printf 'Marginalia is already running.\n' ;;
+      *) docker start "$CONTAINER" >/dev/null ;;
+    esac
+  else
+    docker run --detach \
+      --name "$CONTAINER" \
+      --label io.marginalia.managed=true \
+      --restart unless-stopped \
+      --publish "127.0.0.1:${PORT}:8000" \
+      --env BACKEND_TYPE=codex \
+      --env CODEX_PATH=/app/codex-provider.sh \
+      --env CODEX_NATIVE_PATH=/opt/codex/codex \
+      --env GOVERNOR_CONTEXT_ID="$CONTEXT_ID" \
+      --env GOVERNOR_MODE=fiction \
+      --env MARGINALIA_DATA_ROOT=/data \
+      --volume "$DATA_VOLUME:/data" \
+      --volume "$CODEX_VOLUME:/root/.codex" \
+      "$IMAGE" >/dev/null
+  fi
+
+  wait_until_ready
+  open_browser
+}
+
+stop_app() {
+  require_docker
+  if ! container_present; then
+    printf 'Marginalia is not installed as a local container yet.\n'
+    return
+  fi
+  container_managed \
+    || fail "container name '$CONTAINER' belongs to an unmanaged container"
+  if [ "$(container_status)" = "running" ]; then
+    docker stop "$CONTAINER" >/dev/null
+  fi
+  printf 'Marginalia stopped. Your writing remains in %s.\n' "$DATA_VOLUME"
+}
+
+show_status() {
+  require_docker
+  if ! container_present; then
+    printf 'Marginalia: not started yet\n'
+    return
+  fi
+  if ! container_managed; then
+    printf 'Marginalia: container name %s is occupied by an unmanaged container\n' "$CONTAINER"
+    return 1
+  fi
+  local status health
+  status="$(container_status)"
+  health="$(docker container inspect \
+    --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}not reported{{end}}' \
+    "$CONTAINER")"
+  printf 'Marginalia: %s (%s)\n' "$status" "$health"
+  printf 'Writing room: http://127.0.0.1:%s\n' "$PORT"
+}
+
+doctor() {
+  validate_settings
+  printf 'Marginalia %s\n' "$MARGINALIA_VERSION"
+  if ! command -v docker >/dev/null 2>&1; then
+    printf '✗ Docker CLI not found\n'
+    return 1
+  fi
+  printf '✓ Docker CLI found\n'
+  if ! docker info >/dev/null 2>&1; then
+    printf '✗ Docker daemon unavailable\n'
+    return 1
+  fi
+  printf '✓ Docker daemon available\n'
+  if image_present; then
+    printf '✓ Appliance image available: %s\n' "$IMAGE"
+    if ! docker volume inspect "$CODEX_VOLUME" >/dev/null 2>&1; then
+      printf '✗ Codex login missing; run `marginalia login`\n'
+      return 1
+    elif codex_login_present; then
+      printf '✓ Codex connected\n'
+    else
+      printf '✗ Codex login missing; run `marginalia login`\n'
+      return 1
+    fi
+  else
+    printf '· Appliance image not downloaded yet; `marginalia start` will fetch it\n'
+  fi
+  if container_present; then
+    if container_managed; then
+      printf '✓ Local container present: %s\n' "$(container_status)"
+    else
+      printf '✗ Container name %s is occupied by another application\n' "$CONTAINER"
+      return 1
+    fi
+  else
+    printf '· Local container not created yet\n'
+  fi
+}
+
+update_app() {
+  require_docker
+  prepare_image
+  if container_present; then
+    container_managed \
+      || fail "refusing to replace unmanaged container '$CONTAINER'"
+    if [ "$(container_status)" = "running" ]; then
+      docker stop "$CONTAINER" >/dev/null
+    fi
+    docker rm "$CONTAINER" >/dev/null
+  fi
+  SKIP_PULL=1
+  start_app
+}
+
+parse_start_options() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --no-open) NO_OPEN=1 ;;
+      --no-pull) SKIP_PULL=1 ;;
+      --port)
+        [ "$#" -ge 2 ] || fail "--port requires a value"
+        PORT="$2"
+        shift
+        ;;
+      --context)
+        [ "$#" -ge 2 ] || fail "--context requires a value"
+        CONTEXT_ID="$2"
+        shift
+        ;;
+      -h|--help) usage; exit 0 ;;
+      *) fail "unknown option: $1" ;;
+    esac
+    shift
+  done
+}
+
+command_name="${1:-start}"
+if [ "$#" -gt 0 ]; then shift; fi
+
+case "$command_name" in
+  start)
+    parse_start_options "$@"
+    start_app
+    ;;
+  login)
+    parse_start_options "$@"
+    login_codex
+    ;;
+  stop) stop_app ;;
+  status) show_status ;;
+  doctor) doctor ;;
+  open) validate_settings; open_browser ;;
+  update)
+    parse_start_options "$@"
+    update_app
+    ;;
+  logs)
+    require_docker
+    container_present || fail "Marginalia has not been started yet"
+    docker logs --follow "$CONTAINER"
+    ;;
+  version|--version|-V) printf 'Marginalia %s\n' "$MARGINALIA_VERSION" ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; fail "unknown command: $command_name" ;;
+esac

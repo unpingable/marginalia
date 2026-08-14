@@ -2,10 +2,10 @@
 
 services:
   marginalia:
-    image: ${MARGINALIA_IMAGE:-marginalia:local}
+    image: ${MARGINALIA_IMAGE:-ghcr.io/unpingable/marginalia:0.1.0}
     container_name: marginalia
     ports:
-      - "${MARGINALIA_PORT:-8000}:8000"
+      - "127.0.0.1:${MARGINALIA_PORT:-8000}:8000"
     environment:
       - BACKEND_TYPE=${BACKEND_TYPE:-anthropic}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}

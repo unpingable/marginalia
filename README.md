@@ -11,7 +11,36 @@ Marginalia → GovernedChatAdapter → Agent Governor daemon → model provider
 No NQ, Nightshift, Monitor, Maude, Desk, qualification service, or Phosphor
 control-plane service is required.
 
-## M1 status
+## Install the local appliance
+
+The supported end-user path is one Marginalia launcher backed by a pinned
+container image. It does not require a Python environment, an AG checkout,
+Compose files, provider environment variables, or YAML editing.
+
+After the `v0.1.0` release is published:
+
+```bash
+curl -fsSL https://github.com/unpingable/marginalia/releases/download/v0.1.0/install-marginalia.sh | sh
+```
+
+The installer starts Marginalia. On first use it guides the writer through
+Codex device authentication, creates durable local writing/login volumes,
+waits for the governed writing service to become healthy, and opens the
+browser. Later use is deliberately mundane:
+
+```bash
+marginalia start
+marginalia status
+marginalia stop
+marginalia doctor
+```
+
+Stopping or updating the appliance never deletes writing. Docker is the
+current local substrate, but the launcher owns its vocabulary and lifecycle.
+See [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for release and clean-machine
+qualification details.
+
+## M1.5 status
 
 This repository was extracted from the last useful pre-Desk governed-chat
 state of `gov-webui` at commit
@@ -38,6 +67,12 @@ by default, omitted from `/api/info`, and their heavy operator imports are not
 loaded by the product path. `MARGINALIA_ENABLE_DONOR_ROUTES=1` exists only for
 the retained compatibility suite and is not a supported product mode.
 
+M1.5 adds a reproducible local-appliance boundary. The release image contains
+the complete qualified AG distribution (including `fiction_governor`),
+receipt-kernel, receipt-v1, the Marginalia application, and a pinned Codex CLI.
+The thin launcher handles image retrieval, first-run login, aligned persistence,
+startup health, browser opening, updates, diagnostics, and shutdown.
+
 ## Creative project direction
 
 Each fiction context has one small persisted configuration:
@@ -60,6 +95,7 @@ Marginalia requires Python 3.11 or newer and is pinned to:
 - `agent-governor==2.8.1`
 - AG commit `e279a94326a0a13dbe43473846b53e4c3a9b31f2`
 - published annotated tag `marginalia-chat-contract-m0`
+- `receipt-kernel==0.1.0` from that AG checkout
 - `receipt-v1==0.1.0` from that AG checkout
 - governed-chat daemon contract version `1`
 
@@ -67,7 +103,7 @@ See [AG_CONTRACT.md](AG_CONTRACT.md). `GovernedChatAdapter` refuses to run if
 the daemon lacks context-scoped pending state, authoritative receipts, or the
 configured state root.
 
-## Reproducible local environment
+## Reproducible development environment
 
 Expected sibling layout:
 
@@ -84,13 +120,17 @@ Create an isolated environment using the same lock as the container:
 python3.11 -m venv .venv
 .venv/bin/pip install -r requirements-dev.lock
 .venv/bin/pip install --no-deps ../../agent_gov
+.venv/bin/pip install --no-deps ../../agent_gov/libs/receipt_kernel
 .venv/bin/pip install --no-deps ../../agent_gov/libs/receipt_v1
 .venv/bin/pip install --no-deps -e .
 ```
 
 `requirements.lock` fixes the complete third-party runtime resolution,
 `requirements-build.lock` fixes the build backend resolution, and
-`AG_CONTRACT_COMMIT` fixes local AG source provenance.
+`AG_CONTRACT_COMMIT` fixes local AG source provenance. This sibling checkout is
+a development/build input, not an end-user installation requirement.
+The development wheel exposes `marginalia-server`; the end-user `marginalia`
+command is always the appliance launcher.
 
 ## Runtime and provider ownership
 
@@ -100,8 +140,8 @@ Marginalia discovers provider/model information through the daemon; its old
 local backend-switch endpoint now rejects requests instead of pretending to
 change governed execution.
 
-The supported single-process launcher starts AG and the web application with
-one aligned state root:
+The image entrypoint starts AG and the web application with one aligned state
+root. This direct form is intended for development and diagnostics:
 
 ```bash
 export MARGINALIA_DATA_ROOT="$PWD/.local-data"
@@ -124,19 +164,23 @@ also the context-manager base used by Marginalia. The launcher rejects
 conflicting `GOVERNOR_DAEMON_DIR` or `GOVERNOR_CONTEXTS_DIR` values and refuses
 any runtime mode other than `fiction`.
 
-## Container
+## Container development
 
-Container builds use qualified local AG sources rather than silently resolving
-another implementation:
+Local container builds use qualified sibling AG sources rather than silently
+resolving another implementation:
 
 ```bash
 ./start.sh
 ```
 
-`sync-deps.sh` verifies AG's current commit, stages AG and receipt-v1, and the
-Dockerfile installs the same exact third-party lock used locally. Optional
-provider overrides are available for Ollama, Claude Code, and Codex; in every
-case the provider remains configured and invoked by AG.
+`sync-deps.sh` verifies AG's current commit and stages its complete Python
+distribution plus receipt-kernel and receipt-v1. The Dockerfile installs the
+same exact third-party lock used locally and pins Codex CLI `0.146.1`.
+`./start-codex.sh`
+builds the local image, performs container-owned device login when necessary,
+and launches the development stack. Optional Ollama, Claude Code, and direct
+API-provider overrides remain development surfaces; AG remains authoritative
+in every case.
 
 ## Verification
 

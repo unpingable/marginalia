@@ -9,6 +9,7 @@ build/
 .env
 agent-governor/
 receipt-v1/
+receipt-kernel/
 
 # Claude Code local session data
 .claude/projects/

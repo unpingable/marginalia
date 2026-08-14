@@ -1,4 +1,4 @@
-name: Publish container image
+name: Publish Marginalia appliance
 
 on:
   push:
@@ -7,43 +7,92 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/phosphor
+  IMAGE_NAME: ${{ github.repository_owner }}/marginalia
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
-  build-and-push:
+  verify-build-publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Checkout phosphor
+      - name: Checkout Marginalia
         uses: actions/checkout@v4
 
-      - name: Checkout agent-governor
+      - name: Checkout the qualified Agent Governor contract
         uses: actions/checkout@v4
         with:
           repository: unpingable/agent_governor
+          ref: marginalia-chat-contract-m0
           path: _agent_gov
-          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
 
-      - name: Sync local deps into build context
+      - name: Verify immutable source contracts
+        shell: bash
         run: |
-          # Replicate what sync-deps.sh does, using _agent_gov checkout
-          rm -rf agent-governor receipt-v1
-
-          mkdir -p agent-governor/src
-          cp _agent_gov/pyproject.toml agent-governor/
-          cp _agent_gov/README.md agent-governor/
-          cp -r _agent_gov/src/governor agent-governor/src/
-
-          if [ -d _agent_gov/libs/receipt_v1/src/receipt_v1 ]; then
-            mkdir -p receipt-v1/src
-            cp _agent_gov/libs/receipt_v1/pyproject.toml receipt-v1/
-            cp -r _agent_gov/libs/receipt_v1/src/receipt_v1 receipt-v1/src/
+          set -euo pipefail
+          expected="$(tr -d '[:space:]' < AG_CONTRACT_COMMIT)"
+          actual="$(git -C _agent_gov rev-parse HEAD)"
+          test "$actual" = "$expected"
+          test -f _agent_gov/src/fiction_governor/canon_capture.py
+          test -d _agent_gov/libs/receipt_kernel/src/receipt_kernel
+          test -d _agent_gov/libs/receipt_v1/src/receipt_v1
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            package_version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+            test "${GITHUB_REF_NAME#v}" = "$package_version"
           fi
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install the exact development contract
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.lock
+          python -m pip install --no-build-isolation --no-deps ./_agent_gov
+          python -m pip install --no-build-isolation --no-deps ./_agent_gov/libs/receipt_kernel
+          python -m pip install --no-build-isolation --no-deps ./_agent_gov/libs/receipt_v1
+          python -m pip install --no-build-isolation --no-deps -e .
+
+      - name: Verify Marginalia
+        run: |
+          python -m ruff check src tests
+          MARGINALIA_AG_SOURCE_DIR="$PWD/_agent_gov" python -m pytest -q
+          python -m build --no-isolation
+
+      - name: Stage the complete qualified AG distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf agent-governor receipt-kernel receipt-v1
+          mkdir -p agent-governor receipt-kernel/src receipt-v1
+          cp _agent_gov/pyproject.toml _agent_gov/README.md agent-governor/
+          cp _agent_gov/LICENSE _agent_gov/NOTICE agent-governor/
+          cp -R _agent_gov/src agent-governor/
+          cp AG_CONTRACT_COMMIT agent-governor/
+          cp _agent_gov/libs/receipt_kernel/pyproject.toml \
+            _agent_gov/libs/receipt_kernel/README.md receipt-kernel/
+          cp -R _agent_gov/libs/receipt_kernel/src/receipt_kernel receipt-kernel/src/
+          cp _agent_gov/libs/receipt_v1/pyproject.toml receipt-v1/
+          cp -R _agent_gov/libs/receipt_v1/src receipt-v1/
           rm -rf _agent_gov
+
+      - name: Build and smoke the local appliance image
+        run: |
+          docker build --tag marginalia:ci .
+          docker run --rm --entrypoint python3 marginalia:ci -c \
+            'import fiction_governor, governor, gov_webui, receipt_kernel, receipt_v1'
+          docker run --rm --entrypoint /opt/codex/codex marginalia:ci --version
+
+      - name: Set up emulation for the arm64 appliance
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -55,7 +104,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -63,15 +112,29 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
-      - name: Build and push
+      - name: Build and publish the multi-architecture appliance
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Publish the thin launcher
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          immutable_image="${REGISTRY}/${IMAGE_NAME}@${{ steps.build.outputs.digest }}"
+          sed -i "s|^DEFAULT_IMAGE=.*|DEFAULT_IMAGE=\"${immutable_image}\"|" marginalia
+          sha256sum marginalia > marginalia.sha256
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "Marginalia $GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" marginalia marginalia.sha256 install-marginalia.sh

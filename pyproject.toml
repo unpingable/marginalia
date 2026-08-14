@@ -38,7 +38,7 @@ classifiers = [
 ]
 
 [project.scripts]
-marginalia = "gov_webui.adapter:main"
+marginalia-server = "gov_webui.adapter:main"
 
 [project.urls]
 Homepage = "https://github.com/unpingable/marginalia"

@@ -6,9 +6,7 @@ services:
       - CODEX_PATH=/app/codex-provider.sh
       - CODEX_NATIVE_PATH=/opt/codex/codex
     volumes:
-      - ${CODEX_BINARY:?Run start-codex.sh or set CODEX_BINARY to the native Codex executable}:/opt/codex/codex:ro
       - marginalia_codex_home:/root/.codex
-      - ${CODEX_AUTH_FILE:?Run start-codex.sh or set CODEX_AUTH_FILE}:/root/.codex/auth.json:ro
 
 volumes:
   marginalia_codex_home:
