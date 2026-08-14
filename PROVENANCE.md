@@ -8,6 +8,9 @@ implementation in the `gov-webui` / Governor WebUI repository at commit
 historical source, not the ongoing product architecture. Marginalia's first
 implementation slice separated provider ownership, context-scoped pending
 state, and receipt authority behind a narrow Agent Governor boundary.
+The M1 slice replaced the served donor interface with a fiction-only writing
+room and introduced the context-bound Project Brief, Collaborator Stance, and
+Voice/Style configuration.
 
 The donor commit predates the Phosphor Desk/control-plane pivot. Marginalia has
 no Constellation runtime dependency.
@@ -72,4 +75,4 @@ exhaustively reconstructed here.
 
 ---
 
-This document reflects the project state as of 2026-02-24 and may be revised.
+This document reflects the project state as of 2026-08-13 and may be revised.

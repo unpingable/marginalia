@@ -1,4 +1,4 @@
-# Marginalia architecture (M0)
+# Marginalia architecture (M1)
 
 ## Product boundary
 
@@ -7,6 +7,7 @@ browser
   │ HTTP / SSE
   ▼
 Marginalia FastAPI application
+  ├── creative project / sessions / canon / artifacts
   │ GovernedChatAdapter (one context)
   │ JSON-RPC 2.0 / Unix socket
   ▼
@@ -46,11 +47,12 @@ For `MARGINALIA_DATA_ROOT=/data` and context `erin-writing`:
 /data/.governor/                         AG daemon state / context base
 └── erin-writing/
     ├── _context.json
+    ├── marginalia/project.json          brief / stance / voice, context-bound
     ├── .governor/
     │   ├── continuity/anchors.json
     │   ├── pending_violations.json      present only while pending
     │   └── exceptions/
-    └── sessions/                        donor conversation persistence
+    └── sessions/                        conversation persistence
 ```
 
 The daemon starts with `governor --root /data`, which makes its governor
@@ -64,18 +66,30 @@ AG is authoritative. `BACKEND_TYPE`, credentials, provider host/path, and AG's
 default model configure the daemon process. Marginalia queries those values;
 it has no local `ChatBridge` and cannot switch the provider independently.
 
-## Donor code retained at M0
+## M1 product prompt path
+
+Marginalia renders the three creative-project fields into one
+`MARGINALIA_PROJECT_CONTEXT_V1` system message. That message is inserted into
+the conversation sent to `GovernedChatAdapter`; AG then performs its ordinary
+fiction augmentation, provider execution, response checks, pending-state
+handling, and authority receipt generation. Project direction does not bypass
+or compete with the governance prompt path.
+
+The project file stores its owning context ID. A mismatch is an error, and
+tests exercise both independent A/B stores and a copied-file mismatch. The live
+socket regression makes a deterministic provider respond only when all three
+fields arrive through AG, then separately proves the block/restart/resolve
+contract.
+
+## Quarantined donor code
 
 The internal package remains `gov_webui`, and `adapter.py` still includes old
-fiction, code, research, dashboard, artifact, and export routes. This avoided a
-large frontend/backend rewrite during the correctness slice. Those legacy
-non-chat routes directly use pinned AG modules and are the main remaining
-product-cleanup seam. Governed execution, pending resolution, provider state,
-and receipt authority do not use those imports.
-
-The next product slice should remove operator/research/code surfaces from the
-served application while retaining fiction canon, sessions, artifacts, and
-export. It should not broaden `GovernedChatAdapter` into a platform SDK.
+code, research, dashboard, and receipt routes. In M1 they are blocked by
+default at the application boundary and absent from product discovery. Heavy
+viewmodel/dashboard/instrument imports are conditional on the explicit donor
+test switch, so they are not runtime dependencies of the normal product path.
+The retained source and tests can be deleted incrementally; they do not justify
+broadening `GovernedChatAdapter` into a platform SDK.
 
 ## Regression boundary
 
@@ -83,6 +97,7 @@ export. It should not broaden `GovernedChatAdapter` into a platform SDK.
 deterministic no-network provider and proves:
 
 ```text
+project config → governed provider response / authority receipt
 request → block/authority receipt → context pending on disk
         → daemon restart → pending recovered
         → wrong-context resolution rejected

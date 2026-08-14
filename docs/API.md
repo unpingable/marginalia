@@ -1,116 +1,77 @@
-# API Reference
+# Marginalia M1 API
 
-Full endpoint reference for Phosphor. All endpoints return JSON unless noted.
+This is the ordinary fiction-product surface. Mutating endpoints require
+`Authorization: Bearer <token>` when `GOVERNOR_AUTH_TOKEN` is set.
 
-Auth: mutating endpoints (POST/PUT/DELETE/PATCH) require `Authorization: Bearer <token>` when `GOVERNOR_AUTH_TOKEN` is set. Read-only endpoints are always open.
+## Creative project
 
-## Chat (OpenAI-compatible)
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/project` | GET | Read the active context's project brief, collaborator stance, and voice/style guidance |
+| `/v1/project` | PUT | Atomically update all three fields, optionally with `expected_version` |
+| `/v1/project/export` | GET | Export writer-facing project direction, story bible, conversations, and draft revisions |
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v1/chat/completions` | POST | Chat completion (streaming via SSE supported) |
-| `/v1/models` | GET | List available models |
-| `/v1/backends` | GET | List backends with availability |
-| `/v1/backends/switch` | POST | Switch backend at runtime |
+The project file is context-bound. A stale update returns `409`; a file whose
+embedded context does not match the active context also fails closed.
 
-## Sessions
+## Governed conversation
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/sessions/` | GET | List all sessions |
-| `/sessions/` | POST | Create new session |
-| `/sessions/{id}` | GET | Get session with messages |
-| `/sessions/{id}` | DELETE | Delete session |
-| `/sessions/{id}` | PATCH | Update session title |
-| `/sessions/{id}/messages` | POST | Append message |
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/chat/completions` | POST | Send or stream an OpenAI-compatible governed fiction response |
+| `/v1/models` | GET | Discover models advertised by AG's configured provider |
+| `/v1/backends` | GET | Report the provider that actually owns governed execution |
+| `/v1/backends/switch` | POST | Always returns `409`; provider configuration belongs to AG |
+| `/v1/governed-chat/pending` | GET | Observe actionable pending state in the active context |
+| `/v1/governed-chat/resolve` | POST | Correct, revise a rule, or explicitly proceed in that same context |
 
-## Governor State
+Authority receipts remain part of the application/AG correctness contract but
+are not presented as ordinary writing UI.
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/governor/status` | GET | Full state + ViewModel v2 |
-| `/governor/now` | GET | Glanceable status pill |
-| `/governor/why` | GET | Decision/violation/claim feed |
-| `/governor/history` | GET | Events grouped by day |
-| `/governor/detail/{id}` | GET | Drill-down by item ID |
-| `/governor/corrections` | GET | Resolution history |
-| `/governor/export` | GET | Export all state as JSON |
-| `/governor/import` | POST | Import anchors + corrections |
+## Conversations
 
-## Fiction Mode
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/sessions/` | GET / POST | List or create conversations |
+| `/sessions/{id}` | GET / PATCH / DELETE | Read, retitle, or remove one conversation |
+| `/sessions/{id}/messages` | POST | Persist one conversation message |
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/governor/fiction/characters` | GET | List characters |
-| `/governor/fiction/characters` | POST | Add character |
-| `/governor/fiction/world-rules` | GET | List world rules |
-| `/governor/fiction/world-rules` | POST | Add world rule |
-| `/governor/fiction/forbidden` | GET | List forbidden things |
-| `/governor/fiction/forbidden` | POST | Add forbidden thing |
-| `/governor/fiction/capture/scan` | POST | Scan text for canon captures |
-| `/governor/fiction/captures` | GET | List pending captures |
-| `/governor/fiction/capture/{id}/accept` | POST | Promote capture to canon |
-| `/governor/fiction/capture/{id}/reject` | POST | Dismiss capture |
+## Story bible and canon capture
 
-## Code Mode
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/governor/fiction/characters` | GET / POST | List or add Characters |
+| `/governor/fiction/characters/{id}` | DELETE | Remove a Character |
+| `/governor/fiction/world-rules` | GET / POST | List or add World Rules |
+| `/governor/fiction/forbidden` | GET / POST | List or add negative constraints |
+| `/governor/fiction/capture/scan` | POST | Find canon candidates in a response |
+| `/governor/fiction/captures` | GET | List pending canon candidates |
+| `/governor/fiction/capture/{id}/accept` | POST | Accept a candidate into canon |
+| `/governor/fiction/capture/{id}/reject` | POST | Dismiss a candidate |
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/governor/code/decisions` | GET | List decisions |
-| `/governor/code/decisions` | POST | Add decision |
-| `/governor/code/constraints` | GET | List constraints |
-| `/governor/code/constraints` | POST | Add constraint |
-| `/governor/code/compare` | POST | Run code interferometry |
+The historical `/governor` naming is an internal package/API migration seam;
+the served product language is Story Bible and canon.
 
-## Research Mode
+## Draft artifacts
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/governor/research/state` | GET | Full research state + ED score |
-| `/governor/research/claims` | POST | Add claim |
-| `/governor/research/claims/{id}` | DELETE | Delete claim |
-| `/governor/research/claims/{id}/status` | PATCH | Update claim status |
-| `/governor/research/assumptions` | POST | Add assumption |
-| `/governor/research/assumptions/{id}` | DELETE | Delete assumption |
-| `/governor/research/assumptions/{id}/status` | PATCH | Update assumption status |
-| `/governor/research/uncertainties` | POST | Add uncertainty |
-| `/governor/research/uncertainties/{id}` | DELETE | Delete uncertainty |
-| `/governor/research/uncertainties/{id}/status` | PATCH | Update uncertainty status |
-| `/governor/research/links` | POST | Add typed link between items |
-| `/governor/research/links/{id}` | DELETE | Delete link |
-| `/governor/research/capture/scan` | POST | Scan text for claims + source refs |
-| `/governor/research/captures` | GET | List pending research captures |
-| `/governor/research/capture/{id}/accept` | POST | Promote capture to claim ledger |
-| `/governor/research/capture/{id}/reject` | POST | Dismiss capture |
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/governor/artifacts` | GET / POST | List or create drafts |
+| `/governor/artifacts/{id}` | GET / PUT / DELETE | Read, revise, or remove a draft |
+| `/governor/artifacts/{id}/version/{version}` | GET | Read a historical revision |
 
-## V2 Dashboard (Run-Centric)
+## Service information
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v2/runs` | GET/POST | List/create runs |
-| `/v2/runs/{id}` | GET | Run detail + manifest |
-| `/v2/runs/{id}/events` | GET | Events (SSE via `?stream=true`) |
-| `/v2/runs/{id}/claims` | GET | Extracted claims |
-| `/v2/runs/{id}/violations` | GET | Violations only |
-| `/v2/runs/{id}/report` | GET | Generated report |
-| `/v2/runs/{id}/cancel` | POST | Cancel active run |
-| `/v2/artifacts/{hash}` | GET | Content-addressed blob |
-| `/v2/dashboard/summary` | GET | Aggregate statistics |
-| `/v2/dashboard/regime` | GET | Current regime state |
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/` | GET | Marginalia writing room |
+| `/health` | GET | AG contract and provider readiness |
+| `/api/info` | GET | Product identity and reachable product endpoints |
 
-## Intent Compiler
+## Quarantined donor routes
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v2/intent/templates` | GET | List form templates |
-| `/v2/intent/schema/{name}` | GET | Build form schema for current mode |
-| `/v2/intent/validate` | POST | Validate response against schema |
-| `/v2/intent/compile` | POST | Compile to intent + constraints (emits receipt) |
-| `/v2/intent/policy` | GET | Current form policy |
-
-## Health
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Backend + governor connectivity |
-| `/api/info` | GET | Version, endpoints, capabilities |
+Old code-builder, research, dashboard, intent-compiler, raw-receipt, and generic
+administration routes remain in source only to keep their historical tests
+available during staged deletion. They return `404` in a normal Marginalia
+runtime and are omitted from `/api/info`. The test-only
+`MARGINALIA_ENABLE_DONOR_ROUTES=1` switch is not a supported product mode.

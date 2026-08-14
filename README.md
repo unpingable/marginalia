@@ -11,7 +11,7 @@ Marginalia → GovernedChatAdapter → Agent Governor daemon → model provider
 No NQ, Nightshift, Monitor, Maude, Desk, qualification service, or Phosphor
 control-plane service is required.
 
-## M0 status
+## M1 status
 
 This repository was extracted from the last useful pre-Desk governed-chat
 state of `gov-webui` at commit
@@ -20,15 +20,38 @@ still named `gov_webui` to keep the correctness slice reviewable; the
 distribution, command, repository, UI title, runtime, and container are named
 Marginalia.
 
-M0 establishes and tests one trustworthy invariant:
+M0 established and tested one trustworthy invariant:
 
 > A governed response can be blocked in one chat context, remain durably
 > pending through a daemon restart, be observed and resolved only in that
 > context, and retain authoritative AG receipt linkage.
 
-The donor UI still contains legacy code/research/operator surfaces. They are
-not the Marginalia product direction and will be removed or simplified in a
-later product-focused slice. They are not dependencies of governed chat.
+M1 replaces the served donor UI with a fiction-only writing room. The ordinary
+product includes conversations, project direction, Characters, World Rules,
+negative constraints, canon suggestions, versioned drafts, project export, and
+actionable governed blocking. It contains no model switcher, raw receipt strip,
+research dashboard, code builder, intent compiler, or operator console.
+
+Historical donor endpoints and tests remain temporarily in `adapter.py` to
+avoid making this product slice a broad backend rewrite. They are unreachable
+by default, omitted from `/api/info`, and their heavy operator imports are not
+loaded by the product path. `MARGINALIA_ENABLE_DONOR_ROUTES=1` exists only for
+the retained compatibility suite and is not a supported product mode.
+
+## Creative project direction
+
+Each fiction context has one small persisted configuration:
+
+- Project Brief
+- Collaborator Stance
+- Voice and Style Guidance
+
+It is stored at
+`<governor-context-root>/marginalia/project.json`, embeds its owning context ID,
+and fails closed if copied into another context. Marginalia injects one
+versioned project-context system message into the same message list sent
+through `GovernedChatAdapter`; AG governs the resulting provider response in
+the normal way. There is no second provider call or prompt stack.
 
 ## Qualified AG contract
 
@@ -36,6 +59,7 @@ Marginalia requires Python 3.11 or newer and is pinned to:
 
 - `agent-governor==2.8.1`
 - AG commit `e279a94326a0a13dbe43473846b53e4c3a9b31f2`
+- published annotated tag `marginalia-chat-contract-m0`
 - `receipt-v1==0.1.0` from that AG checkout
 - governed-chat daemon contract version `1`
 
@@ -97,7 +121,8 @@ uvicorn gov_webui.adapter:app --host 0.0.0.0 --port 8000
 
 AG's state directory is `$MARGINALIA_DATA_ROOT/.governor`. That exact path is
 also the context-manager base used by Marginalia. The launcher rejects
-conflicting `GOVERNOR_DAEMON_DIR` or `GOVERNOR_CONTEXTS_DIR` values.
+conflicting `GOVERNOR_DAEMON_DIR` or `GOVERNOR_CONTEXTS_DIR` values and refuses
+any runtime mode other than `fiction`.
 
 ## Container
 
@@ -139,8 +164,10 @@ Marginalia currently consumes these application-facing AG operations:
 - retrieve an authoritative receipt and its evidence by stable ID.
 
 The browser does not mint a second governed-execution receipt and does not show
-raw hashes as ordinary writing UX. AG evidence remains available behind the
-application boundary for correctness and diagnostics.
+raw hashes as ordinary writing UX. It surfaces governance only when a response
+is blocked and the writer must correct it, revise a rule, or allow one explicit
+exception. AG evidence remains available behind the application boundary for
+correctness and diagnostics.
 
 ## Provenance and license
 
