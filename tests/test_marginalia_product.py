@@ -127,12 +127,31 @@ def test_product_api_info_lists_only_writing_surfaces(product_client) -> None:
     endpoints = client.get("/api/info").json()["endpoints"]
 
     assert endpoints["project"] == "/v1/project"
+    assert endpoints["markdown"] == "/v1/markdown"
     assert endpoints["fiction_characters"] == "/governor/fiction/characters"
     assert endpoints["artifacts"] == "/governor/artifacts"
     assert not any(key.startswith("v2_") for key in endpoints)
     assert "code_decisions" not in endpoints
     assert "research_state" not in endpoints
     assert "governor_ui" not in endpoints
+
+
+def test_conversation_surface_renders_assistant_markdown(product_client) -> None:
+    client, _ = product_client
+    response = client.post(
+        "/v1/markdown",
+        json={"content": "## Shuffle All\n\nIt is *almost* inevitable."},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["html"] == (
+        "<h2>Shuffle All</h2>\n"
+        "<p>It is <em>almost</em> inevitable.</p>\n"
+    )
+
+    shell = client.get("/").text
+    assert 'api("/v1/markdown"' in shell
+    assert "renderAssistantMarkdown(body, content)" in shell
 
 
 def test_runtime_entrypoint_refuses_nonfiction_mode(tmp_path: Path) -> None:

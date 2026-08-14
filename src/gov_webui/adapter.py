@@ -53,6 +53,7 @@ from gov_webui.creative_project import (
     render_project_context,
 )
 from gov_webui.governed_chat_adapter import GovernedChatAdapter
+from gov_webui.markdown import render_writer_markdown
 from governor.context_manager import GovernorContextManager
 from governor.session_store import SessionMessage, SessionStore
 
@@ -159,6 +160,7 @@ _PRODUCT_EXACT_PATHS = {
     "/health",
     "/api/info",
     "/v1/models",
+    "/v1/markdown",
     "/v1/backends",
     "/v1/backends/switch",
     "/v1/chat/completions",
@@ -282,6 +284,12 @@ class CreativeProjectUpdateRequest(BaseModel):
     expected_version: int | None = Field(default=None, ge=1)
 
 
+class MarkdownRenderRequest(BaseModel):
+    """Writer-visible Markdown, bounded like other project text fields."""
+
+    content: str = Field(max_length=200_000)
+
+
 # ============================================================================
 # Bridge setup (lazy init on first request)
 # ============================================================================
@@ -390,6 +398,12 @@ async def get_model(model_id: str) -> ModelInfo:
     """Get info about a specific model."""
     provider = await _get_governed_chat_adapter().provider()
     return ModelInfo(id=model_id, owned_by=provider.get("type", "daemon"))
+
+
+@app.post("/v1/markdown")
+async def render_markdown(request: MarkdownRenderRequest) -> dict[str, str]:
+    """Render inert writer Markdown for the conversation surface."""
+    return {"html": render_writer_markdown(request.content)}
 
 
 # ============================================================================
@@ -3321,6 +3335,7 @@ async def api_info() -> dict[str, Any]:
     endpoints = {
         "ui": "/",
         "models": "/v1/models",
+        "markdown": "/v1/markdown",
         "chat": "/v1/chat/completions",
         "backends": "/v1/backends",
         "governed_chat_pending": "/v1/governed-chat/pending",

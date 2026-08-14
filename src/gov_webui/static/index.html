@@ -143,7 +143,51 @@
       padding: 13px 16px;
       font: 15px/1.55 var(--sans);
     }
-    .message.assistant .message-body { font: 17px/1.72 var(--serif); white-space: pre-wrap; }
+    .message.assistant .message-body { font: 17px/1.72 var(--serif); }
+    .message.assistant .message-body > :first-child { margin-top: 0; }
+    .message.assistant .message-body > :last-child { margin-bottom: 0; }
+    .message.assistant .message-body p { margin: 0 0 1em; }
+    .message.assistant .message-body h1,
+    .message.assistant .message-body h2,
+    .message.assistant .message-body h3,
+    .message.assistant .message-body h4 {
+      margin: 1.35em 0 .55em;
+      font-family: var(--serif);
+      line-height: 1.18;
+      letter-spacing: -.01em;
+    }
+    .message.assistant .message-body h1 { font-size: 1.65em; }
+    .message.assistant .message-body h2 { font-size: 1.42em; }
+    .message.assistant .message-body h3 { font-size: 1.18em; }
+    .message.assistant .message-body h4 { font-size: 1em; }
+    .message.assistant .message-body ul,
+    .message.assistant .message-body ol { margin: .4em 0 1em; padding-left: 1.45em; }
+    .message.assistant .message-body li { margin: .25em 0; padding-left: .15em; }
+    .message.assistant .message-body blockquote {
+      margin: .9em 0 1em;
+      padding: .1em 0 .1em 1em;
+      border-left: 3px solid var(--line);
+      color: #575149;
+      font-style: italic;
+    }
+    .message.assistant .message-body code {
+      padding: .08em .28em;
+      border-radius: 4px;
+      background: var(--paper);
+      font: .82em/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    .message.assistant .message-body pre {
+      overflow-x: auto;
+      margin: .8em 0 1em;
+      padding: .85em 1em;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper);
+    }
+    .message.assistant .message-body pre code { padding: 0; background: transparent; }
+    .message.assistant .message-body a { color: var(--accent); text-underline-offset: 2px; }
+    .message.assistant .message-body hr { margin: 1.4em 0; border: 0; border-top: 1px solid var(--line); }
+    .message.assistant .message-body.thinking p { margin: 0; }
     .message-actions { display: flex; gap: 8px; margin-top: 10px; }
     .text-button { border: 0; background: none; padding: 3px 0; color: var(--muted); font-size: 11px; }
     .text-button:hover { color: var(--accent); }
@@ -452,7 +496,9 @@
       try {
         const [models, backends] = await Promise.all([api("/v1/models"), api("/v1/backends")]);
         state.model = models.data?.[0]?.id || "";
-        const label = state.model || backends.active || "Ready";
+        const label = state.model === "codex-default"
+          ? "Codex"
+          : (state.model || backends.active || "Ready");
         $("#provider-name").textContent = label;
         $("#provider-dot").classList.toggle("offline", !backends.connected);
       } catch (_) {
@@ -575,6 +621,7 @@
       const body = document.createElement("div");
       body.className = "message-body";
       body.textContent = content;
+      if (role === "assistant" && content) void renderAssistantMarkdown(body, content);
       wrapper.append(label, body);
       if (role === "assistant" && content) {
         const actions = document.createElement("div");
@@ -589,6 +636,18 @@
       $("#messages").append(wrapper);
       $("#messages").scrollTop = $("#messages").scrollHeight;
       return wrapper;
+    }
+
+    async function renderAssistantMarkdown(body, content) {
+      try {
+        const rendered = await api("/v1/markdown", {
+          method: "POST",
+          body: JSON.stringify({content}),
+        });
+        if (body.isConnected) body.innerHTML = rendered.html;
+      } catch (_) {
+        // Plain text is already present and remains the safe failure mode.
+      }
     }
 
     async function appendSessionMessage(role, content, model = null) {
