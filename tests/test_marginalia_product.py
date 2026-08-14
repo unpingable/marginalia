@@ -68,6 +68,37 @@ def test_root_is_an_intentional_marginalia_writing_shell(product_client) -> None
         assert donor_term not in response.text
 
 
+def test_codex_provider_wrapper_delegates_default_model_to_cli(tmp_path: Path) -> None:
+    native = tmp_path / "codex-native"
+    native.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
+    native.chmod(0o755)
+    environment = os.environ.copy()
+    environment["CODEX_NATIVE_PATH"] = str(native)
+
+    result = subprocess.run(
+        [
+            str(REPO_ROOT / "codex-provider.sh"),
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "-m",
+            "codex-default",
+            "-",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.splitlines() == [
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "-",
+    ]
+
+
 @pytest.mark.parametrize(
     "path",
     [

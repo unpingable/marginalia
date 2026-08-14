@@ -3,7 +3,12 @@ services:
   marginalia:
     environment:
       - BACKEND_TYPE=codex
-      - CODEX_PATH=/opt/codex/codex
+      - CODEX_PATH=/app/codex-provider.sh
+      - CODEX_NATIVE_PATH=/opt/codex/codex
     volumes:
-      - ${REAL_HOME:-${HOME}}/.nvm/versions/node/${NODE_VERSION:-v24.13.0}/lib/node_modules/@openai/codex/vendor/${ARCH:-x86_64-unknown-linux-musl}/codex/codex:/opt/codex/codex:ro
-      - ${REAL_HOME:-${HOME}}/.codex:/root/.codex:ro
+      - ${CODEX_BINARY:?Run start-codex.sh or set CODEX_BINARY to the native Codex executable}:/opt/codex/codex:ro
+      - marginalia_codex_home:/root/.codex
+      - ${CODEX_AUTH_FILE:?Run start-codex.sh or set CODEX_AUTH_FILE}:/root/.codex/auth.json:ro
+
+volumes:
+  marginalia_codex_home:

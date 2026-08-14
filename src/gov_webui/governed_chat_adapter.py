@@ -22,6 +22,7 @@ class GovernedChatAdapter:
     """Narrow, context-bound interface from Marginalia to AG."""
 
     CONTRACT_VERSION = "1"
+    CODEX_DEFAULT_MODEL = "codex-default"
 
     def __init__(
         self,
@@ -85,6 +86,12 @@ class GovernedChatAdapter:
     async def models(self) -> list[dict[str, str]]:
         """Return models advertised by AG's configured provider."""
         await self._ensure_contract()
+        provider = await self._client.chat_backend()
+        if provider.get("type") == "codex":
+            # Codex model availability is account- and CLI-version-specific.
+            # Delegate selection to the authenticated CLI instead of exposing
+            # AG's historical hard-coded o3/o4-mini catalog.
+            return [{"id": self.CODEX_DEFAULT_MODEL, "owned_by": "codex"}]
         return await self._client.chat_models()
 
     async def receipt_detail(self, receipt_id: str) -> dict[str, Any]:

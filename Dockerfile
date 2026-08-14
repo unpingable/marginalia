@@ -26,9 +26,11 @@ RUN pip install --no-cache-dir --no-build-isolation --no-deps .
 
 RUN python3 -c "import importlib.metadata as m; import governor, receipt_v1, gov_webui; assert m.version('agent-governor') == '2.8.1'; assert m.version('marginalia') == '0.1.0'"
 
-# Entrypoint script: start governor daemon, then uvicorn
+# Entrypoints: normalize the subscription-backed Codex provider, then start
+# governor and uvicorn with one state root.
+COPY codex-provider.sh /app/codex-provider.sh
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+RUN chmod +x /app/codex-provider.sh /app/entrypoint.sh
 
 # Expose port
 EXPOSE 8000
