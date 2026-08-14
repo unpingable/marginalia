@@ -1,0 +1,159 @@
+{
+  "schema": "marginalia.creative-project-export/v1",
+  "exported_at": "2026-08-14T04:04:45Z",
+  "project": {
+    "project_brief": "A literary mystery about a municipal archive whose clocks erase one memory at midnight.",
+    "collaborator_stance": "Act as a continuity-conscious developmental collaborator. Propose durable facts; never treat them as accepted canon without my approval.",
+    "voice_style_guidance": "Close third person, precise physical detail, dry humor, restrained dialogue, and no ornamental metaphors."
+  },
+  "story_bible": {
+    "characters": [
+      {
+        "id": "char-nadia-quill",
+        "name": "Nadia Quill",
+        "description": "Appearance: The night archivist who hears erased memories as clockwork.; Voice: Exact, dry, and reluctant to explain herself.",
+        "wont": "Nadia Quill wouldn't: destroy an original record"
+      },
+      {
+        "id": "char-elias-wren",
+        "name": "Elias Wren",
+        "description": "Appearance: A retired horologist who distrusts digital clocks.; Voice: Distinct and understated.",
+        "wont": "Elias Wren wouldn't: lie about the archive fire"
+      },
+      {
+        "id": "char-june-mercer",
+        "name": "June Mercer",
+        "description": "Appearance: The deputy mayor who funded the archive restoration.; Voice: Distinct and understated.",
+        "wont": "June Mercer wouldn't: lie about the archive fire"
+      },
+      {
+        "id": "char-tomas-grey",
+        "name": "Tomas Grey",
+        "description": "Appearance: A courier who remembers deliveries nobody made.; Voice: Distinct and understated.",
+        "wont": "Tomas Grey wouldn't: lie about the archive fire"
+      },
+      {
+        "id": "char-priya-sen",
+        "name": "Priya Sen",
+        "description": "Appearance: A conservator cataloguing the building's sealed rooms.; Voice: Distinct and understated.",
+        "wont": "Priya Sen wouldn't: lie about the archive fire"
+      },
+      {
+        "id": "char-milo-north",
+        "name": "Milo North",
+        "description": "Appearance: The overnight guard and an incurable gossip.; Voice: Distinct and understated.",
+        "wont": "Milo North wouldn't: lie about the archive fire"
+      }
+    ],
+    "world_rules": [
+      {
+        "id": "world-1",
+        "rule": "At midnight, one archive clock erases a witnessed memory."
+      },
+      {
+        "id": "world-2",
+        "rule": "Paper records retain traces that digital copies lose."
+      },
+      {
+        "id": "world-3",
+        "rule": "No clock in the archive shows the same time twice."
+      },
+      {
+        "id": "world-4",
+        "rule": "A recovered memory always belongs partly to someone else."
+      }
+    ],
+    "negative_constraints": [
+      {
+        "id": "forbid-1",
+        "description": "Nadia never destroys an original record.",
+        "patterns": [
+          "destroy the original",
+          "burn the ledger"
+        ]
+      },
+      {
+        "id": "forbid-2",
+        "description": "The archive cannot solve a problem through time travel.",
+        "patterns": [
+          "time travel",
+          "go back in time"
+        ]
+      },
+      {
+        "id": "forbid-3",
+        "description": "The clocks never speak in a human voice.",
+        "patterns": [
+          "the clock said",
+          "the clock whispered"
+        ]
+      },
+      {
+        "id": "forbid-4",
+        "description": "The mystery cannot be dismissed as a dream.",
+        "patterns": [
+          "it was all a dream",
+          "just a dream"
+        ]
+      }
+    ]
+  },
+  "conversations": [
+    {
+      "id": "ad72ca450557474d",
+      "context_id": "m1-5-acceptance",
+      "title": "Write an 800-word opening scene for this project. Us",
+      "created_at": "2026-08-14T04:03:49.530999+00:00",
+      "updated_at": "2026-08-14T04:04:42.865033+00:00",
+      "model": "codex-default",
+      "message_count": 4,
+      "messages": [
+        {
+          "id": "7d29a4208e76",
+          "role": "user",
+          "content": "Write an 800-word opening scene for this project. Use the Markdown heading `## The Archive Clock`, include the phrase `*almost remembered*` in italics, and make the warning **YOUR MEMORY IS SYNCING** bold. Use several short paragraphs and one brief blockquote from an archive notice. Do not add or propose any story-bible entries in this response.",
+          "timestamp": "2026-08-14T04:03:49.620383+00:00"
+        },
+        {
+          "id": "d7ea3076dc21",
+          "role": "assistant",
+          "content": "## The Archive Clock\n\nAt eleven forty-three, Mara Venn found a tooth in the municipal archive’s clock.\n\nIt lay behind the glass face, balanced on the brass ledge beneath the numeral seven. A human molar, yellow at the root. The clock continued to tick with the deliberate confidence of machinery maintained by someone else.\n\nMara set down her keys.\n\nThe reading room was empty. Six green lamps lit the long tables. Rain pressed faint fingerprints against the high windows, and the radiators knocked in the walls. On the returns desk, a cardboard box held twelve property ledgers, three maps of obsolete drains, and a jar of buttons confiscated from a councillor in 1968.\n\nShe unlocked the clock case.\n\nThe archive had forty-seven clocks, though only this one was listed as a building fixture. The rest had arrived in donations, police transfers, and one mayoral bequest nobody had wanted to question. They disagreed by up to nine minutes. At midnight, they agreed.\n\nMara disliked that fact.\n\nShe lifted the glass. The clock smelled of warm dust and oil. Its pendulum swung behind a small iron plate stamped WARD & SONS, 1902. The tooth sat where no tooth had been at six o’clock, when she had wound the mechanism.\n\nShe knew this because she inspected the clock every evening.\n\nShe also knew she had never told anyone that.\n\nThe service door opened behind her.\n\nMr. Vale entered carrying two paper cups and wearing his outdoor hat, a narrow felt object that made his head look officially sealed. He supervised building operations at night, which meant he checked doors already locked by other people.\n\n“You’re touching it,” he said.\n\n“There’s a tooth inside.”\n\n“That isn’t improved by touching.”\n\nHe put one cup beside her keys. Coffee had leaked through the lid and made a brown ring around his thumb.\n\nMara pointed. “Was maintenance here?”\n\n“Maintenance considers us a historical rumour.”\n\nHe leaned close to the clock without removing his hat. His breath briefly clouded the glass. “Whose is it?”\n\n“I haven’t asked.”\n\n“Good. Teeth can be defensive.”\n\nAt eleven forty-seven, a printer started in the catalogue room.\n\nNeither of them moved.\n\nThe archive’s printers were shut down at ten. Mara had done it herself, walking from room to room with a clipboard. She could picture the ticks beside each machine, but not the act of making them. The image had the flat certainty of a receipt.\n\nThe printer stopped.\n\nVale looked at the clock. “Three pages.”\n\n“You counted?”\n\n“I count noises when I’m frightened. It gives them administrative value.”\n\nMara crossed the reading room. The catalogue room door stood open by the width of her hand. Beyond it, the terminal screens were black.\n\nThree sheets waited in the printer tray.\n\nThe first was headed MUNICIPAL ARCHIVE: TEMPORAL SYSTEM NOTICE. Beneath it, in heavy type, was the warning:\n\n**YOUR MEMORY IS SYNCING**\n\nThe second sheet was blank.\n\nThe third contained a single paragraph.\n\n> Do not remain in the building during correction. If departure is impossible, write down one fact you cannot afford to lose.\n\nMara read it twice. The paper was warm.\n\n“Correction,” Vale said from behind her. “Cheerful word.”\n\nThe clock in the reading room struck the quarter hour.\n\nEvery other clock answered.\n\nFrom the stack rooms came a clutter of bells, chimes, electric buzzers, and one small brass cuckoo whose door had been nailed shut since 1989. The sound passed through the building in uneven waves. Somewhere below, in Conservation, a clock coughed.\n\nMara checked her wristwatch. Eleven fifty-two.\n\n“That was early,” she said.\n\nVale took the notice from her. “Or we are.”\n\nOn the terminal nearest the door, white letters appeared against the black screen.\n\n00:07:31\n\nThe number began counting down.\n\nMara reached for the keyboard. The keys were cold and slightly greasy. She pressed Escape. Nothing happened. She pressed the power button until her finger hurt. The display continued.\n\n00:07:18\n\nBehind them, a drawer opened.\n\nIt was drawer C-19 in the old card catalogue, one of six thousand oak compartments retired before Mara was born. It extended slowly, without a hand on it, and stopped with a wooden click.\n\nInside was a single index card.\n\nMara removed it.\n\nThe card bore her name in blue type: VENN, MARA ELISE. Below that was her employee number, appointment date, and security clearance. All correct.\n\nAt the bottom, someone had written in pencil:\n\nASK ABOUT THE TOOTH BEFORE MIDNIGHT.\n\nThe handwriting was hers.\n\nFor a moment, she *almost remembered* writing it. Not the room or the pencil, only the pressure in her fingers and the irritation of a point gone blunt. Then the sensation closed.\n\nVale read over her shoulder.\n\n“You should ask,” he said.\n\nMara looked toward the reading room. The clock’s minute hand had advanced to eleven fifty-nine.\n\nBehind its glass, the tooth was gone.\n\nSomething hard moved under Mara’s tongue.",
+          "timestamp": "2026-08-14T04:04:33.113984+00:00",
+          "model": "codex-default"
+        },
+        {
+          "id": "3eb114ed57bb",
+          "role": "user",
+          "content": "Please add a new character named Orla Finch to the story bible. She is a retired radio engineer who can hear the archive clocks through disconnected speakers. Her voice is brisk, practical, and unexpectedly tender. She would never surrender a recording to the mayor. If you cannot directly change the story bible, make this a clear proposal and include a line beginning `Character:`.",
+          "timestamp": "2026-08-14T04:04:36.298497+00:00"
+        },
+        {
+          "id": "9cb71d0e2132",
+          "role": "assistant",
+          "content": "Character: Orla Finch — a retired radio engineer who can hear the archive clocks through disconnected speakers. Her voice is brisk, practical, and unexpectedly tender. She would never surrender a recording to the mayor.\n\nProposed story-bible entry for your approval; I can’t directly modify the bible here.",
+          "timestamp": "2026-08-14T04:04:42.864842+00:00",
+          "model": "codex-default"
+        }
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "62b91ce322e9",
+      "title": "Archive Clock — opening",
+      "kind": "markdown",
+      "language": "",
+      "current_version": 1,
+      "created_at": "2026-08-14T04:04:34.234468+00:00",
+      "updated_at": "2026-08-14T04:04:34.234468+00:00",
+      "revisions": [
+        {
+          "version": 1,
+          "created_at": "2026-08-14T04:04:34.234468+00:00",
+          "source": "promote",
+          "content": "## The Archive Clock\n\nAt eleven forty-three, Mara Venn found a tooth in the municipal archive’s clock.\n\nIt lay behind the glass face, balanced on the brass ledge beneath the numeral seven. A human molar, yellow at the root. The clock continued to tick with the deliberate confidence of machinery maintained by someone else.\n\nMara set down her keys.\n\nThe reading room was empty. Six green lamps lit the long tables. Rain pressed faint fingerprints against the high windows, and the radiators knocked in the walls. On the returns desk, a cardboard box held twelve property ledgers, three maps of obsolete drains, and a jar of buttons confiscated from a councillor in 1968.\n\nShe unlocked the clock case.\n\nThe archive had forty-seven clocks, though only this one was listed as a building fixture. The rest had arrived in donations, police transfers, and one mayoral bequest nobody had wanted to question. They disagreed by up to nine minutes. At midnight, they agreed.\n\nMara disliked that fact.\n\nShe lifted the glass. The clock smelled of warm dust and oil. Its pendulum swung behind a small iron plate stamped WARD & SONS, 1902. The tooth sat where no tooth had been at six o’clock, when she had wound the mechanism.\n\nShe knew this because she inspected the clock every evening.\n\nShe also knew she had never told anyone that.\n\nThe service door opened behind her.\n\nMr. Vale entered carrying two paper cups and wearing his outdoor hat, a narrow felt object that made his head look officially sealed. He supervised building operations at night, which meant he checked doors already locked by other people.\n\n“You’re touching it,” he said.\n\n“There’s a tooth inside.”\n\n“That isn’t improved by touching.”\n\nHe put one cup beside her keys. Coffee had leaked through the lid and made a brown ring around his thumb.\n\nMara pointed. “Was maintenance here?”\n\n“Maintenance considers us a historical rumour.”\n\nHe leaned close to the clock without removing his hat. His breath briefly clouded the glass. “Whose is it?”\n\n“I haven’t asked.”\n\n“Good. Teeth can be defensive.”\n\nAt eleven forty-seven, a printer started in the catalogue room.\n\nNeither of them moved.\n\nThe archive’s printers were shut down at ten. Mara had done it herself, walking from room to room with a clipboard. She could picture the ticks beside each machine, but not the act of making them. The image had the flat certainty of a receipt.\n\nThe printer stopped.\n\nVale looked at the clock. “Three pages.”\n\n“You counted?”\n\n“I count noises when I’m frightened. It gives them administrative value.”\n\nMara crossed the reading room. The catalogue room door stood open by the width of her hand. Beyond it, the terminal screens were black.\n\nThree sheets waited in the printer tray.\n\nThe first was headed MUNICIPAL ARCHIVE: TEMPORAL SYSTEM NOTICE. Beneath it, in heavy type, was the warning:\n\n**YOUR MEMORY IS SYNCING**\n\nThe second sheet was blank.\n\nThe third contained a single paragraph.\n\n> Do not remain in the building during correction. If departure is impossible, write down one fact you cannot afford to lose.\n\nMara read it twice. The paper was warm.\n\n“Correction,” Vale said from behind her. “Cheerful word.”\n\nThe clock in the reading room struck the quarter hour.\n\nEvery other clock answered.\n\nFrom the stack rooms came a clutter of bells, chimes, electric buzzers, and one small brass cuckoo whose door had been nailed shut since 1989. The sound passed through the building in uneven waves. Somewhere below, in Conservation, a clock coughed.\n\nMara checked her wristwatch. Eleven fifty-two.\n\n“That was early,” she said.\n\nVale took the notice from her. “Or we are.”\n\nOn the terminal nearest the door, white letters appeared against the black screen.\n\n00:07:31\n\nThe number began counting down.\n\nMara reached for the keyboard. The keys were cold and slightly greasy. She pressed Escape. Nothing happened. She pressed the power button until her finger hurt. The display continued.\n\n00:07:18\n\nBehind them, a drawer opened.\n\nIt was drawer C-19 in the old card catalogue, one of six thousand oak compartments retired before Mara was born. It extended slowly, without a hand on it, and stopped with a wooden click.\n\nInside was a single index card.\n\nMara removed it.\n\nThe card bore her name in blue type: VENN, MARA ELISE. Below that was her employee number, appointment date, and security clearance. All correct.\n\nAt the bottom, someone had written in pencil:\n\nASK ABOUT THE TOOTH BEFORE MIDNIGHT.\n\nThe handwriting was hers.\n\nFor a moment, she *almost remembered* writing it. Not the room or the pencil, only the pressure in her fingers and the irritation of a point gone blunt. Then the sensation closed.\n\nVale read over her shoulder.\n\n“You should ask,” he said.\n\nMara looked toward the reading room. The clock’s minute hand had advanced to eleven fifty-nine.\n\nBehind its glass, the tooth was gone.\n\nSomething hard moved under Mara’s tongue."
+        }
+      ]
+    }
+  ]
+}

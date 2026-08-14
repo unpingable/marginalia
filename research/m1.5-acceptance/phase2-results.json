@@ -1,0 +1,138 @@
+{
+  "phase": "browser acceptance after container restart",
+  "started_at": "2026-08-14T04:12:48.896Z",
+  "base_url": "http://localhost:8011",
+  "checks": [
+    {
+      "name": "project direction survives container restart",
+      "passed": true,
+      "details": {
+        "brief": "A literary mystery about a municipal archive whose clocks erase one memory at midnight.",
+        "stance": "Act as a continuity-conscious developmental collaborator. Propose durable facts; never treat them as accepted canon without my approval.",
+        "voice": "Close third person, precise physical detail, dry humor, restrained dialogue, and no ornamental metaphors."
+      }
+    },
+    {
+      "name": "conversation survives container restart",
+      "passed": true,
+      "details": {
+        "session_count": 1,
+        "title": "Write an 800-word opening scene for this project. Us"
+      }
+    },
+    {
+      "name": "conversation messages and rendered Markdown survive restart",
+      "passed": true,
+      "details": {
+        "user_messages": 2,
+        "assistant_messages": 2,
+        "headings": 1,
+        "emphasis": 1,
+        "strong": 1
+      }
+    },
+    {
+      "name": "accepted Story bible state survives restart",
+      "passed": true,
+      "details": {
+        "characters": 6,
+        "rules": 4,
+        "boundaries": 4
+      }
+    },
+    {
+      "name": "saved draft and revision survive restart",
+      "passed": true,
+      "details": {
+        "count": 1,
+        "title": "Archive Clock — opening",
+        "content_has_heading": true,
+        "revision_options": 1
+      }
+    },
+    {
+      "name": "runtime canon scanner is available",
+      "passed": false,
+      "details": {
+        "status": 200,
+        "body": {
+          "captures": [],
+          "error": "Canon capture classifier not available."
+        }
+      }
+    },
+    {
+      "name": "compact layout offers an unambiguous Story bible/project control",
+      "passed": false,
+      "details": {
+        "workspace_visible": false,
+        "candidate_openers": [
+          {
+            "text": "Write an 800-word opening scene for this project. Us",
+            "id": "",
+            "class_name": "session",
+            "rect": {
+              "x": 12,
+              "y": 196,
+              "width": 185,
+              "height": 40
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "console_errors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ],
+  "failed_responses": [],
+  "observations": {
+    "project_direction": {
+      "brief": "A literary mystery about a municipal archive whose clocks erase one memory at midnight.",
+      "stance": "Act as a continuity-conscious developmental collaborator. Propose durable facts; never treat them as accepted canon without my approval.",
+      "voice": "Close third person, precise physical detail, dry humor, restrained dialogue, and no ornamental metaphors."
+    },
+    "chat": {
+      "user_messages": 2,
+      "assistant_messages": 2,
+      "headings": 1,
+      "emphasis": 1,
+      "strong": 1
+    },
+    "story_bible": {
+      "characters": 6,
+      "rules": 4,
+      "boundaries": 4
+    },
+    "draft": {
+      "count": 1,
+      "title": "Archive Clock — opening",
+      "content_has_heading": true,
+      "revision_options": 1
+    },
+    "canon_scanner": {
+      "status": 200,
+      "body": {
+        "captures": [],
+        "error": "Canon capture classifier not available."
+      }
+    },
+    "compact_layout": {
+      "workspace_visible": false,
+      "candidate_openers": [
+        {
+          "text": "Write an 800-word opening scene for this project. Us",
+          "id": "",
+          "class_name": "session",
+          "rect": {
+            "x": 12,
+            "y": 196,
+            "width": 185,
+            "height": 40
+          }
+        }
+      ]
+    }
+  },
+  "finished_at": "2026-08-14T04:12:55.106Z"
+}

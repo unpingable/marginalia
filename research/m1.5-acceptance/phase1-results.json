@@ -1,0 +1,224 @@
+{
+  "phase": "browser acceptance before restart",
+  "started_at": "2026-08-14T04:03:47.066Z",
+  "base_url": "http://localhost:8011",
+  "viewport": {
+    "width": 1440,
+    "height": 1000
+  },
+  "checks": [
+    {
+      "name": "intentional empty state",
+      "passed": true,
+      "details": {}
+    },
+    {
+      "name": "no operator vocabulary on landing page",
+      "passed": true,
+      "details": {}
+    },
+    {
+      "name": "project settings has one save action",
+      "passed": true,
+      "details": {
+        "save_button_count": 1
+      }
+    },
+    {
+      "name": "project direction saves through ordinary UI",
+      "passed": true,
+      "details": {}
+    },
+    {
+      "name": "conversation can be created and opened",
+      "passed": true,
+      "details": {}
+    },
+    {
+      "name": "fiction response generated",
+      "passed": true,
+      "details": {
+        "characters": 4869
+      }
+    },
+    {
+      "name": "Markdown heading rendered",
+      "passed": true,
+      "details": {}
+    },
+    {
+      "name": "Markdown emphasis rendered",
+      "passed": true,
+      "details": {}
+    },
+    {
+      "name": "Markdown strong text rendered",
+      "passed": true,
+      "details": {}
+    },
+    {
+      "name": "composer remains visible after long response",
+      "passed": true,
+      "details": {
+        "viewport_height": 1000,
+        "composer_top": 796,
+        "composer_bottom": 1000,
+        "prompt_height": 131,
+        "message_scroll_height": 3924,
+        "message_client_height": 724,
+        "send_visible": true
+      }
+    },
+    {
+      "name": "Save as draft creates an editable draft",
+      "passed": true,
+      "details": {}
+    },
+    {
+      "name": "manual character appears in Story bible",
+      "passed": true,
+      "details": {}
+    },
+    {
+      "name": "populated Story bible does not overflow horizontally",
+      "passed": true,
+      "details": {
+        "client_height": 889,
+        "scroll_height": 1553,
+        "client_width": 329,
+        "scroll_width": 329
+      }
+    },
+    {
+      "name": "chat cannot silently mutate Story bible",
+      "passed": true,
+      "details": {
+        "character_count_before": 6,
+        "character_count_after": 6,
+        "suggestion_visible": false,
+        "suggestion_count": 0,
+        "actions": []
+      }
+    },
+    {
+      "name": "chat produces a reviewable canon proposal",
+      "passed": false,
+      "details": {
+        "character_count_before": 6,
+        "character_count_after": 6,
+        "suggestion_visible": false,
+        "suggestion_count": 0,
+        "actions": []
+      }
+    },
+    {
+      "name": "canon proposal offers edit before acceptance",
+      "passed": false,
+      "details": {
+        "actions": []
+      }
+    },
+    {
+      "name": "project export contains writing state",
+      "passed": true,
+      "details": {
+        "suggested_filename": "marginalia-project-2026-08-14.json",
+        "conversations": 1,
+        "characters": 6,
+        "artifacts": 1
+      }
+    },
+    {
+      "name": "operator route stays unreachable: /dashboard",
+      "passed": true,
+      "details": {
+        "status": 404
+      }
+    },
+    {
+      "name": "operator route stays unreachable: /docs",
+      "passed": true,
+      "details": {
+        "status": 404
+      }
+    },
+    {
+      "name": "operator route stays unreachable: /openapi.json",
+      "passed": true,
+      "details": {
+        "status": 404
+      }
+    },
+    {
+      "name": "operator route stays unreachable: /v2/runs",
+      "passed": true,
+      "details": {
+        "status": 404
+      }
+    },
+    {
+      "name": "operator route stays unreachable: /governor/status",
+      "passed": true,
+      "details": {
+        "status": 404
+      }
+    },
+    {
+      "name": "generated conversation title is bounded",
+      "passed": true,
+      "details": {
+        "title": "Write an 800-word opening scene for this project. Us",
+        "length": 52
+      }
+    },
+    {
+      "name": "compact layout retains a discoverable project-workspace opener",
+      "passed": true,
+      "details": {
+        "workspace_visible": false,
+        "visible_workspace_openers": 1
+      }
+    }
+  ],
+  "console_errors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ],
+  "failed_responses": [],
+  "observations": {
+    "project_settings_save_button_count": 1,
+    "long_response_layout": {
+      "viewport_height": 1000,
+      "composer_top": 796,
+      "composer_bottom": 1000,
+      "prompt_height": 131,
+      "message_scroll_height": 3924,
+      "message_client_height": 724,
+      "send_visible": true
+    },
+    "populated_story_bible_layout": {
+      "client_height": 889,
+      "scroll_height": 1553,
+      "client_width": 329,
+      "scroll_width": 329
+    },
+    "canon_proposal": {
+      "character_count_before": 6,
+      "character_count_after": 6,
+      "suggestion_visible": false,
+      "suggestion_count": 0,
+      "actions": []
+    },
+    "export": {
+      "suggested_filename": "marginalia-project-2026-08-14.json",
+      "conversations": 1,
+      "characters": 6,
+      "artifacts": 1
+    },
+    "generated_conversation_title": "Write an 800-word opening scene for this project. Us",
+    "compact_layout": {
+      "workspace_visible": false,
+      "visible_workspace_openers": 1
+    }
+  },
+  "finished_at": "2026-08-14T04:04:45.934Z"
+}

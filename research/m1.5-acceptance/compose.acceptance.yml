@@ -1,0 +1,3 @@
+services:
+  marginalia:
+    container_name: marginalia-acceptance
