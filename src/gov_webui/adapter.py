@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-OpenAI-compatible API adapter with Governor integration.
+Marginalia's OpenAI-compatible API and governed creative-writing donor UI.
 
 Serves a self-contained chat + governor UI at the root URL (/), and exposes
 an OpenAI-compatible API for external clients. Supports switchable backends
@@ -13,11 +13,8 @@ Primary UI:  http://localhost:8000  (combined chat + governor panel)
 API info:    http://localhost:8000/api/info
 
 Configuration via environment variables:
-    BACKEND_TYPE        - "anthropic", "ollama", "claude-code", or "codex" (default: "ollama")
-    ANTHROPIC_API_KEY   - Required when BACKEND_TYPE=anthropic
-    OLLAMA_HOST         - Ollama URL (default: http://localhost:11434)
-    CLAUDE_PATH         - Path to claude CLI (default: "claude") for claude-code backend
-    CODEX_PATH          - Path to codex CLI (default: "codex") for codex backend
+    MARGINALIA_DATA_ROOT - Persistent application root (default: ~/.marginalia)
+    GOVERNOR_DAEMON_DIR  - AG daemon state directory (default: DATA_ROOT/.governor)
     GOVERNOR_CONTEXT_ID - Active context ID (default: "default")
     GOVERNOR_MODE       - Context mode: fiction/code/nonfiction/general (default: "general")
     GOVERNOR_CONTEXTS_DIR - Base dir for contexts (default: ~/.governor-contexts)
@@ -46,15 +43,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from governor.chat_bridge import (
-    ChatBridge,
-    create_backend,
-)
-from governor.violation_resolver import (
-    ViolationResolver,
-    format_violation_prompt,
-)
+from governor.violation_resolver import ViolationResolver
 from gov_webui.daemon_client import DaemonAuthError, DaemonChatClient, default_socket_path
+from gov_webui.governed_chat_adapter import GovernedChatAdapter
 from governor.context_manager import GovernorContextManager
 from governor.session_store import ChatSession, SessionMessage, SessionStore
 from governor.viewmodel import build_viewmodel, GovernorViewModel
@@ -73,14 +64,22 @@ logger = logging.getLogger(__name__)
 # Configuration from environment
 # ============================================================================
 
-BACKEND_TYPE = os.environ.get("BACKEND_TYPE", "ollama")
+MARGINALIA_DATA_ROOT = os.environ.get(
+    "MARGINALIA_DATA_ROOT", str(Path.home() / ".marginalia")
+)
+GOVERNOR_DAEMON_DIR = os.environ.get(
+    "GOVERNOR_DAEMON_DIR", str(Path(MARGINALIA_DATA_ROOT) / ".governor")
+)
+BACKEND_TYPE = os.environ.get("BACKEND_TYPE", "daemon")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 CLAUDE_PATH = os.environ.get("CLAUDE_PATH", "claude")  # Path to claude CLI for claude-code backend
 CODEX_PATH = os.environ.get("CODEX_PATH", "codex")  # Path to codex CLI for codex backend
 GOVERNOR_CONTEXT_ID = os.environ.get("GOVERNOR_CONTEXT_ID", "default")
 GOVERNOR_MODE = os.environ.get("GOVERNOR_MODE", "general")
-GOVERNOR_CONTEXTS_DIR = os.environ.get("GOVERNOR_CONTEXTS_DIR", "")
+GOVERNOR_CONTEXTS_DIR = os.environ.get(
+    "GOVERNOR_CONTEXTS_DIR", GOVERNOR_DAEMON_DIR
+)
 GOVERNOR_SHOW_OK_FOOTER = os.environ.get("GOVERNOR_SHOW_OK_FOOTER", "true").lower() in ("true", "1", "yes")
 
 # Auth token — when set, mutating endpoints require Authorization: Bearer <token>
@@ -90,7 +89,7 @@ GOVERNOR_AUTH_TOKEN = os.environ.get("GOVERNOR_AUTH_TOKEN", "")
 # Host binding — default to loopback for safety; set to 0.0.0.0 explicitly if needed
 GOVERNOR_BIND_HOST = os.environ.get("GOVERNOR_BIND_HOST", "127.0.0.1")
 
-# Mutable backend type — starts from env, switchable at runtime via /v1/backends/switch
+# Legacy run-builder default. Governed chat provider ownership belongs to AG.
 _current_backend_type: str = BACKEND_TYPE
 
 # ============================================================================
@@ -100,14 +99,14 @@ _current_backend_type: str = BACKEND_TYPE
 def _webui_version() -> str:
     """Single source of truth for the API version — derived from the package."""
     try:
-        return importlib.metadata.version("gov-webui")
+        return importlib.metadata.version("marginalia")
     except importlib.metadata.PackageNotFoundError:
-        return "0.5.0"
+        return "0.1.0"
 
 
 app = FastAPI(
-    title="Governor Chat Adapter",
-    description="OpenAI-compatible API with switchable backends and Governor integration",
+    title="Marginalia",
+    description="Standalone governed creative-writing application",
     version=_webui_version(),
 )
 
@@ -195,7 +194,7 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[ChatCompletionChoice]
     usage: Usage | None = None
-    receipt: dict | None = None
+    receipt: dict
 
 
 class ModelInfo(BaseModel):
@@ -214,31 +213,40 @@ class BackendSwitchRequest(BaseModel):
     backend_type: str
 
 
+class PendingResolutionRequest(BaseModel):
+    action: str
+    corrected_text: str | None = None
+    new_anchor_text: str | None = None
+    reason: str = ""
+    scope: str | None = None
+    expiry: str | None = None
+
+
 # ============================================================================
 # Bridge setup (lazy init on first request)
 # ============================================================================
 
-_bridge: ChatBridge | None = None
+# Compatibility sentinel for untouched donor tests/routes. Governed chat never
+# constructs or calls a local ChatBridge.
+_bridge: Any = None
 _context_manager: GovernorContextManager | None = None
 _session_store: SessionStore | None = None
-_daemon_client: DaemonChatClient | None = None
+_governed_chat_adapter: GovernedChatAdapter | None = None
 
 
-def _get_daemon_client() -> DaemonChatClient:
-    """Get or create the daemon RPC client for the chat path."""
-    global _daemon_client
-    if _daemon_client is None:
+def _get_governed_chat_adapter() -> GovernedChatAdapter:
+    """Get the single context-bound AG boundary used by Marginalia."""
+    global _governed_chat_adapter
+    if _governed_chat_adapter is None:
         socket_path = os.environ.get("GOVERNOR_SOCKET", "")
         if not socket_path:
-            gov_dir_env = os.environ.get("GOVERNOR_DIR", "")
-            if gov_dir_env:
-                gov_dir = Path(gov_dir_env)
-            else:
-                base = Path(GOVERNOR_CONTEXTS_DIR) if GOVERNOR_CONTEXTS_DIR else Path.home() / ".governor-contexts"
-                gov_dir = base / GOVERNOR_CONTEXT_ID / ".governor"
-            socket_path = str(default_socket_path(gov_dir))
-        _daemon_client = DaemonChatClient(socket_path)
-    return _daemon_client
+            socket_path = str(default_socket_path(Path(GOVERNOR_DAEMON_DIR)))
+        _governed_chat_adapter = GovernedChatAdapter(
+            DaemonChatClient(socket_path),
+            context_id=GOVERNOR_CONTEXT_ID,
+            expected_governor_dir=GOVERNOR_DAEMON_DIR,
+        )
+    return _governed_chat_adapter
 
 
 def _get_context_manager() -> GovernorContextManager:
@@ -247,27 +255,6 @@ def _get_context_manager() -> GovernorContextManager:
         base_dir = Path(GOVERNOR_CONTEXTS_DIR) if GOVERNOR_CONTEXTS_DIR else None
         _context_manager = GovernorContextManager(base_dir=base_dir)
     return _context_manager
-
-
-def _get_bridge() -> ChatBridge:
-    global _bridge
-    if _bridge is None:
-        kwargs: dict[str, Any] = {}
-        if _current_backend_type == "anthropic":
-            kwargs["api_key"] = ANTHROPIC_API_KEY
-        elif _current_backend_type == "ollama":
-            kwargs["host"] = OLLAMA_HOST
-        elif _current_backend_type == "claude-code":
-            kwargs["claude_path"] = CLAUDE_PATH
-        elif _current_backend_type == "codex":
-            kwargs["codex_path"] = CODEX_PATH
-        backend = create_backend(_current_backend_type, **kwargs)
-        _bridge = ChatBridge(
-            backend=backend,
-            context_manager=_get_context_manager(),
-            show_ok_footer=GOVERNOR_SHOW_OK_FOOTER,
-        )
-    return _bridge
 
 
 def _get_session_store() -> SessionStore:
@@ -293,10 +280,10 @@ def _get_session_store() -> SessionStore:
 
 @app.get("/v1/models")
 async def list_models() -> ModelList:
-    """List available models from the backend."""
+    """List models from the provider that actually serves governed chat."""
     try:
-        bridge = _get_bridge()
-        models = await bridge.list_models()
+        adapter = _get_governed_chat_adapter()
+        models = await adapter.models()
         return ModelList(
             data=[
                 ModelInfo(id=m["id"], owned_by=m.get("owned_by", "system"))
@@ -310,7 +297,8 @@ async def list_models() -> ModelList:
 @app.get("/v1/models/{model_id}")
 async def get_model(model_id: str) -> ModelInfo:
     """Get info about a specific model."""
-    return ModelInfo(id=model_id, owned_by=_current_backend_type)
+    provider = await _get_governed_chat_adapter().provider()
+    return ModelInfo(id=model_id, owned_by=provider.get("type", "daemon"))
 
 
 # ============================================================================
@@ -318,109 +306,77 @@ async def get_model(model_id: str) -> ModelInfo:
 # ============================================================================
 
 
-def _get_available_backends() -> list[dict[str, Any]]:
-    """Return list of available backends with availability status."""
-    backends = []
-    # Ollama — check host reachable (best-effort: just note the host)
-    backends.append({
-        "type": "ollama",
-        "available": True,  # Always structurally available
-        "config_hint": f"OLLAMA_HOST={OLLAMA_HOST}",
-    })
-    # Anthropic — needs API key
-    backends.append({
-        "type": "anthropic",
-        "available": bool(ANTHROPIC_API_KEY),
-        "config_hint": "Set ANTHROPIC_API_KEY" if not ANTHROPIC_API_KEY else "API key configured",
-    })
-    # Claude Code — needs CLI binary
-    claude_found = shutil.which(CLAUDE_PATH) is not None or Path(CLAUDE_PATH).is_file()
-    backends.append({
-        "type": "claude-code",
-        "available": claude_found,
-        "config_hint": f"CLAUDE_PATH={CLAUDE_PATH}" if claude_found else "claude CLI not found",
-    })
-    # Codex — needs CLI binary
-    codex_found = shutil.which(CODEX_PATH) is not None or Path(CODEX_PATH).is_file()
-    backends.append({
-        "type": "codex",
-        "available": codex_found,
-        "config_hint": f"CODEX_PATH={CODEX_PATH}" if codex_found else "codex CLI not found",
-    })
-    return backends
-
-
 @app.get("/v1/backends")
 async def list_backends() -> dict[str, Any]:
-    """List available backends and mark the active one."""
-    backends = _get_available_backends()
-    for b in backends:
-        b["active"] = b["type"] == _current_backend_type
-    # Check connection for active backend
-    connected = False
+    """Report only AG's real governed-execution provider."""
     try:
-        bridge = _get_bridge()
-        await bridge.list_models()
-        connected = True
+        governed_chat = _get_governed_chat_adapter()
+        provider = await governed_chat.provider()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Daemon error: {exc}")
+    try:
+        reachable = bool(await governed_chat.models())
     except Exception:
-        pass
+        reachable = False
+    backend_type = provider.get("type", "unknown")
+    connected = bool(provider.get("connected")) and reachable
     return {
-        "backends": backends,
-        "active": _current_backend_type,
+        "backends": [{
+            "type": backend_type,
+            "available": connected,
+            "active": True,
+            "configured_by": "agent-governor-daemon",
+        }],
+        "active": backend_type,
         "connected": connected,
+        "authoritative": "agent-governor-daemon",
     }
 
 
 @app.post("/v1/backends/switch")
 async def switch_backend(request: BackendSwitchRequest) -> dict[str, Any]:
-    """Switch the active backend at runtime."""
-    global _bridge, _current_backend_type
-
-    valid_types = {"ollama", "anthropic", "claude-code", "codex"}
-    if request.backend_type not in valid_types:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid backend type: {request.backend_type}. Valid: {sorted(valid_types)}",
-        )
-
-    # Build kwargs for the new backend
-    kwargs: dict[str, Any] = {}
-    if request.backend_type == "anthropic":
-        kwargs["api_key"] = ANTHROPIC_API_KEY
-    elif request.backend_type == "ollama":
-        kwargs["host"] = OLLAMA_HOST
-    elif request.backend_type == "claude-code":
-        kwargs["claude_path"] = CLAUDE_PATH
-    elif request.backend_type == "codex":
-        kwargs["codex_path"] = CODEX_PATH
-
-    try:
-        new_backend = create_backend(request.backend_type, **kwargs)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to create backend: {e}")
-
-    _current_backend_type = request.backend_type
-    _bridge = ChatBridge(
-        backend=new_backend,
-        context_manager=_get_context_manager(),
-        show_ok_footer=GOVERNOR_SHOW_OK_FOOTER,
+    """Reject local switches: the AG daemon owns the actual provider."""
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "Provider configuration is owned by the Agent Governor daemon; "
+            f"Marginalia cannot switch it to {request.backend_type!r}."
+        ),
     )
 
-    # Check connection and list models
-    connected = False
-    models: list[dict[str, str]] = []
-    try:
-        models = await _bridge.list_models()
-        connected = True
-    except Exception:
-        pass
 
-    return {
-        "success": True,
-        "backend_type": _current_backend_type,
-        "connected": connected,
-        "models": [m["id"] for m in models] if models else [],
-    }
+@app.get("/v1/governed-chat/pending")
+async def governed_chat_pending() -> dict[str, Any]:
+    """Observe durable pending state in Marginalia's active context."""
+    try:
+        return {"pending": await _get_governed_chat_adapter().pending()}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Daemon error: {exc}")
+
+
+@app.post("/v1/governed-chat/resolve")
+async def governed_chat_resolve(
+    request: PendingResolutionRequest,
+) -> dict[str, Any]:
+    """Resolve pending state through the same context-bound AG adapter."""
+    if request.action not in {"fix", "revise", "proceed"}:
+        raise HTTPException(
+            status_code=400,
+            detail="action must be one of: fix, revise, proceed",
+        )
+    try:
+        return await _get_governed_chat_adapter().resolve_pending(
+            request.action,
+            corrected_text=request.corrected_text,
+            new_anchor_text=request.new_anchor_text,
+            reason=request.reason,
+            scope=request.scope,
+            expiry=request.expiry,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Daemon error: {exc}")
 
 
 _LENGTH_BANDS = {
@@ -623,43 +579,6 @@ def _build_constraints_message() -> tuple[dict[str, str] | None, dict]:
     return None, _meta_base
 
 
-def _build_receipt(
-    constraints_msg: dict[str, str] | None,
-    contract_meta: dict,
-    request_id: str,
-    turn_id: str,
-    turn_seq: int,
-    resolved_model: str,
-) -> dict:
-    """Build a per-turn receipt proving constraints reached the model."""
-    constraints_hash = None
-    constraints_hash_full = None
-    if constraints_msg:
-        raw = constraints_msg["content"].encode("utf-8")
-        full = hashlib.sha256(raw).hexdigest()
-        constraints_hash = full[:16]
-        constraints_hash_full = full
-
-    receipt: dict = {
-        "config_hash": contract_meta.get("config_hash"),
-        "config_hash_full": contract_meta.get("config_hash_full"),
-        "constraints_hash": constraints_hash,
-        "constraints_hash_full": constraints_hash_full,
-        "constraints_format_version": CONSTRAINTS_FMT_VER,
-        "rendered_by": "adapter",
-        "mode": contract_meta.get("mode", GOVERNOR_MODE),
-        "strict": contract_meta.get("strict", False),
-        "forced": False,  # chat path always injects; reserved for future preflight bypass
-        "model": resolved_model,
-        "request_id": request_id,
-        "turn_id": turn_id,
-        "turn_seq": turn_seq,
-    }
-    if contract_meta.get("receipt_error"):
-        receipt["receipt_error"] = contract_meta["receipt_error"]
-    return receipt
-
-
 @app.post("/v1/chat/completions", response_model=None)
 async def chat_completions(
     request: ChatCompletionRequest,
@@ -669,8 +588,7 @@ async def chat_completions(
     Delegates to the governor daemon for the full governed pipeline:
     pending check → augment → generate → check → receipt.
     """
-    global _turn_seq
-    client = _get_daemon_client()
+    governed_chat = _get_governed_chat_adapter()
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
     # Inject constraints after last system message
@@ -684,16 +602,14 @@ async def chat_completions(
 
     if request.stream:
         return StreamingResponse(
-            _stream_via_daemon(client, messages, request.model, GOVERNOR_CONTEXT_ID,
-                               constraints_msg, contract_meta),
+            _stream_via_daemon(governed_chat, messages, request.model),
             media_type="text/event-stream",
         )
 
     try:
-        result = await client.chat_send(
+        result = await governed_chat.chat_send(
             messages=messages,
             model=request.model,
-            context_id=GOVERNOR_CONTEXT_ID,
         )
     except DaemonAuthError as e:
         raise HTTPException(
@@ -708,7 +624,9 @@ async def chat_completions(
 
     # If daemon returned a pending violation, format as violation prompt
     if result.get("pending"):
-        return _format_violation_pending_response(result, request.model)
+        return _format_violation_pending_response(
+            result, result.get("model") or request.model
+        )
 
     # Build content with optional governor footer
     content = result.get("content", "")
@@ -716,14 +634,10 @@ async def chat_completions(
     if footer:
         content = f"{content}\n\n{footer}"
 
-    # Build receipt with resolved model from daemon
+    # AG's final authority receipt is the only governed-execution receipt.
     resolved_model = result.get("model", request.model)
     request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-    _turn_seq += 1
-    turn_id = f"turn-{uuid.uuid4().hex[:12]}"
-    receipt = _build_receipt(constraints_msg, contract_meta,
-                             request_id, turn_id, _turn_seq, resolved_model)
-    _emit_receipt_v1(receipt)
+    receipt = result["receipt"]
 
     usage_data = result.get("usage") or {}
     return ChatCompletionResponse(
@@ -747,39 +661,18 @@ async def chat_completions(
 
 
 async def _stream_via_daemon(
-    client: DaemonChatClient,
+    governed_chat: GovernedChatAdapter,
     messages: list[dict[str, str]],
     model: str,
-    context_id: str,
-    constraints_msg: dict[str, str] | None = None,
-    contract_meta: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream response via daemon in OpenAI SSE format."""
-    global _turn_seq
     request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
     final_result: dict | None = None
-
-    # Build receipt before streaming so first chunk carries it
-    _turn_seq += 1
     turn_id = f"turn-{uuid.uuid4().hex[:12]}"
-    receipt = _build_receipt(constraints_msg, contract_meta or {},
-                             request_id, turn_id, _turn_seq, model)
-    _emit_receipt_v1(receipt)
 
     try:
-        # Emit receipt as first chunk (before content)
-        first_chunk = {
-            "id": request_id,
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
-            "receipt": receipt,
-        }
-        yield f"data: {json.dumps(first_chunk)}\n\n"
-
-        async for delta, final in client.chat_stream(
-            messages=messages, model=model, context_id=context_id
+        async for delta, final in governed_chat.chat_stream(
+            messages=messages, model=model
         ):
             if delta:
                 sse_chunk = {
@@ -799,21 +692,21 @@ async def _stream_via_daemon(
             if final is not None:
                 final_result = final
 
-        # Update receipt with resolved model from daemon if available
-        if final_result and final_result.get("model"):
-            receipt["model"] = final_result["model"]
+        if final_result is None:
+            raise RuntimeError("AG stream ended without a final governed outcome")
+
+        resolved_model = final_result.get("model") or model
+        receipt = final_result["receipt"]
 
         # If daemon returned a pending violation, emit it as a final chunk
         if final_result and final_result.get("pending"):
             pending = final_result["pending"]
-            violations = pending.get("violations", [])
-            mode = pending.get("mode", "general")
-            prompt = format_violation_prompt(violations, mode)
+            prompt = governed_chat.format_pending_message(pending)
             sse_chunk = {
                 "id": request_id,
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
-                "model": model,
+                "model": resolved_model,
                 "choices": [
                     {
                         "index": 0,
@@ -830,7 +723,7 @@ async def _stream_via_daemon(
                 "id": request_id,
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
-                "model": model,
+                "model": resolved_model,
                 "choices": [
                     {
                         "index": 0,
@@ -846,7 +739,7 @@ async def _stream_via_daemon(
             "id": request_id,
             "object": "chat.completion.chunk",
             "created": int(time.time()),
-            "model": model,
+            "model": resolved_model,
             "choices": [
                 {
                     "index": 0,
@@ -877,42 +770,16 @@ async def _stream_via_daemon(
 
 
 def _format_violation_pending_response(
-    pending: Any,
+    pending: dict[str, Any],
     model: str,
 ) -> ChatCompletionResponse:
     """Format a pending violation as a ChatCompletionResponse.
 
-    Accepts either a daemon result dict (with 'pending' key) or a
-    PendingViolation object. The response content is the violation prompt
-    asking user to choose an action.
+    The response carries AG's blocking authority receipt but renders only the
+    ordinary-user resolution prompt.
     """
-    if isinstance(pending, dict):
-        # Daemon result dict — extract violations/mode from the pending sub-dict
-        p = pending.get("pending", pending)
-        violations = p.get("violations", [])
-        mode = p.get("mode", "general")
-    elif hasattr(pending, "prompt"):
-        # ViolationPendingResponse from check_response_blocking
-        prompt_text = pending.prompt
-        return ChatCompletionResponse(
-            id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
-            created=int(time.time()),
-            model=model,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=ChatMessage(role="assistant", content=prompt_text),
-                    finish_reason="stop",
-                )
-            ],
-            usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
-        )
-    else:
-        # PendingViolation object from get_pending
-        violations = pending.violations
-        mode = pending.mode
-
-    prompt_text = format_violation_prompt(violations, mode)
+    p = pending.get("pending", pending)
+    prompt_text = GovernedChatAdapter.format_pending_message(p)
 
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
@@ -926,6 +793,7 @@ def _format_violation_pending_response(
             )
         ],
         usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+        receipt=pending["receipt"],
     )
 
 
@@ -1357,9 +1225,7 @@ def _get_artifact_store() -> Any:
     return _artifact_store
 
 
-# ---------- Receipt V1 bridge (dual-emit) ----------
-
-_receipt_v1_bridge: Any = None
+# ---------- Historical receipt V1 export (read-only) ----------
 
 
 def _get_receipt_v1_jsonl_path() -> Path:
@@ -1376,49 +1242,6 @@ def _load_receipt_v1_dicts() -> list[dict]:
     path = _get_receipt_v1_jsonl_path()
     store = JsonlStore(path)
     return store._all_dicts_chronological()
-
-
-def _get_receipt_v1_bridge() -> Any:
-    """Lazy-init ReceiptV1Bridge for dual-emit."""
-    global _receipt_v1_bridge
-    if _receipt_v1_bridge is None:
-        from governor.receipt_v1_bridge import ReceiptV1Bridge
-
-        _receipt_v1_bridge = ReceiptV1Bridge(
-            gov_dir=Path(_get_receipt_v1_jsonl_path().parent.parent),
-            enabled=True,
-            deployment_id="webui",
-            fsync=False,
-        )
-    return _receipt_v1_bridge
-
-
-def _emit_receipt_v1(receipt: dict) -> None:
-    """Best-effort dual-emit of a receipt_v1 record alongside adapter receipt.
-
-    Fail-open: logs warnings on failure, never blocks chat.
-    """
-    try:
-        from governor.receipt_v1_bridge import BridgeContext
-
-        bridge = _get_receipt_v1_bridge()
-        bridge.emit(BridgeContext(
-            agent_id="webui",
-            session_id=GOVERNOR_CONTEXT_ID,
-            gate="chat_completion",
-            verdict="pass",
-            reason_human="webui chat turn",
-            tool_args={
-                "config_hash": receipt.get("config_hash"),
-                "constraints_hash": receipt.get("constraints_hash"),
-                "turn_seq": receipt.get("turn_seq"),
-            },
-            args_summary=f"turn {receipt.get('turn_seq', '?')}",
-            execution_status="success",
-            attempt=1,
-        ))
-    except Exception:
-        logger.warning("receipt_v1 dual-emit failed", exc_info=True)
 
 
 class CaptureRequest(BaseModel):
@@ -3104,12 +2927,15 @@ async def governor_ui() -> HTMLResponse:
 @app.get("/health")
 async def health() -> dict[str, Any]:
     """Health check endpoint."""
-    backend_ok = False
-    bridge = _get_bridge()
-
+    backend: dict[str, Any] = {"type": "unknown", "connected": False}
+    contract_ok = False
+    provider_reachable = False
     try:
-        await bridge.list_models()
-        backend_ok = True
+        governed_chat = _get_governed_chat_adapter()
+        await governed_chat.contract_info()
+        backend = await governed_chat.provider()
+        provider_reachable = bool(await governed_chat.models())
+        contract_ok = True
     except Exception:
         pass
 
@@ -3117,15 +2943,22 @@ async def health() -> dict[str, Any]:
     ctx = cm.get(GOVERNOR_CONTEXT_ID)
 
     return {
-        "status": "healthy" if backend_ok else "degraded",
+        "status": (
+            "healthy"
+            if contract_ok and backend.get("connected") and provider_reachable
+            else "degraded"
+        ),
         "backend": {
-            "type": _current_backend_type,
-            "connected": backend_ok,
+            "type": backend.get("type", "unknown"),
+            "connected": bool(backend.get("connected")) and provider_reachable,
+            "authoritative": "agent-governor-daemon",
         },
         "governor": {
             "context_id": GOVERNOR_CONTEXT_ID,
             "mode": GOVERNOR_MODE,
             "initialized": ctx is not None,
+            "contract_ok": contract_ok,
+            "daemon_dir": GOVERNOR_DAEMON_DIR,
         },
     }
 
@@ -3283,10 +3116,17 @@ async def import_governor_state(payload: dict[str, Any]) -> dict[str, Any]:
 @app.get("/api/info")
 async def api_info() -> dict[str, Any]:
     """JSON endpoint with API info and available endpoints."""
+    try:
+        backend = (await _get_governed_chat_adapter().provider()).get(
+            "type", "unknown"
+        )
+    except Exception:
+        backend = "unavailable"
     return {
-        "name": "Governor Chat Adapter",
-        "version": "0.4.0",
-        "backend": _current_backend_type,
+        "name": "Marginalia",
+        "version": _webui_version(),
+        "backend": backend,
+        "provider_owner": "agent-governor-daemon",
         "openai_compatible": True,
         "governor_context": GOVERNOR_CONTEXT_ID,
         "governor_mode": GOVERNOR_MODE,
@@ -3295,7 +3135,8 @@ async def api_info() -> dict[str, Any]:
             "models": "/v1/models",
             "chat": "/v1/chat/completions",
             "backends": "/v1/backends",
-            "backends_switch": "/v1/backends/switch",
+            "governed_chat_pending": "/v1/governed-chat/pending",
+            "governed_chat_resolve": "/v1/governed-chat/resolve",
             "health": "/health",
             "api_info": "/api/info",
             # Sessions
@@ -4421,7 +4262,7 @@ def resolve_effective_config() -> dict:
         "schema_version": "effective_config_v1",
         "scope": "session_current",
         "mode": mode,
-        "backend_type": _current_backend_type,
+        "backend_type": "agent-governor-daemon",
         "context_id": GOVERNOR_CONTEXT_ID,
     }
 
@@ -4443,7 +4284,7 @@ def resolve_effective_config() -> dict:
             "env": {
                 "GOVERNOR_MODE": mode,
                 "GOVERNOR_CONTEXT_ID": GOVERNOR_CONTEXT_ID,
-                "BACKEND_TYPE": _current_backend_type,
+                "PROVIDER_OWNER": "agent-governor-daemon",
             },
             "diagnostics": {
                 "clamped_fields": [],
@@ -4485,7 +4326,7 @@ def resolve_effective_config() -> dict:
         "env": {
             "GOVERNOR_MODE": mode,
             "GOVERNOR_CONTEXT_ID": GOVERNOR_CONTEXT_ID,
-            "BACKEND_TYPE": _current_backend_type,
+            "PROVIDER_OWNER": "agent-governor-daemon",
         },
         "diagnostics": diagnostics,
     }

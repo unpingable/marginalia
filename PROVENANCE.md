@@ -1,5 +1,17 @@
 # Provenance
 
+## Marginalia extraction
+
+Marginalia was established on 2026-08-13 from the pre-Desk governed-chat
+implementation in the `gov-webui` / Governor WebUI repository at commit
+`b0c99e417363f216fd53490a31a8e6f5f485a92b`. That donor is a behavioral and
+historical source, not the ongoing product architecture. Marginalia's first
+implementation slice separated provider ownership, context-scoped pending
+state, and receipt authority behind a narrow Agent Governor boundary.
+
+The donor commit predates the Phosphor Desk/control-plane pivot. Marginalia has
+no Constellation runtime dependency.
+
 This project is human-directed and AI-assisted. Final design authority,
 acceptance criteria, and editorial control rest with the human author.
 AI contributions were material and are categorized below by function.

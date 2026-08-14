@@ -4,18 +4,28 @@
 # Both start.sh and start-codex.sh source this file. Add new non-PyPI
 # dependencies here — one place, both launch paths.
 #
-# Usage (from start scripts):  source sync-deps.sh
-#
-# Requires: SCRIPT_DIR set to repo root before sourcing.
+# Usage: ./sync-deps.sh, or source it from a start script.
 
 set -euo pipefail
 
-AGENT_GOV_DIR="$(cd "$SCRIPT_DIR/../agent_gov" && pwd)"
+if [ -z "${SCRIPT_DIR:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+AGENT_GOV_CANDIDATE="${MARGINALIA_AG_SOURCE_DIR:-$SCRIPT_DIR/../../agent_gov}"
+AGENT_GOV_DIR="$(cd "$AGENT_GOV_CANDIDATE" && pwd)"
+EXPECTED_AG_COMMIT="$(tr -d '[:space:]' < "$SCRIPT_DIR/AG_CONTRACT_COMMIT")"
 
 # ── agent-governor ────────────────────────────────────────────────────────
 if [ ! -d "$AGENT_GOV_DIR/src/governor" ]; then
   echo "Error: agent-governor source not found at $AGENT_GOV_DIR"
-  echo "Expected: ../agent_gov relative to this repo"
+  echo "Expected: ../../agent_gov relative to this repo"
+  exit 1
+fi
+ACTUAL_AG_COMMIT="$(git -C "$AGENT_GOV_DIR" rev-parse HEAD)"
+if [ "$ACTUAL_AG_COMMIT" != "$EXPECTED_AG_COMMIT" ]; then
+  echo "Error: Marginalia requires AG commit $EXPECTED_AG_COMMIT"
+  echo "Found: $ACTUAL_AG_COMMIT at $AGENT_GOV_DIR"
   exit 1
 fi
 rm -rf "$SCRIPT_DIR/agent-governor"
@@ -23,7 +33,8 @@ mkdir -p "$SCRIPT_DIR/agent-governor/src"
 cp "$AGENT_GOV_DIR/pyproject.toml" "$SCRIPT_DIR/agent-governor/"
 cp "$AGENT_GOV_DIR/README.md" "$SCRIPT_DIR/agent-governor/"
 cp -r "$AGENT_GOV_DIR/src/governor" "$SCRIPT_DIR/agent-governor/src/"
-echo "Synced agent-governor from $AGENT_GOV_DIR"
+cp "$SCRIPT_DIR/AG_CONTRACT_COMMIT" "$SCRIPT_DIR/agent-governor/"
+echo "Synced qualified agent-governor $ACTUAL_AG_COMMIT from $AGENT_GOV_DIR"
 
 # ── receipt-v1 ────────────────────────────────────────────────────────────
 RECEIPT_V1_DIR="$AGENT_GOV_DIR/libs/receipt_v1"

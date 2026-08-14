@@ -1,30 +1,30 @@
-# Phosphor
-# OpenAI-compatible API with switchable backends and Governor integration
+# Marginalia — standalone governed creative-writing application
 
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install agent-governor from local source (not on PyPI)
+# One exact runtime/build resolution for local, test, and container execution.
+COPY requirements.lock requirements-build.lock ./
+RUN pip install --no-cache-dir -r requirements.lock -r requirements-build.lock
+
+# Install the qualified AG sources (not fetched implicitly from a registry).
+COPY AG_CONTRACT_COMMIT /app/AG_CONTRACT_COMMIT
 COPY agent-governor/ /tmp/agent-governor/
-RUN pip install --no-cache-dir /tmp/agent-governor/ && rm -rf /tmp/agent-governor/
+RUN test "$(cat /tmp/agent-governor/AG_CONTRACT_COMMIT)" = "$(cat /app/AG_CONTRACT_COMMIT)" \
+    && pip install --no-cache-dir --no-build-isolation --no-deps /tmp/agent-governor/ \
+    && rm -rf /tmp/agent-governor/
 
-# Install receipt-v1 from local source (not on PyPI)
 COPY receipt-v1/ /tmp/receipt-v1/
-RUN pip install --no-cache-dir /tmp/receipt-v1/ && rm -rf /tmp/receipt-v1/
+RUN pip install --no-cache-dir --no-build-isolation --no-deps /tmp/receipt-v1/ \
+    && rm -rf /tmp/receipt-v1/
 
-# Install dependencies (README.md required by pyproject.toml)
-COPY pyproject.toml README.md ./
-RUN pip install --no-cache-dir .
-
-# Copy source
+# Install Marginalia without a second dependency resolution.
+COPY pyproject.toml README.md AG_CONTRACT.md ./
 COPY src/ src/
+RUN pip install --no-cache-dir --no-build-isolation --no-deps .
 
-# Install the package
-RUN pip install -e .
-
-# Verify all local-only deps are importable (fail build, not first request)
-RUN python3 -c "import governor; import receipt_v1; import gov_webui"
+RUN python3 -c "import importlib.metadata as m; import governor, receipt_v1, gov_webui; assert m.version('agent-governor') == '2.8.1'; assert m.version('marginalia') == '0.1.0'"
 
 # Entrypoint script: start governor daemon, then uvicorn
 COPY entrypoint.sh /app/entrypoint.sh
@@ -37,5 +37,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
-# Run daemon + adapter
+# Run AG daemon + Marginalia with one aligned state root.
 CMD ["/app/entrypoint.sh"]

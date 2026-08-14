@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Thin JSON-RPC 2.0 client over Unix socket for the governor daemon.
-
-Provides only the chat-path methods needed by the webui adapter.
-Non-chat endpoints (sessions, governor/status, etc.) stay as direct imports.
-"""
+"""Low-level JSON-RPC client for Marginalia's narrow AG daemon contract."""
 
 from __future__ import annotations
 
@@ -29,7 +25,7 @@ class DaemonAuthError(RuntimeError):
 
 
 # =============================================================================
-# Content-Length framing (same protocol as daemon / Maude rpc.py)
+# Content-Length framing used by the AG daemon RPC transport
 # =============================================================================
 
 
@@ -87,8 +83,8 @@ def default_socket_path(governor_dir: Path) -> Path:
 class DaemonChatClient:
     """JSON-RPC 2.0 client for daemon chat methods over Unix socket.
 
-    Only wraps chat.send, chat.stream, and commit.pending — the methods
-    needed to replace the webui's direct ChatBridge usage.
+    It intentionally wraps only Marginalia's governed-chat contract: handshake,
+    provider discovery, chat, pending resolution, and receipt lookup.
     """
 
     def __init__(self, socket_path: str | Path) -> None:
@@ -96,6 +92,8 @@ class DaemonChatClient:
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._request_id: int = 0
+        # One framed socket cannot safely multiplex concurrent request loops.
+        self._request_lock = asyncio.Lock()
 
     @property
     def socket_path(self) -> Path:
@@ -126,39 +124,40 @@ class DaemonChatClient:
 
     async def _call(self, method: str, params: dict | None = None) -> Any:
         """Send a JSON-RPC request and return the result."""
-        await self.connect()
-        assert self._reader is not None and self._writer is not None
+        async with self._request_lock:
+            await self.connect()
+            assert self._reader is not None and self._writer is not None
 
-        request_id = self._next_id()
-        msg = {
-            "jsonrpc": "2.0",
-            "method": method,
-            "id": request_id,
-            "params": params or {},
-        }
-        await _write_message(self._writer, msg)
+            request_id = self._next_id()
+            msg = {
+                "jsonrpc": "2.0",
+                "method": method,
+                "id": request_id,
+                "params": params or {},
+            }
+            await _write_message(self._writer, msg)
 
-        # Read responses, skipping notifications until we get our response
-        while True:
-            resp = await _read_message(self._reader)
-            if resp is None:
-                raise ConnectionError("Connection closed by daemon")
+            # Read responses, skipping notifications until we get our response
+            while True:
+                resp = await _read_message(self._reader)
+                if resp is None:
+                    raise ConnectionError("Connection closed by daemon")
 
-            # Skip notifications (no id)
-            if "id" not in resp:
-                continue
+                # Skip notifications (no id)
+                if "id" not in resp:
+                    continue
 
-            if resp.get("id") != request_id:
-                continue
+                if resp.get("id") != request_id:
+                    continue
 
-            if "error" in resp:
-                err = resp["error"]
-                code = err.get("code", 0)
-                message = err.get("message", "unknown error")
-                if code == AUTH_ERROR_CODE:
-                    raise DaemonAuthError(message)
-                raise RuntimeError(f"RPC error {code}: {message}")
-            return resp.get("result")
+                if "error" in resp:
+                    err = resp["error"]
+                    code = err.get("code", 0)
+                    message = err.get("message", "unknown error")
+                    if code == AUTH_ERROR_CODE:
+                        raise DaemonAuthError(message)
+                    raise RuntimeError(f"RPC error {code}: {message}")
+                return resp.get("result")
 
     # ========================================================================
     # Chat methods
@@ -192,46 +191,88 @@ class DaemonChatClient:
 
         The final_result has the same shape as chat_send's return value.
         """
-        await self.connect()
-        assert self._reader is not None and self._writer is not None
+        async with self._request_lock:
+            await self.connect()
+            assert self._reader is not None and self._writer is not None
 
-        request_id = self._next_id()
-        msg = {
-            "jsonrpc": "2.0",
-            "method": "chat.stream",
-            "id": request_id,
-            "params": {"messages": messages, "model": model, "context_id": context_id},
-        }
-        await _write_message(self._writer, msg)
+            request_id = self._next_id()
+            msg = {
+                "jsonrpc": "2.0",
+                "method": "chat.stream",
+                "id": request_id,
+                "params": {
+                    "messages": messages,
+                    "model": model,
+                    "context_id": context_id,
+                },
+            }
+            await _write_message(self._writer, msg)
 
-        while True:
-            resp = await _read_message(self._reader)
-            if resp is None:
-                raise ConnectionError("Connection closed by daemon")
+            while True:
+                resp = await _read_message(self._reader)
+                if resp is None:
+                    raise ConnectionError("Connection closed by daemon")
 
-            # Notification — yield delta content
-            if "id" not in resp:
-                if resp.get("method") == "chat.delta":
-                    content = resp.get("params", {}).get("content", "")
-                    if content:
-                        yield (content, None)
-                continue
+                # Notification — yield delta content
+                if "id" not in resp:
+                    if resp.get("method") == "chat.delta":
+                        content = resp.get("params", {}).get("content", "")
+                        if content:
+                            yield (content, None)
+                    continue
 
-            # Final response
-            if resp.get("id") == request_id:
-                if "error" in resp:
-                    err = resp["error"]
-                    code = err.get("code", 0)
-                    message = err.get("message", "unknown error")
-                    if code == AUTH_ERROR_CODE:
-                        raise DaemonAuthError(message)
-                    raise RuntimeError(f"RPC error {code}: {message}")
-                yield (None, resp.get("result"))
-                return
+                # Final response
+                if resp.get("id") == request_id:
+                    if "error" in resp:
+                        err = resp["error"]
+                        code = err.get("code", 0)
+                        message = err.get("message", "unknown error")
+                        if code == AUTH_ERROR_CODE:
+                            raise DaemonAuthError(message)
+                        raise RuntimeError(f"RPC error {code}: {message}")
+                    yield (None, resp.get("result"))
+                    return
 
-    async def commit_pending(self) -> dict | None:
-        """Check for pre-existing pending violation."""
-        return await self._call("commit.pending")
+    async def hello(self) -> dict:
+        """Return daemon identity, capabilities, and authoritative state root."""
+        return await self._call("governor.hello")
+
+    async def commit_pending(self, context_id: str) -> dict | None:
+        """Get pending state for one governed-chat context."""
+        return await self._call("commit.pending", {"context_id": context_id})
+
+    async def commit_fix(self, context_id: str, corrected_text: str) -> dict:
+        return await self._call(
+            "commit.fix",
+            {"context_id": context_id, "corrected_text": corrected_text},
+        )
+
+    async def commit_revise(
+        self, context_id: str, new_anchor_text: str | None = None
+    ) -> dict:
+        params: dict[str, Any] = {"context_id": context_id}
+        if new_anchor_text is not None:
+            params["new_anchor_text"] = new_anchor_text
+        return await self._call("commit.revise", params)
+
+    async def commit_proceed(
+        self,
+        context_id: str,
+        *,
+        reason: str = "",
+        scope: str | None = None,
+        expiry: str | None = None,
+    ) -> dict:
+        params: dict[str, Any] = {"context_id": context_id, "reason": reason}
+        if scope is not None:
+            params["scope"] = scope
+        if expiry is not None:
+            params["expiry"] = expiry
+        return await self._call("commit.proceed", params)
+
+    async def receipt_detail(self, receipt_id: str) -> dict:
+        """Fetch a receipt and evidence from AG's authority store."""
+        return await self._call("receipts.detail", {"receipt_id": receipt_id})
 
     async def chat_models(self) -> list[dict[str, str]]:
         """List available models from the backend."""

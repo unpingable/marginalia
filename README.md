@@ -1,306 +1,148 @@
-# Phosphor
+# Marginalia
 
-**The cockpit for governed AI.** Chat with any model — governance happens underneath. Every turn gets a receipt. Every constraint is visible. Nothing writes to canon without proof.
+Marginalia is a standalone governed creative-writing application. Agent
+Governor (AG) is its direct execution and governance substrate; Constellation
+is not part of its runtime.
 
 ```text
-You:       "Write chapter 3 — Elena finds the letter."
-Model:     [drafts chapter 3]
-Governor:  constraints_hash ✓  config_hash ✓  mode=fiction  turn_seq=7
-Receipt:   embedded in response, hash-chained, exportable
-Artifact:  promote draft → revisable artifact with version history
+Marginalia → GovernedChatAdapter → Agent Governor daemon → model provider
 ```
 
-400+ tests. Four backends. The model proposes — the governor constrains — the UI makes it legible.
+No NQ, Nightshift, Monitor, Maude, Desk, qualification service, or Phosphor
+control-plane service is required.
 
-> *Phosphor is the presentation layer for [Agent Governor](https://github.com/unpingable/agent_governor). The governor daemon is the authority. Phosphor can render state and submit requests, but it cannot override policy, mint receipts, or write to canon.*
+## M0 status
 
-![Research mode — chat with governance sidebar, capture chips, and Why overlay](docs/img/01_research_home.png)
+This repository was extracted from the last useful pre-Desk governed-chat
+state of `gov-webui` at commit
+`b0c99e417363f216fd53490a31a8e6f5f485a92b`. The internal Python package is
+still named `gov_webui` to keep the correctness slice reviewable; the
+distribution, command, repository, UI title, runtime, and container are named
+Marginalia.
 
-![Dashboard — run overview, regime state, claim metrics (dark mode)](docs/img/02_dashboard.png)
+M0 establishes and tests one trustworthy invariant:
 
----
+> A governed response can be blocked in one chat context, remain durably
+> pending through a daemon restart, be observed and resolved only in that
+> context, and retain authoritative AG receipt linkage.
 
-## What You Get
+The donor UI still contains legacy code/research/operator surfaces. They are
+not the Marginalia product direction and will be removed or simplified in a
+later product-focused slice. They are not dependencies of governed chat.
 
-### Governed chat with receipts
+## Qualified AG contract
 
-Every assistant turn carries a **governance receipt** — constraints hash, config hash, turn sequence, forced flag. Not decorative metadata. Tamper with the chain and the hash breaks.
+Marginalia requires Python 3.11 or newer and is pinned to:
 
-The receipt strip appears below each response. Click a hash to copy. Expand for details. The trust trail is always visible, never hidden behind a settings page.
+- `agent-governor==2.8.1`
+- AG commit `e279a94326a0a13dbe43473846b53e4c3a9b31f2`
+- `receipt-v1==0.1.0` from that AG checkout
+- governed-chat daemon contract version `1`
 
-### Artifact engine
+See [AG_CONTRACT.md](AG_CONTRACT.md). `GovernedChatAdapter` refuses to run if
+the daemon lacks context-scoped pending state, authoritative receipts, or the
+configured state root.
 
-Promote any assistant output to a **revisable artifact** with version history, kind inference, and provenance tracking. Artifacts are file-backed, versioned, and conflict-safe (optimistic concurrency with 409 handling).
+## Reproducible local environment
 
-- **Promote from chat** — select text, promote to new or existing artifact
-- **Inline editing** — full editor with edit/preview/history tabs
-- **Kind inference** — auto-detects code, prose, markdown, config
-- **Version history** — every save is a version, load any prior state
-- **List management** — filter by title/kind, inline rename, copy artifact ID
-- **Dirty guards** — unsaved changes warn before navigation, Ctrl+S saves
+Expected sibling layout:
 
-### Effective config panel
-
-See exactly what policy the governor is enforcing *right now*. The config panel shows resolved fields (defaults + session overrides + system clamps), mode, and diagnostic info. Filter to non-defaults only. Copy the full config envelope as JSON.
-
-No more guessing what constraints are active. Open the panel, read the contract.
-
-### Receipt export and verification
-
-Export the full receipt chain as canonical JSONL. Verify chain integrity — structure checks, hash verification, chain continuity — in one click. Upload a previously exported chain to verify it independently.
-
-The trust loop closes: generate receipts → export → verify → the math either checks out or it doesn't.
-
----
-
-## Two Loops, One Cockpit
-
-Every mode runs the same two loops. The sidebar changes; the enforcement doesn't.
-
-### 1) Capture: draft > pending > accept
-
-The assistant says something. The UI detects "definition/citation"-shaped content. Detections show up as **chips** and collect in a **Pending** drawer. Nothing auto-promotes. **Accept** writes to the canonical store *with a receipt*.
-
-```
-1. Assistant outputs: "...scaling exponent is 0.76 (doi:10.1234/example.2020)."
-   → Chip appears: citation: doi:10.1234/example.2020
-2. Click ACCEPT
-   → Ledger now has source_ref + claim + receipt
-3. Next turn
-   → Assistant can cite the accepted source without re-pasting
-   → Why overlay shows: injected / matched / floating counts
+```text
+git/
+├── agent_gov/
+└── agent_gov_ui/
+    └── marginalia/
 ```
 
-Citations are typed (`doi:/arxiv:/rfc:/cve:/pypi:`) and audited per-turn. Receipts come from the governor daemon, not the UI.
-
-### 2) Violations: block > resolve > continue
-
-When output violates a constraint, chat is blocked until you choose:
-
-```
-Assistant outputs: "Use eval() here..."
-Governor sees:     constraint violation (no_eval_anchor)
-Governor acts:     BLOCK + resolution options
-UI enforces:       Fix / Revise / Proceed — nothing else accepted
-```
-
-This is not "chat with tabs." It's a cockpit for a write-gated system.
-
----
-
-## Modes
-
-Modes are **policy bundles + sidepanels**. Same core loop, different constraints.
-
-| Mode | Focus | Sidebar | Port |
-|------|-------|---------|------|
-| **Fiction** | Continuity + canon | Characters, World Rules, Forbidden | `:8001` |
-| **Code** | Decisions + constraints | Decisions, Constraints, Compare | `:8002` |
-| **Research** | Claims + provenance | Claims, Assumptions, Uncertainties, Links, Why overlay | `:8003` |
-| General | No mode-specific policy | Status + Corrections | — |
-
-Research mode is where the capture loop is most visible: DOI/arXiv/CVE/RFC/PyPI references get extracted, accepted sources constrain the next turn, and the Why overlay shows exactly which sources were injected vs referenced vs floating.
-
-Fiction mode is the proof that governance isn't just for crisp ground truth. If it works where facts are fuzzy — tracking canon, tone, consent — it's not compliance middleware. It generalizes.
-
----
-
-## Structured Builders
-
-Code and Research modes include a **structured iteration loop** that replaces "chat until it works" with a mechanically gated workflow:
-
-```
-Intent → Contract → Plan → Accept → Run/Validate → Done
-```
-
-Every step requires explicit user action. Chat never mutates project state. The builder sidebar shows where you are, what's locked, and what's next.
-
-### Code Builder
-
-```
-1. Set intent         "Parse CSV files and output JSON"
-2. Lock intent        (prevents drift — you said what you meant)
-3. Open wizard        Set artifact=tool, length=medium, voice=dry
-   → Save constraints (server hashes config, injects [CONSTRAINTS] block)
-4. Add plan phases    "Implementation" → "Testing"
-5. Chat               Ask the model to write the parser
-   → It sees your [CONSTRAINTS] block automatically
-6. Accept code block  Click Accept on the code → saved to workspace
-7. Advance plan       proposed → accepted → in_progress → completed
-8. Run                POST /governor/code/run — preflight check, then execute
-```
-
-### Research Builder
-
-```
-1. Set thesis         "How does cognitive load affect code review quality?"
-2. Lock thesis        (your question is your question)
-3. Open wizard        Set artifact=lit_review, voice=academic, citations=required,
-                      bans=["studies show", "experts agree"]
-   → Save constraints (model will see length band, voice, citation requirements)
-4. Chat               Ask the model to draft — constraints are live
-5. Accept draft       Click Accept on markdown → saved as .md to workspace
-6. Validate           POST /governor/research/project/validate
-   → Catches: weasel words without citations, banned phrases,
-     scope constraint violations, length band mismatches
-```
-
-### Constraints Wizard
-
-Both builders share a **Constraints Wizard** that replaces freeform contract modals:
-
-| Field | Widget | Effect |
-|-------|--------|--------|
-| Artifact type | Dropdown | `tool`, `essay`, `lit_review`, etc. |
-| Length | Segmented | `short` / `medium` / `long` → word count bands |
-| Voice | Chips | `dry`, `wry`, `academic`, `spicy`, etc. |
-| Citations | Segmented | `none` / `light` / `required` |
-| Bans | Tag input | Literal phrases the model must avoid |
-| Format | Toggles | Tables, bullets, headings on/off |
-| Strict mode | Toggle | Warnings vs hard fails in validation |
-
-The wizard computes a canonical SHA-256 hash of the config. The server always recomputes — never trusts client hashes. A live preview shows the exact `[CONSTRAINTS]` block the model will see as you adjust widgets.
-
----
-
-## Try It
-
-### Quick start (pre-built image)
+Create an isolated environment using the same lock as the container:
 
 ```bash
-docker run -d -p 8000:8000 \
-  -e BACKEND_TYPE=anthropic \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  -e GOVERNOR_MODE=research \
-  -v phosphor_data:/contexts \
-  ghcr.io/unpingable/phosphor
+python3.11 -m venv .venv
+.venv/bin/pip install -r requirements-dev.lock
+.venv/bin/pip install --no-deps ../../agent_gov
+.venv/bin/pip install --no-deps ../../agent_gov/libs/receipt_v1
+.venv/bin/pip install --no-deps -e .
 ```
 
-Open [http://localhost:8000](http://localhost:8000). That's it.
+`requirements.lock` fixes the complete third-party runtime resolution,
+`requirements-build.lock` fixes the build backend resolution, and
+`AG_CONTRACT_COMMIT` fixes local AG source provenance.
 
-### Claude Code backend (uses Claude Max, no API key)
+## Runtime and provider ownership
 
-Requires [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated.
+The AG daemon is required. It owns provider credentials, provider selection,
+model execution, governance checks, pending state, and authoritative receipts.
+Marginalia discovers provider/model information through the daemon; its old
+local backend-switch endpoint now rejects requests instead of pretending to
+change governed execution.
+
+The supported single-process launcher starts AG and the web application with
+one aligned state root:
 
 ```bash
-git clone https://github.com/unpingable/governor_webui.git
-cd governor_webui
+export MARGINALIA_DATA_ROOT="$PWD/.local-data"
+export GOVERNOR_CONTEXT_ID="erin-writing"
+export GOVERNOR_MODE="fiction"
+export BACKEND_TYPE="anthropic"       # read by AG, not by the web UI
+export ANTHROPIC_API_KEY="..."        # or configure another AG backend
+./entrypoint.sh
+```
+
+It executes the equivalent of:
+
+```bash
+governor --root "$MARGINALIA_DATA_ROOT" serve --mode fiction --socket "$GOVERNOR_SOCKET"
+uvicorn gov_webui.adapter:app --host 0.0.0.0 --port 8000
+```
+
+AG's state directory is `$MARGINALIA_DATA_ROOT/.governor`. That exact path is
+also the context-manager base used by Marginalia. The launcher rejects
+conflicting `GOVERNOR_DAEMON_DIR` or `GOVERNOR_CONTEXTS_DIR` values.
+
+## Container
+
+Container builds use qualified local AG sources rather than silently resolving
+another implementation:
+
+```bash
 ./start.sh
 ```
 
-`start.sh` auto-detects the CLI, writes `.env`, and brings up three mode-specific stacks:
+`sync-deps.sh` verifies AG's current commit, stages AG and receipt-v1, and the
+Dockerfile installs the same exact third-party lock used locally. Optional
+provider overrides are available for Ollama, Claude Code, and Codex; in every
+case the provider remains configured and invoked by AG.
 
-```
-Fiction:  http://localhost:8001
-Code:     http://localhost:8002
-Research: http://localhost:8003
-```
-
-### Multi-stack (all modes at once)
+## Verification
 
 ```bash
-docker compose up -d                                           # Anthropic API
-docker compose -f docker-compose.yml -f docker-compose.claude-code.yml up -d  # Claude Code
-docker compose -f docker-compose.yml -f docker-compose.ollama.yml up -d       # Ollama (local)
+python3 -m pytest -q
+python3 -m pytest tests/test_live_governed_chat_contract.py -q -vv
+python3 -m ruff check src tests
+python3 -m build --no-isolation
 ```
 
-Quick sanity: `curl -s http://localhost:8003/health`
+The live contract test uses a deterministic no-network provider over a real
+Unix socket and restarts the daemon between block and resolution. Ordinary CI
+does not require an OpenAI, Anthropic, or Ollama credential. The dev lock
+includes the exact build backend used by `--no-isolation`.
 
----
+## Product boundary
 
-## Pick a Backend
+Marginalia currently consumes these application-facing AG operations:
 
-The UI talks to multiple inference backends. The governor enforces constraints regardless.
+- validate daemon contract and state root;
+- discover the authoritative provider and models;
+- send or stream a governed chat response in one context;
+- retrieve pending violation state for that context;
+- fix, revise, or proceed against that same pending state;
+- retrieve an authoritative receipt and its evidence by stable ID.
 
-| Backend | Billing | Setup |
-|---------|---------|-------|
-| **Anthropic API** | Per-token | `BACKEND_TYPE=anthropic` + `ANTHROPIC_API_KEY=sk-ant-...` |
-| **Claude Code CLI** | Claude Max subscription | `BACKEND_TYPE=claude-code` (CLI must be authenticated) |
-| **Codex CLI** | ChatGPT subscription | `BACKEND_TYPE=codex` (Node.js required) |
-| **Ollama** | Free (local) | `BACKEND_TYPE=ollama` + `OLLAMA_HOST=http://localhost:11434` |
+The browser does not mint a second governed-execution receipt and does not show
+raw hashes as ordinary writing UX. AG evidence remains available behind the
+application boundary for correctness and diagnostics.
 
-Switch at runtime via the sidebar dropdown or `POST /v1/backends/switch`.
+## Provenance and license
 
----
-
-## Security Model
-
-Phosphor is a **non-authoritative client**. Governance decisions happen in the daemon.
-
-- The UI cannot sign receipts, broaden scope, or mint keys
-- Set `GOVERNOR_AUTH_TOKEN` to lock mutating endpoints on shared deployments
-- Default bind is loopback only (`127.0.0.1`) — set `0.0.0.0` only intentionally
-- API keys belong in env vars, not code
-- Exception logs may contain partial responses — review before sharing
-
----
-
-## Configuration
-
-All configuration is env vars.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BACKEND_TYPE` | `ollama` | `anthropic`, `ollama`, `claude-code`, `codex` |
-| `ANTHROPIC_API_KEY` | — | Required for anthropic backend |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama URL |
-| `GOVERNOR_MODE` | `general` | `fiction`, `code`, `research`, `nonfiction`, `general` |
-| `GOVERNOR_CONTEXT_ID` | `default` | Isolates state per user/project |
-| `GOVERNOR_CONTEXTS_DIR` | `~/.governor-contexts` | Where state lives |
-| `GOVERNOR_SOCKET` | auto-derived | Unix socket path to governor daemon |
-| `GOVERNOR_AUTH_TOKEN` | — | Bearer token for mutating endpoints |
-| `GOVERNOR_BIND_HOST` | `127.0.0.1` | Bind host |
-
----
-
-## Pages
-
-| URL | Purpose |
-|-----|---------|
-| `/` | Chat + governor sidebar |
-| `/dashboard` | Governance dashboard (runs, regime, claims) |
-| `/governor/ui` | Standalone governor panel |
-
----
-
-## Development
-
-Phosphor depends on [agent-governor](https://github.com/unpingable/agent_governor) and receipt-v1, which are not on PyPI. For local dev, clone the governor repo as a sibling and install both:
-
-```bash
-# One-time setup
-git clone https://github.com/unpingable/agent_governor.git ../agent_gov
-pip install -e ../agent_gov
-pip install -e ../agent_gov/libs/receipt_v1
-pip install -e ".[dev]"
-
-# Run tests
-python3 -m pytest tests/ -v    # 400+ tests
-
-# Run locally
-governor-webui                 # http://127.0.0.1:8000
-```
-
----
-
-## Docs
-
-- [ARCHITECTURE.md](ARCHITECTURE.md) — transport story, split-brain fix, ecosystem fit, Phase 0 boundaries
-- [COMPAT.md](COMPAT.md) — version coupling, contract versions
-- [docs/API.md](docs/API.md) — full endpoint reference
-
----
-
-## What This Repo Is Not
-
-- Not the governor kernel (that's [Agent Governor](https://github.com/unpingable/agent_governor))
-- Not an IDE integration (that's the [VS Code extension](https://github.com/unpingable/vscode-governor))
-- Not a place where chat becomes canon by accident
-
-## Taxonomy
-
-- **Agent Governor** — governance/provenance daemon (authority)
-- **Guvnah** — status/inspection console (non-authoritative)
-- **Phosphor** — user-facing governed agent client (non-authoritative)
-
-Phosphor is a cockpit for a system where language is a proposal and only receipts earn writes.
+Marginalia preserves the donor repository's Apache-2.0 history and attribution.
+See [PROVENANCE.md](PROVENANCE.md), [LICENSE](LICENSE), and [NOTICE](NOTICE).

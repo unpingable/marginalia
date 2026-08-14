@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Phosphor: User-facing governed agent client for Agent Governor.
+Marginalia: standalone governed creative-writing application.
 
 Serves a combined chat + governor panel at the root URL, and exposes an
-OpenAI-compatible API for external clients. Underneath, it:
-1. Routes requests through ChatBridge to Anthropic, Ollama, or Claude Code CLI
-2. Applies governor hooks based on context mode (fiction, code, nonfiction)
-3. Maintains isolated governor contexts per user/project
+OpenAI-compatible API for external clients. Governed execution and provider
+ownership live in the Agent Governor daemon behind GovernedChatAdapter.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.1.0"

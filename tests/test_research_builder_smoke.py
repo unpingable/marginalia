@@ -29,7 +29,7 @@ def research_client(tmp_path: Path):
     adapter_mod._bridge = None
     adapter_mod._context_manager = None
     adapter_mod._session_store = None
-    adapter_mod._daemon_client = None
+    adapter_mod._governed_chat_adapter = None
     adapter_mod._project_store = None
     adapter_mod._research_store = None
     adapter_mod._research_project_store = None
@@ -51,7 +51,7 @@ def research_client(tmp_path: Path):
     adapter_mod._bridge = None
     adapter_mod._context_manager = None
     adapter_mod._session_store = None
-    adapter_mod._daemon_client = None
+    adapter_mod._governed_chat_adapter = None
     adapter_mod._project_store = None
     adapter_mod._research_store = None
     adapter_mod._research_project_store = None

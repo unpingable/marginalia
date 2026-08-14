@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from support import authority_receipt
+
 
 @pytest.fixture
 def adapter_mod():
@@ -26,12 +28,12 @@ def adapter_mod():
     mod._bridge = None
     mod._context_manager = None
     mod._session_store = None
-    mod._daemon_client = None
+    mod._governed_chat_adapter = None
     yield mod
     mod._bridge = None
     mod._context_manager = None
     mod._session_store = None
-    mod._daemon_client = None
+    mod._governed_chat_adapter = None
 
 
 @pytest.fixture
@@ -53,8 +55,9 @@ class TestChatDelegatesToDaemon:
             "violations": [],
             "footer": None,
             "pending": None,
+            "receipt": authority_receipt(),
         })
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
             "/v1/chat/completions",
@@ -82,12 +85,13 @@ class TestChatDelegatesToDaemon:
                 "violations": [],
                 "footer": None,
                 "pending": None,
+                "receipt": authority_receipt(),
             })
 
         mock = AsyncMock()
         mock.chat_stream = MagicMock(return_value=mock_stream())
         mock.connect = AsyncMock()
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
             "/v1/chat/completions",
@@ -116,8 +120,9 @@ class TestChatDelegatesToDaemon:
                 "mode": "general",
                 "blocked_response": "bad",
             },
+            "receipt": authority_receipt(verdict="block"),
         })
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
             "/v1/chat/completions",
@@ -143,8 +148,9 @@ class TestChatDelegatesToDaemon:
             "violations": [],
             "footer": "[Governor] OK — 3 anchors checked",
             "pending": None,
+            "receipt": authority_receipt(),
         })
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
             "/v1/chat/completions",
@@ -172,8 +178,9 @@ class TestChatDelegatesToDaemon:
             "violations": [],
             "footer": None,
             "pending": None,
+            "receipt": authority_receipt(),
         })
-        adapter_mod._daemon_client = mock_daemon
+        adapter_mod._governed_chat_adapter = mock_daemon
 
         client.post(
             "/v1/chat/completions",
@@ -200,7 +207,7 @@ class TestAuthErrorHandling:
         mock.chat_send = AsyncMock(
             side_effect=DaemonAuthError("Claude Code is not logged in")
         )
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
             "/v1/chat/completions",
@@ -219,7 +226,7 @@ class TestAuthErrorHandling:
         mock.chat_send = AsyncMock(
             side_effect=RuntimeError("connection refused")
         )
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
             "/v1/chat/completions",
@@ -242,7 +249,7 @@ class TestAuthErrorHandling:
         mock = AsyncMock()
         mock.chat_stream = MagicMock(return_value=mock_stream())
         mock.connect = AsyncMock()
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
             "/v1/chat/completions",

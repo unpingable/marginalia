@@ -1,66 +1,69 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Initialize governor context if needed
-CONTEXTS_DIR="${GOVERNOR_CONTEXTS_DIR:-/contexts}"
-CTX_ID="${GOVERNOR_CONTEXT_ID:-default}"
-GOV_DIR="$CONTEXTS_DIR/$CTX_ID/.governor"
+DATA_ROOT="${MARGINALIA_DATA_ROOT:-/data}"
+DAEMON_DIR="$DATA_ROOT/.governor"
+CONTEXT_ID="${GOVERNOR_CONTEXT_ID:-marginalia}"
+MODE="${GOVERNOR_MODE:-fiction}"
 
-CTX_DIR="$CONTEXTS_DIR/$CTX_ID"
-CTX_META="$CTX_DIR/_context.json"
-
-if [ ! -d "$GOV_DIR" ]; then
-    mkdir -p "$GOV_DIR/sessions"
-    echo '{"sessions": {}, "mainline": null}' > "$GOV_DIR/sessions/index.json"
+# GovernorContextManager must use the daemon's governor directory as its base.
+# Refuse an ambiguous split-brain configuration instead of silently starting.
+if [ -n "${GOVERNOR_DAEMON_DIR:-}" ] && [ "$GOVERNOR_DAEMON_DIR" != "$DAEMON_DIR" ]; then
+    echo "GOVERNOR_DAEMON_DIR must equal $DAEMON_DIR" >&2
+    exit 1
+fi
+if [ -n "${GOVERNOR_CONTEXTS_DIR:-}" ] && [ "$GOVERNOR_CONTEXTS_DIR" != "$DAEMON_DIR" ]; then
+    echo "GOVERNOR_CONTEXTS_DIR must equal $DAEMON_DIR" >&2
+    exit 1
 fi
 
-# Write context metadata if missing (required by GovernorContextManager.get())
-if [ ! -f "$CTX_META" ]; then
-    MODE="${GOVERNOR_MODE:-general}"
-    NOW=$(python3 -c "from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())")
-    cat > "$CTX_META" <<CTXEOF
-{
-  "context_id": "$CTX_ID",
-  "mode": "$MODE",
-  "root": "$CTX_DIR",
-  "governor_dir": "$GOV_DIR",
-  "created_at": "$NOW",
-  "metadata": {}
-}
-CTXEOF
-    echo "Created context metadata: $CTX_META (mode=$MODE)"
-fi
+mkdir -p "$DATA_ROOT"
+export MARGINALIA_DATA_ROOT="$DATA_ROOT"
+export GOVERNOR_DAEMON_DIR="$DAEMON_DIR"
+export GOVERNOR_CONTEXTS_DIR="$DAEMON_DIR"
+export GOVERNOR_CONTEXT_ID="$CONTEXT_ID"
+export GOVERNOR_MODE="$MODE"
 
-# Start governor daemon in background on a Unix socket
-SOCKET_PATH=$(python3 -c "
-from gov_webui.daemon_client import default_socket_path
-from pathlib import Path
-print(default_socket_path(Path('$GOV_DIR')))
-")
-
-echo "Starting governor daemon at $SOCKET_PATH"
-governor serve \
-    --socket "$SOCKET_PATH" \
-    --mode "${GOVERNOR_MODE:-general}" \
-    &
-DAEMON_PID=$!
-
-# Export socket path so the adapter can find it
+SOCKET_PATH="${GOVERNOR_SOCKET:-$(python3 -c \
+    'from pathlib import Path; from gov_webui.daemon_client import default_socket_path; import sys; print(default_socket_path(Path(sys.argv[1])))' \
+    "$DAEMON_DIR")}"
 export GOVERNOR_SOCKET="$SOCKET_PATH"
-export GOVERNOR_DIR="$GOV_DIR"
 
-# Wait for socket to appear (up to 5 seconds)
-for i in $(seq 1 50); do
+echo "Starting Agent Governor for Marginalia"
+echo "  root:    $DATA_ROOT"
+echo "  context: $CONTEXT_ID"
+echo "  mode:    $MODE"
+echo "  socket:  $SOCKET_PATH"
+
+governor --root "$DATA_ROOT" serve --socket "$SOCKET_PATH" --mode "$MODE" &
+DAEMON_PID=$!
+APP_PID=""
+
+cleanup() {
+    if [ -n "$APP_PID" ]; then
+        kill "$APP_PID" 2>/dev/null || true
+    fi
+    kill "$DAEMON_PID" 2>/dev/null || true
+    wait "$DAEMON_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+for _attempt in $(seq 1 100); do
     if [ -S "$SOCKET_PATH" ]; then
-        echo "Daemon ready (pid $DAEMON_PID)"
         break
+    fi
+    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+        echo "Agent Governor exited before creating its socket" >&2
+        exit 1
     fi
     sleep 0.1
 done
 
 if [ ! -S "$SOCKET_PATH" ]; then
-    echo "Warning: daemon socket not found after 5s, starting adapter anyway"
+    echo "Agent Governor socket was not ready after 10 seconds" >&2
+    exit 1
 fi
 
-# Start the web adapter in foreground
-exec uvicorn gov_webui.adapter:app --host 0.0.0.0 --port 8000
+uvicorn gov_webui.adapter:app --host 0.0.0.0 --port 8000 &
+APP_PID=$!
+wait "$APP_PID"

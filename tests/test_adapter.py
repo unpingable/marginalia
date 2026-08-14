@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from governor.context_manager import GovernorContextManager
+from support import authority_receipt, fake_governed_chat
 
 
 # ============================================================================
@@ -38,11 +39,10 @@ def reset_adapter_globals() -> None:
     adapter_mod._bridge = None
     adapter_mod._context_manager = None
     adapter_mod._session_store = None
-    adapter_mod._daemon_client = None
+    adapter_mod._governed_chat_adapter = None
     adapter_mod._project_store = None
     adapter_mod._research_project_store = None
     adapter_mod._artifact_store = None
-    adapter_mod._receipt_v1_bridge = None
     adapter_mod._pending_captures.clear()
     adapter_mod._capture_counter = 0
     adapter_mod._pending_research_captures.clear()
@@ -52,11 +52,10 @@ def reset_adapter_globals() -> None:
     adapter_mod._bridge = None
     adapter_mod._context_manager = None
     adapter_mod._session_store = None
-    adapter_mod._daemon_client = None
+    adapter_mod._governed_chat_adapter = None
     adapter_mod._project_store = None
     adapter_mod._research_project_store = None
     adapter_mod._artifact_store = None
-    adapter_mod._receipt_v1_bridge = None
     adapter_mod._pending_captures.clear()
     adapter_mod._capture_counter = 0
     adapter_mod._pending_research_captures.clear()
@@ -77,7 +76,9 @@ def app(mock_env, reset_adapter_globals):
 @pytest.fixture
 def client(app):
     """Create a test client."""
+    import gov_webui.adapter as adapter_mod
     from fastapi.testclient import TestClient
+    adapter_mod._governed_chat_adapter = fake_governed_chat()
     return TestClient(app)
 
 
@@ -93,7 +94,7 @@ class TestRootEndpoint:
         response = client.get("/")
         assert response.status_code == 200
         assert "text/html" in response.headers.get("content-type", "")
-        assert "Governor Chat" in response.text
+        assert "Marginalia" in response.text
 
     def test_root_contains_chat_and_governor(self, client) -> None:
         response = client.get("/")
@@ -106,14 +107,14 @@ class TestRootEndpoint:
         response = client.get("/api/info")
         assert response.status_code == 200
         data = response.json()
-        assert data["name"] == "Governor Chat Adapter"
+        assert data["name"] == "Marginalia"
         assert data["openai_compatible"] is True
 
     def test_api_info_includes_version(self, client) -> None:
         response = client.get("/api/info")
         data = response.json()
         assert "version" in data
-        assert data["version"] == "0.4.0"
+        assert data["version"] == "0.1.0"
 
     def test_api_info_includes_endpoints(self, client) -> None:
         response = client.get("/api/info")
@@ -131,14 +132,13 @@ class TestRootEndpoint:
 class TestHealthEndpoint:
     """Tests for GET /health."""
 
-    def test_health_degraded_when_backend_down(self, client) -> None:
-        """Health returns degraded when backend is unreachable."""
+    def test_health_uses_daemon_provider_status(self, client) -> None:
+        """Health reflects the provider status reported by AG."""
         response = client.get("/health")
         assert response.status_code == 200
         data = response.json()
-        # Backend is not running so should be degraded
-        assert data["status"] == "degraded"
-        assert data["backend"]["connected"] is False
+        assert data["status"] == "healthy"
+        assert data["backend"]["connected"] is True
 
     def test_health_includes_governor_info(self, client) -> None:
         response = client.get("/health")
@@ -150,7 +150,17 @@ class TestHealthEndpoint:
     def test_health_includes_backend_type(self, client) -> None:
         response = client.get("/health")
         data = response.json()
-        assert data["backend"]["type"] == "ollama"
+        assert data["backend"]["type"] == "mock"
+
+    def test_health_does_not_call_empty_daemon_provider_connected(self, client) -> None:
+        """A configured AG bridge with no usable models is not chat-ready."""
+        import gov_webui.adapter as adapter_mod
+
+        adapter_mod._governed_chat_adapter.models.return_value = []
+        response = client.get("/health")
+        data = response.json()
+        assert data["status"] == "degraded"
+        assert data["backend"]["connected"] is False
 
 
 # ============================================================================
@@ -186,25 +196,21 @@ class TestChatEndpoint:
 
     def _make_mock_daemon(self, content="Hello from test", model="test-model",
                           usage=None, violations=None, footer=None, pending=None):
-        """Create a mock DaemonChatClient with chat_send returning given data."""
-        mock = AsyncMock()
-        mock.chat_send = AsyncMock(return_value={
-            "content": content,
-            "model": model,
-            "usage": usage or {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-            "violations": violations or [],
-            "footer": footer,
-            "pending": pending,
-        })
-        mock.connect = AsyncMock()
-        mock.close = AsyncMock()
-        return mock
+        """Create an application-facing governed-chat fake."""
+        return fake_governed_chat(
+            content=content,
+            model=model,
+            usage=usage,
+            violations=violations,
+            footer=footer,
+            pending=pending,
+        )
 
     def test_non_streaming_response_format(self, client) -> None:
         """Non-streaming response has correct OpenAI format."""
         import gov_webui.adapter as adapter_mod
 
-        adapter_mod._daemon_client = self._make_mock_daemon()
+        adapter_mod._governed_chat_adapter = self._make_mock_daemon()
 
         response = client.post(
             "/v1/chat/completions",
@@ -229,7 +235,7 @@ class TestChatEndpoint:
 
         mock = AsyncMock()
         mock.chat_send = AsyncMock(side_effect=Exception("Connection refused"))
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
             "/v1/chat/completions",
@@ -245,7 +251,7 @@ class TestChatEndpoint:
         """Empty messages list is handled."""
         import gov_webui.adapter as adapter_mod
 
-        adapter_mod._daemon_client = self._make_mock_daemon(content="OK", model="m")
+        adapter_mod._governed_chat_adapter = self._make_mock_daemon(content="OK", model="m")
 
         response = client.post(
             "/v1/chat/completions",
@@ -261,7 +267,7 @@ class TestChatEndpoint:
         """Model name is passed through correctly."""
         import gov_webui.adapter as adapter_mod
 
-        adapter_mod._daemon_client = self._make_mock_daemon(
+        adapter_mod._governed_chat_adapter = self._make_mock_daemon(
             content="OK", model="custom-model"
         )
 
@@ -281,7 +287,7 @@ class TestChatEndpoint:
         import gov_webui.adapter as adapter_mod
 
         mock = self._make_mock_daemon()
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         client.post(
             "/v1/chat/completions",
@@ -301,7 +307,7 @@ class TestChatEndpoint:
         """Governor footer from daemon is appended to response content."""
         import gov_webui.adapter as adapter_mod
 
-        adapter_mod._daemon_client = self._make_mock_daemon(
+        adapter_mod._governed_chat_adapter = self._make_mock_daemon(
             content="Hello", footer="[Governor: OK]"
         )
 
@@ -320,7 +326,7 @@ class TestChatEndpoint:
         """When daemon returns pending violation, format as violation prompt."""
         import gov_webui.adapter as adapter_mod
 
-        adapter_mod._daemon_client = self._make_mock_daemon(
+        adapter_mod._governed_chat_adapter = self._make_mock_daemon(
             content="",
             pending={
                 "id": "p1",
@@ -333,7 +339,7 @@ class TestChatEndpoint:
         response = client.post(
             "/v1/chat/completions",
             json={
-                "model": "m",
+                "model": "",
                 "messages": [{"role": "user", "content": "Hi"}],
                 "stream": False,
             },
@@ -343,6 +349,7 @@ class TestChatEndpoint:
         # Should contain violation prompt, not the original content
         content = data["choices"][0]["message"]["content"]
         assert content  # Not empty — violation prompt was generated
+        assert data["model"] == "test-model"
 
 
 # ============================================================================
@@ -427,11 +434,12 @@ class TestBackendEndpoints:
         assert isinstance(data["backends"], list)
         assert len(data["backends"]) >= 1
 
-    def test_list_backends_has_ollama(self, client) -> None:
-        """Ollama is always present in the backends list."""
+    def test_list_backends_reports_daemon_provider(self, client) -> None:
+        """Only the provider reported by AG is presented as authoritative."""
         response = client.get("/v1/backends")
         types = [b["type"] for b in response.json()["backends"]]
-        assert "ollama" in types
+        assert types == ["mock"]
+        assert response.json()["authoritative"] == "agent-governor-daemon"
 
     def test_list_backends_marks_active(self, client) -> None:
         """Exactly one backend is marked active."""
@@ -441,39 +449,43 @@ class TestBackendEndpoints:
         assert len(active_list) == 1
         assert data["active"] == active_list[0]["type"]
 
+    def test_list_backends_does_not_claim_empty_provider_available(self, client) -> None:
+        """AG configuration alone is not presented as a usable model path."""
+        import gov_webui.adapter as adapter_mod
+
+        adapter_mod._governed_chat_adapter.models.return_value = []
+        data = client.get("/v1/backends").json()
+        assert data["connected"] is False
+        assert data["backends"][0]["available"] is False
+
     def test_switch_invalid_type(self, client) -> None:
-        """POST /v1/backends/switch with invalid type returns 400."""
+        """Marginalia never claims to switch AG's provider."""
         response = client.post(
             "/v1/backends/switch",
             json={"backend_type": "nonexistent"},
         )
-        assert response.status_code == 400
+        assert response.status_code == 409
 
     def test_switch_to_same_backend(self, client) -> None:
-        """Switching to the same backend type succeeds."""
+        """Even a same-name switch is rejected because AG owns provider state."""
         response = client.post(
             "/v1/backends/switch",
             json={"backend_type": "ollama"},
         )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
-        assert data["backend_type"] == "ollama"
+        assert response.status_code == 409
 
-    def test_api_info_reflects_current_backend(self, client) -> None:
-        """After switch, /api/info reflects the new backend type."""
-        import gov_webui.adapter as adapter_mod
-        adapter_mod._current_backend_type = "ollama"
-
+    def test_api_info_reflects_daemon_backend(self, client) -> None:
+        """API info reports AG's provider, not local donor configuration."""
         info = client.get("/api/info").json()
-        assert info["backend"] == "ollama"
+        assert info["backend"] == "mock"
+        assert info["provider_owner"] == "agent-governor-daemon"
 
 
 class TestBackendSelection:
     """Tests for backend type selection."""
 
-    def test_default_is_ollama(self, monkeypatch, tmp_contexts_dir) -> None:
-        """Default backend type is ollama."""
+    def test_default_is_daemon_owned(self, monkeypatch, tmp_contexts_dir) -> None:
+        """No local provider is implied when BACKEND_TYPE is absent."""
         monkeypatch.setenv("GOVERNOR_CONTEXTS_DIR", str(tmp_contexts_dir))
         monkeypatch.delenv("BACKEND_TYPE", raising=False)
 
@@ -483,7 +495,7 @@ class TestBackendSelection:
         adapter_mod._context_manager = None
         importlib.reload(adapter_mod)
 
-        assert adapter_mod.BACKEND_TYPE == "ollama"
+        assert adapter_mod.BACKEND_TYPE == "daemon"
 
     def test_anthropic_from_env(self, monkeypatch, tmp_contexts_dir) -> None:
         """BACKEND_TYPE=anthropic is read from environment."""
@@ -535,12 +547,13 @@ class TestStreamingResponse:
                 "violations": [],
                 "footer": None,
                 "pending": None,
+                "receipt": authority_receipt(),
             })
 
         mock = AsyncMock()
         mock.chat_stream = MagicMock(return_value=mock_daemon_stream())
         mock.connect = AsyncMock()
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
             "/v1/chat/completions",
@@ -893,8 +906,9 @@ class TestGovernorFooterIntegration:
             "violations": [],
             "footer": "[Governor] OK — 0 anchors checked",
             "pending": None,
+            "receipt": authority_receipt(),
         })
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
             "/v1/chat/completions",
@@ -922,12 +936,13 @@ class TestGovernorFooterIntegration:
                 "violations": [],
                 "footer": "[Governor] OK",
                 "pending": None,
+                "receipt": authority_receipt(),
             })
 
         mock = AsyncMock()
         mock.chat_stream = MagicMock(return_value=mock_stream())
         mock.connect = AsyncMock()
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
             "/v1/chat/completions",
@@ -2801,21 +2816,16 @@ class TestReceipt:
 
     def _make_mock_daemon(self, content="Hello from test", model="test-model",
                           usage=None, footer=None, pending=None):
-        mock = AsyncMock()
-        mock.chat_send = AsyncMock(return_value={
-            "content": content,
-            "model": model,
-            "usage": usage or {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-            "violations": [],
-            "footer": footer,
-            "pending": pending,
-        })
-        mock.connect = AsyncMock()
-        mock.close = AsyncMock()
-        return mock
+        return fake_governed_chat(
+            content=content,
+            model=model,
+            usage=usage,
+            footer=footer,
+            pending=pending,
+        )
 
-    def test_receipt_in_streaming_first_and_done_chunks(self, client) -> None:
-        """Receipt appears in both the first SSE chunk and the done chunk."""
+    def test_receipt_appears_only_after_stream_finality(self, client) -> None:
+        """No success receipt is fabricated before AG's final stream result."""
         import gov_webui.adapter as adapter_mod
 
         async def mock_stream(*args, **kwargs):
@@ -2828,12 +2838,13 @@ class TestReceipt:
                 "violations": [],
                 "footer": None,
                 "pending": None,
+                "receipt": authority_receipt(),
             })
 
         mock = AsyncMock()
         mock.chat_stream = MagicMock(return_value=mock_stream())
         mock.connect = AsyncMock()
-        adapter_mod._daemon_client = mock
+        adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
             "/v1/chat/completions",
@@ -2855,72 +2866,17 @@ class TestReceipt:
             if "receipt" in parsed:
                 chunks_with_receipt.append(parsed)
 
-        # Should have receipt in first chunk and done chunk
-        assert len(chunks_with_receipt) >= 2
-        first_receipt = chunks_with_receipt[0]["receipt"]
-        done_receipt = chunks_with_receipt[-1]["receipt"]
-
-        # Both receipts have required fields
-        for r in (first_receipt, done_receipt):
-            assert "constraints_hash" in r
-            assert "config_hash" in r
-            assert "mode" in r
-            assert "model" in r
-            assert "turn_id" in r
-            assert "turn_seq" in r
-            assert "request_id" in r
-            assert r["constraints_format_version"] == 1
-            assert r["rendered_by"] == "adapter"
-
-    def test_receipt_constraints_hash_correctness(self, tmp_contexts_dir) -> None:
-        """constraints_hash matches SHA-256[:16] of the constraints block content."""
-        import hashlib
-        import gov_webui.adapter as adapter_mod
-
-        adapter_mod._project_store = None
-        adapter_mod._research_project_store = None
-        adapter_mod.GOVERNOR_MODE = "code"
-        adapter_mod.GOVERNOR_CONTEXTS_DIR = str(tmp_contexts_dir)
-        adapter_mod.GOVERNOR_CONTEXT_ID = "receipt-hash-test"
-
-        cm = GovernorContextManager(base_dir=tmp_contexts_dir)
-        cm.create("receipt-hash-test", mode="code")
-        adapter_mod._context_manager = cm
-
-        from fastapi.testclient import TestClient
-        test_client = TestClient(adapter_mod.app, raise_server_exceptions=False)
-
-        test_client.put("/governor/code/project/contract", json={
-            "description": "test",
-            "config": {
-                "artifact_type": "tool",
-                "length": "medium",
-                "strict": False,
-            },
-        })
-
-        msg, meta = adapter_mod._build_constraints_message()
-        assert msg is not None
-
-        # Compute expected hash
-        expected_full = hashlib.sha256(msg["content"].encode("utf-8")).hexdigest()
-        expected_short = expected_full[:16]
-
-        # Build receipt and verify
-        receipt = adapter_mod._build_receipt(
-            msg, meta, "req-1", "turn-1", 1, "test-model"
-        )
-        assert receipt["constraints_hash"] == expected_short
-        assert receipt["constraints_hash_full"] == expected_full
-
-        adapter_mod._project_store = None
-        adapter_mod._context_manager = None
+        assert len(chunks_with_receipt) == 1
+        receipt = chunks_with_receipt[0]["receipt"]
+        assert receipt["receipt_role"] == "authority"
+        assert receipt["gate"] == "chat_bridge"
+        assert receipt["verdict"] == "pass"
 
     def test_receipt_no_constraints_in_general_mode(self, client) -> None:
         """In general mode, constraints_hash is None, mode is 'general'."""
         import gov_webui.adapter as adapter_mod
 
-        adapter_mod._daemon_client = self._make_mock_daemon()
+        adapter_mod._governed_chat_adapter = self._make_mock_daemon()
         adapter_mod.GOVERNOR_MODE = "general"
 
         response = client.post(
@@ -2935,52 +2891,14 @@ class TestReceipt:
         data = response.json()
         receipt = data.get("receipt")
         assert receipt is not None
-        assert receipt["constraints_hash"] is None
-        assert receipt["mode"] == "general"
-
-    def test_receipt_strict_flag(self, tmp_contexts_dir) -> None:
-        """When config.strict = True, receipt.strict is True."""
-        import gov_webui.adapter as adapter_mod
-
-        adapter_mod._project_store = None
-        adapter_mod._research_project_store = None
-        adapter_mod.GOVERNOR_MODE = "code"
-        adapter_mod.GOVERNOR_CONTEXTS_DIR = str(tmp_contexts_dir)
-        adapter_mod.GOVERNOR_CONTEXT_ID = "strict-test"
-
-        cm = GovernorContextManager(base_dir=tmp_contexts_dir)
-        cm.create("strict-test", mode="code")
-        adapter_mod._context_manager = cm
-
-        from fastapi.testclient import TestClient
-        test_client = TestClient(adapter_mod.app, raise_server_exceptions=False)
-
-        test_client.put("/governor/code/project/contract", json={
-            "description": "test",
-            "config": {
-                "artifact_type": "tool",
-                "length": "short",
-                "strict": True,
-            },
-        })
-
-        msg, meta = adapter_mod._build_constraints_message()
-        assert msg is not None
-        assert meta["strict"] is True
-
-        receipt = adapter_mod._build_receipt(
-            msg, meta, "req-1", "turn-1", 1, "test-model"
-        )
-        assert receipt["strict"] is True
-
-        adapter_mod._project_store = None
-        adapter_mod._context_manager = None
+        assert receipt["receipt_role"] == "authority"
+        assert receipt["gate"] == "chat_bridge"
 
     def test_receipt_in_non_streaming_response(self, client) -> None:
         """Non-streaming response includes receipt field."""
         import gov_webui.adapter as adapter_mod
 
-        adapter_mod._daemon_client = self._make_mock_daemon()
+        adapter_mod._governed_chat_adapter = self._make_mock_daemon()
 
         response = client.post(
             "/v1/chat/completions",
@@ -2994,10 +2912,7 @@ class TestReceipt:
         data = response.json()
         assert "receipt" in data
         receipt = data["receipt"]
-        assert receipt["model"] == "test-model"
-        assert receipt["turn_seq"] >= 1
-        assert receipt["turn_id"].startswith("turn-")
-        assert receipt["request_id"].startswith("chatcmpl-")
+        assert receipt == authority_receipt()
 
 
 # ============================================================================
@@ -3502,25 +3417,6 @@ def test_effective_config_code_no_style():
 # ============================================================================
 
 
-class FakeReceiptV1Bridge:
-    """Stub that captures emit calls without writing files."""
-    def __init__(self):
-        self.enabled = True
-        self.calls = []
-
-    def emit(self, ctx):
-        self.calls.append(ctx)
-        return "fake-receipt-id"
-
-
-@pytest.fixture
-def fake_receipt_bridge(app, monkeypatch):
-    import gov_webui.adapter as adapter_mod
-    fake = FakeReceiptV1Bridge()
-    monkeypatch.setattr(adapter_mod, "_receipt_v1_bridge", fake)
-    return fake
-
-
 def _build_test_receipt_dicts(count: int) -> list[dict]:
     """Build N chained receipt_v1 dicts for testing."""
     from receipt_v1 import ReceiptBuilder, ReceiptChain
@@ -3545,34 +3441,6 @@ def _build_test_receipt_dicts(count: int) -> list[dict]:
         chain.append(r)
         dicts.append(r.to_dict())
     return dicts
-
-
-def test_receipt_v1_bridge_emits_on_turn(client, fake_receipt_bridge):
-    """Bridge emits on non-streaming chat turn."""
-    import gov_webui.adapter as adapter_mod
-
-    mock = AsyncMock()
-    mock.chat_send = AsyncMock(return_value={
-        "content": "Hello",
-        "model": "test-model",
-        "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-        "violations": [],
-        "footer": None,
-        "pending": None,
-    })
-    mock.connect = AsyncMock()
-    mock.close = AsyncMock()
-    adapter_mod._daemon_client = mock
-
-    response = client.post(
-        "/v1/chat/completions",
-        json={"model": "test-model", "messages": [{"role": "user", "content": "Hi"}], "stream": False},
-    )
-    assert response.status_code == 200
-    assert len(fake_receipt_bridge.calls) == 1
-    ctx = fake_receipt_bridge.calls[0]
-    assert ctx.agent_id == "webui"
-    assert ctx.gate == "chat_completion"
 
 
 def test_receipt_export_returns_jsonl(client, monkeypatch):

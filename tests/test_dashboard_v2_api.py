@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
+from support import fake_governed_chat
+
 # Set env vars before importing the app
 os.environ.setdefault("BACKEND_TYPE", "ollama")
 os.environ.setdefault("GOVERNOR_MODE", "general")
@@ -29,6 +31,7 @@ def _reset_adapter_singletons(tmp_path):
     adapter._instrument_system = None
     adapter._cancel_requests = {}
     adapter._research_store = None
+    adapter._governed_chat_adapter = fake_governed_chat()
 
     # Override context dir to tmp
     adapter.GOVERNOR_CONTEXTS_DIR = str(tmp_path / "contexts")
@@ -45,6 +48,7 @@ def _reset_adapter_singletons(tmp_path):
     adapter._instrument_system = None
     adapter._cancel_requests = {}
     adapter._research_store = None
+    adapter._governed_chat_adapter = None
 
 
 @pytest.fixture

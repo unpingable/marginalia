@@ -1,79 +1,20 @@
-# Phosphor — Multi-User Stack
-#
-# Run: docker-compose up -d
-#
-# Self-contained chat + governor panel:
-#   - Fiction:  http://localhost:8001
-#   - Code:     http://localhost:8002
-#   - Research: http://localhost:8003
-#
-# Uses pre-built GHCR image by default. Set PHOSPHOR_IMAGE=local in .env
-# (or run start.sh) to build from source instead.
-#
-# Requires: ANTHROPIC_API_KEY in .env or environment
-#
-# For local Ollama usage instead, see docker-compose.ollama.yml
-
-x-phosphor-image: &phosphor-image
-  image: ${PHOSPHOR_IMAGE:-ghcr.io/unpingable/phosphor:latest}
+# Marginalia — one standalone governed creative-writing application.
 
 services:
-  # ============================================================
-  # Fiction writing stack
-  # ============================================================
-
-  fiction-adapter:
-    <<: *phosphor-image
-    container_name: governor-fiction-adapter
+  marginalia:
+    image: ${MARGINALIA_IMAGE:-marginalia:local}
+    container_name: marginalia
     ports:
-      - "8001:8000"
+      - "${MARGINALIA_PORT:-8000}:8000"
     environment:
-      - BACKEND_TYPE=anthropic
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - GOVERNOR_CONTEXT_ID=fiction-current-novel
+      - BACKEND_TYPE=${BACKEND_TYPE:-anthropic}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOVERNOR_CONTEXT_ID=${GOVERNOR_CONTEXT_ID:-erin-writing}
       - GOVERNOR_MODE=fiction
-      - GOVERNOR_CONTEXTS_DIR=/contexts
+      - MARGINALIA_DATA_ROOT=/data
     volumes:
-      - contexts_data:/contexts
-    restart: unless-stopped
-
-  # ============================================================
-  # Code development stack
-  # ============================================================
-
-  code-adapter:
-    <<: *phosphor-image
-    container_name: governor-code-adapter
-    ports:
-      - "8002:8000"
-    environment:
-      - BACKEND_TYPE=anthropic
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - GOVERNOR_CONTEXT_ID=code-current-project
-      - GOVERNOR_MODE=code
-      - GOVERNOR_CONTEXTS_DIR=/contexts
-    volumes:
-      - contexts_data:/contexts
-    restart: unless-stopped
-
-  # ============================================================
-  # Research writing stack
-  # ============================================================
-
-  research-adapter:
-    <<: *phosphor-image
-    container_name: governor-research-adapter
-    ports:
-      - "8003:8000"
-    environment:
-      - BACKEND_TYPE=anthropic
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - GOVERNOR_CONTEXT_ID=research-current
-      - GOVERNOR_MODE=research
-      - GOVERNOR_CONTEXTS_DIR=/contexts
-    volumes:
-      - contexts_data:/contexts
+      - marginalia_data:/data
     restart: unless-stopped
 
 volumes:
-  contexts_data:
+  marginalia_data:

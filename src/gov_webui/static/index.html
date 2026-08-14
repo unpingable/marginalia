@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Phosphor</title>
+<title>Marginalia</title>
 <style>
   :root {
     --bg: #fff; --fg: #111; --muted: #666; --border: #ddd;
@@ -447,7 +447,7 @@
   <!-- Chat Panel -->
   <div class="chat-panel">
     <div class="chat-header">
-      <h1>Governor Chat</h1>
+      <h1>Marginalia</h1>
       <div class="session-picker">
         <select class="session-select" id="session-select" onchange="switchSession(this.value)">
           <option value="">Loading...</option>
@@ -463,7 +463,7 @@
 
     <div class="messages" id="messages">
       <div class="welcome" id="welcome">
-        <h2>Governor Chat</h2>
+        <h2>Marginalia</h2>
         <p>Chat with AI under governor constraints. Your rules are enforced in real time.</p>
       </div>
     </div>
@@ -500,11 +500,11 @@
     <!-- Backend Selector -->
     <div class="card" data-disclosure="advanced">
       <div class="card-header">
-        <h3>Backend</h3>
+        <h3>Provider (configured by AG)</h3>
         <span id="backend-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;"></span>
       </div>
       <div class="card-body" style="display:flex;align-items:center;gap:0.5rem;">
-        <select class="model-select" id="backend-select" onchange="switchBackend(this.value)" style="flex:1;">
+        <select class="model-select" id="backend-select" disabled style="flex:1;">
           <option value="">Loading...</option>
         </select>
       </div>
@@ -1780,7 +1780,7 @@
 
   function clearMessages() {
     var messagesEl = document.getElementById('messages');
-    messagesEl.innerHTML = '<div class="welcome" id="welcome"><h2>Governor Chat</h2><p>Chat with AI under governor constraints. Your rules are enforced in real time.</p></div>';
+    messagesEl.innerHTML = '<div class="welcome" id="welcome"><h2>Marginalia</h2><p>A governed conversational writing space.</p></div>';
   }
 
   function addMessage(role, content) {
@@ -1977,7 +1977,8 @@
     }
     refreshGovernor();
 
-    // Attach receipt strip to assistant bubble
+    // Keep authoritative receipt evidence behind the application boundary.
+    // The ordinary writing surface shows only the outcome that matters.
     if (_lastAssistantBubble && _lastReceipt) {
       var turnId = _lastTurnId || ('local-' + Date.now());
       var metaStrip = document.createElement('div');
@@ -1986,29 +1987,17 @@
 
       var metaHtml = '';
       var r = _lastReceipt;
-      if (r.constraints_hash) {
-        metaHtml += '<span class="receipt-badge" title="Config hash">' + esc(r.config_hash || '?') + '</span>';
-        metaHtml += '<span class="receipt-badge" title="Constraints block hash">' + esc(r.constraints_hash) + '</span>';
-        if (r.strict) {
-          metaHtml += '<span class="receipt-badge strict-on">strict</span>';
-        }
+      if (r.verdict === 'block') {
+        metaHtml = '<span class="receipt-badge strict-on">Needs your decision</span>';
       } else {
-        metaHtml += '<span class="receipt-badge no-constraints">no constraints</span>';
+        metaHtml = '<span class="receipt-badge">Governed</span>';
       }
-      if (r.forced) {
-        metaHtml += '<span class="receipt-badge strict-on" title="Preflight bypassed">FORCED</span>';
-      }
-      if (r.mode) metaHtml += '<span class="receipt-badge">' + esc(r.mode) + '</span>';
-      if (r.model) metaHtml += '<span class="receipt-badge">' + esc(r.model) + '</span>';
-      if (r.turn_seq) metaHtml += '<span style="color:var(--muted);font-size:0.65rem;">#' + r.turn_seq + '</span>';
 
       metaStrip.innerHTML = metaHtml;
       _lastAssistantBubble.parentNode.appendChild(metaStrip);
 
       // Populate per-bubble turn_seq map for promote provenance
-      if (r.turn_seq && turnId) {
-        _msgTurnSeq[turnId] = r.turn_seq;
-      }
+      // AG receipts intentionally do not masquerade as donor UI turn numbers.
     }
 
     // Capture scan: scan for mode-specific captures
@@ -2920,21 +2909,6 @@
       dot.style.background = data.connected ? '#22c55e' : '#ef4444';
     }).catch(function() {});
   }
-
-  window.switchBackend = function(value) {
-    if (!value) return;
-    fetch(BASE + '/v1/backends/switch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ backend_type: value })
-    }).then(function(r) { return r.json(); }).then(function(data) {
-      if (data.success) {
-        loadModels();
-        loadBackends();
-        document.getElementById('backend-badge').textContent = data.backend_type;
-      }
-    }).catch(function() {});
-  };
 
   // ========== Governor Sidebar ==========
 
