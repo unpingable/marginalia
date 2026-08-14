@@ -17,7 +17,33 @@ class DeterministicBackend:
     response = "A quiet sentence containing MARGINALIA_FORBIDDEN."
     model = "deterministic-fiction-model"
 
+    @staticmethod
+    def _message_value(message, field):
+        if isinstance(message, dict):
+            return message.get(field, "")
+        return getattr(message, field, "")
+
     async def chat(self, messages, model, **kwargs):
+        if any(
+            self._message_value(message, "role") == "user"
+            and self._message_value(message, "content") == "MARGINALIA_PROJECT_ECHO"
+            for message in messages
+        ):
+            full_prompt = "\n".join(
+                self._message_value(message, "content") for message in messages
+            )
+            required = (
+                "MARGINALIA_PROJECT_CONTEXT_V1",
+                "A clockmaker inherits a flooded theatre.",
+                "continuity-conscious co-writer",
+                "Measured sentences with flashes of wonder.",
+            )
+            status = (
+                "PROJECT_CONTEXT_APPLIED"
+                if all(value in full_prompt for value in required)
+                else "PROJECT_CONTEXT_MISSING"
+            )
+            return ChatResponse(content=status, model=model or self.model)
         return ChatResponse(content=self.response, model=model or self.model)
 
     async def stream(self, messages, model, **kwargs):

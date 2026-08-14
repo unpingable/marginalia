@@ -12,6 +12,7 @@ import pytest
 
 from governor.continuity import Anchor, AnchorType, Severity, create_registry
 from governor.context_manager import GovernorContextManager
+from gov_webui.creative_project import CreativeProjectStore, render_project_context
 from gov_webui.daemon_client import DaemonChatClient
 from gov_webui.governed_chat_adapter import (
     GovernedChatAdapter,
@@ -91,6 +92,12 @@ async def test_block_restart_pending_isolation_resolve_authority(tmp_path: Path)
     socket_path = tmp_path / "governor.sock"
     context_id = "erin-novel"
     context_governor_dir = _install_blocking_anchor(daemon_dir, context_id)
+    project_store = CreativeProjectStore(context_governor_dir.parent, context_id)
+    project_config = project_store.update(
+        project_brief="A clockmaker inherits a flooded theatre.",
+        collaborator_stance="Act as a continuity-conscious co-writer.",
+        voice_style_guidance="Measured sentences with flashes of wonder.",
+    )
 
     process = await _start_daemon(data_root, socket_path)
     adapter = GovernedChatAdapter(
@@ -105,6 +112,23 @@ async def test_block_restart_pending_isolation_resolve_authority(tmp_path: Path)
         assert [model["id"] for model in await adapter.models()] == [
             "deterministic-fiction-model"
         ]
+
+        # The persisted product context crosses the real socket, reaches the
+        # deterministic provider, and returns through AG with an authority
+        # receipt before the separate blocking path is exercised.
+        project_message = render_project_context(project_config)
+        assert project_message is not None
+        applied = await adapter.chat_send([
+            project_message,
+            {"role": "user", "content": "MARGINALIA_PROJECT_ECHO"},
+        ])
+        assert applied["content"] == "PROJECT_CONTEXT_APPLIED"
+        assert applied["receipt"]["verdict"] == "pass"
+        applied_detail = await adapter.receipt_detail(
+            applied["receipt"]["receipt_id"]
+        )
+        assert applied_detail["evidence"]["context_id"] == context_id
+        assert await adapter.pending() is None
 
         blocked = await adapter.chat_send(
             [{"role": "user", "content": "Write the next sentence."}]

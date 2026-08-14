@@ -6,6 +6,11 @@ DAEMON_DIR="$DATA_ROOT/.governor"
 CONTEXT_ID="${GOVERNOR_CONTEXT_ID:-marginalia}"
 MODE="${GOVERNOR_MODE:-fiction}"
 
+if [ "$MODE" != "fiction" ]; then
+    echo "Marginalia is fiction-only; GOVERNOR_MODE must be fiction" >&2
+    exit 1
+fi
+
 # GovernorContextManager must use the daemon's governor directory as its base.
 # Refuse an ambiguous split-brain configuration instead of silently starting.
 if [ -n "${GOVERNOR_DAEMON_DIR:-}" ] && [ "$GOVERNOR_DAEMON_DIR" != "$DAEMON_DIR" ]; then

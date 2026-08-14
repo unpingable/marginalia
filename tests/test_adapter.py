@@ -40,6 +40,7 @@ def reset_adapter_globals() -> None:
     adapter_mod._context_manager = None
     adapter_mod._session_store = None
     adapter_mod._governed_chat_adapter = None
+    adapter_mod._creative_project_store = None
     adapter_mod._project_store = None
     adapter_mod._research_project_store = None
     adapter_mod._artifact_store = None
@@ -53,6 +54,7 @@ def reset_adapter_globals() -> None:
     adapter_mod._context_manager = None
     adapter_mod._session_store = None
     adapter_mod._governed_chat_adapter = None
+    adapter_mod._creative_project_store = None
     adapter_mod._project_store = None
     adapter_mod._research_project_store = None
     adapter_mod._artifact_store = None
@@ -96,12 +98,14 @@ class TestRootEndpoint:
         assert "text/html" in response.headers.get("content-type", "")
         assert "Marginalia" in response.text
 
-    def test_root_contains_chat_and_governor(self, client) -> None:
+    def test_root_contains_writing_and_project_surfaces(self, client) -> None:
         response = client.get("/")
         body = response.text
         assert "chat-panel" in body
-        assert "governor-panel" in body
-        assert "model-select" in body
+        assert "project-settings" in body
+        assert "artifact-editor" in body
+        assert "governor-panel" not in body
+        assert "model-select" not in body
 
     def test_api_info_returns_json(self, client) -> None:
         response = client.get("/api/info")

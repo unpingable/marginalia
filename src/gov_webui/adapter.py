@@ -2,27 +2,27 @@
 """
 Marginalia's OpenAI-compatible API and governed creative-writing donor UI.
 
-Serves a self-contained chat + governor UI at the root URL (/), and exposes
-an OpenAI-compatible API for external clients. Supports switchable backends
-(Anthropic Claude, Ollama, Claude Code CLI, Codex CLI) with isolated governor
-contexts per user/project.
+Serves a self-contained fiction-writing UI at the root URL (/) and exposes an
+OpenAI-compatible governed-chat API.  Agent Governor owns provider selection
+and execution; Marginalia owns conversations and creative-project state.
 
 Run with: uvicorn gov_webui.adapter:app --host 0.0.0.0 --port 8000
 
-Primary UI:  http://localhost:8000  (combined chat + governor panel)
+Primary UI:  http://localhost:8000
 API info:    http://localhost:8000/api/info
 
 Configuration via environment variables:
     MARGINALIA_DATA_ROOT - Persistent application root (default: ~/.marginalia)
     GOVERNOR_DAEMON_DIR  - AG daemon state directory (default: DATA_ROOT/.governor)
     GOVERNOR_CONTEXT_ID - Active context ID (default: "default")
-    GOVERNOR_MODE       - Context mode: fiction/code/nonfiction/general (default: "general")
-    GOVERNOR_CONTEXTS_DIR - Base dir for contexts (default: ~/.governor-contexts)
+    GOVERNOR_MODE       - Must be "fiction" for the Marginalia product
+    GOVERNOR_CONTEXTS_DIR - AG context base (default: GOVERNOR_DAEMON_DIR)
     GOVERNOR_AUTH_TOKEN - Bearer token for mutating endpoints (default: "" = no auth)
     GOVERNOR_BIND_HOST  - Host to bind to (default: "127.0.0.1")
 
-The claude-code backend uses your Claude Max subscription instead of API credits.
-The codex backend uses your ChatGPT subscription instead of API credits.
+Historical code/research/operator routes remain temporarily available only
+when MARGINALIA_ENABLE_DONOR_ROUTES=1.  They are disabled by default and are
+not part of the served Marginalia product.
 """
 
 from __future__ import annotations
@@ -43,20 +43,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from governor.violation_resolver import ViolationResolver
 from gov_webui.daemon_client import DaemonAuthError, DaemonChatClient, default_socket_path
+from gov_webui.creative_project import (
+    CreativeProjectConfig,
+    CreativeProjectContextMismatch,
+    CreativeProjectError,
+    CreativeProjectStore,
+    CreativeProjectVersionConflict,
+    render_project_context,
+)
 from gov_webui.governed_chat_adapter import GovernedChatAdapter
 from governor.context_manager import GovernorContextManager
-from governor.session_store import ChatSession, SessionMessage, SessionStore
-from governor.viewmodel import build_viewmodel, GovernorViewModel
-from gov_webui.summaries import (
-    derive_status_pill,
-    derive_one_sentence,
-    derive_suggested_action,
-    derive_last_event,
-    derive_why_feed,
-    derive_history_days,
-)
+from governor.session_store import SessionMessage, SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +74,35 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 CLAUDE_PATH = os.environ.get("CLAUDE_PATH", "claude")  # Path to claude CLI for claude-code backend
 CODEX_PATH = os.environ.get("CODEX_PATH", "codex")  # Path to codex CLI for codex backend
 GOVERNOR_CONTEXT_ID = os.environ.get("GOVERNOR_CONTEXT_ID", "default")
-GOVERNOR_MODE = os.environ.get("GOVERNOR_MODE", "general")
+GOVERNOR_MODE = os.environ.get("GOVERNOR_MODE", "fiction")
 GOVERNOR_CONTEXTS_DIR = os.environ.get(
     "GOVERNOR_CONTEXTS_DIR", GOVERNOR_DAEMON_DIR
 )
 GOVERNOR_SHOW_OK_FOOTER = os.environ.get("GOVERNOR_SHOW_OK_FOOTER", "true").lower() in ("true", "1", "yes")
+MARGINALIA_ENABLE_DONOR_ROUTES = os.environ.get(
+    "MARGINALIA_ENABLE_DONOR_ROUTES", ""
+).lower() in ("true", "1", "yes")
+
+if GOVERNOR_MODE != "fiction" and not MARGINALIA_ENABLE_DONOR_ROUTES:
+    raise RuntimeError(
+        "Marginalia is fiction-only; GOVERNOR_MODE must be 'fiction'. "
+        "Historical donor routes may be exercised only with "
+        "MARGINALIA_ENABLE_DONOR_ROUTES=1."
+    )
+
+# Heavy AG research/operator modules are not imported by the product path.
+# They remain behind the temporary donor-test switch until their historical
+# tests and source can be removed in a later cleanup slice.
+if MARGINALIA_ENABLE_DONOR_ROUTES:
+    from governor.viewmodel import GovernorViewModel, build_viewmodel
+    from gov_webui.summaries import (
+        derive_history_days,
+        derive_last_event,
+        derive_one_sentence,
+        derive_status_pill,
+        derive_suggested_action,
+        derive_why_feed,
+    )
 
 # Auth token — when set, mutating endpoints require Authorization: Bearer <token>
 # When unset, all endpoints are open (dev mode).
@@ -108,6 +130,9 @@ app = FastAPI(
     title="Marginalia",
     description="Standalone governed creative-writing application",
     version=_webui_version(),
+    docs_url="/docs" if MARGINALIA_ENABLE_DONOR_ROUTES else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if MARGINALIA_ENABLE_DONOR_ROUTES else None,
 )
 
 app.add_middleware(
@@ -129,10 +154,36 @@ _AUTH_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
 # Paths exempt from auth even for mutating methods (health probes, etc.)
 _AUTH_EXEMPT_PATHS = {"/health", "/api/info", "/docs", "/openapi.json"}
 
+_PRODUCT_EXACT_PATHS = {
+    "/",
+    "/health",
+    "/api/info",
+    "/v1/models",
+    "/v1/backends",
+    "/v1/backends/switch",
+    "/v1/chat/completions",
+    "/v1/governed-chat/pending",
+    "/v1/governed-chat/resolve",
+    "/v1/project",
+    "/v1/project/export",
+}
+_PRODUCT_PATH_PREFIXES = (
+    "/v1/models/",
+    "/sessions/",
+    "/governor/fiction/",
+    "/governor/artifacts",
+)
+
+
+def _is_product_path(path: str) -> bool:
+    return path in _PRODUCT_EXACT_PATHS or path.startswith(_PRODUCT_PATH_PREFIXES)
+
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Enforce bearer token auth on mutating endpoints when GOVERNOR_AUTH_TOKEN is set."""
+    """Enforce the fiction-product route and optional bearer-auth boundaries."""
+    if not MARGINALIA_ENABLE_DONOR_ROUTES and not _is_product_path(request.url.path):
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
     if GOVERNOR_AUTH_TOKEN and request.method in _AUTH_METHODS:
         if request.url.path not in _AUTH_EXEMPT_PATHS:
             auth_header = request.headers.get("authorization", "")
@@ -222,6 +273,15 @@ class PendingResolutionRequest(BaseModel):
     expiry: str | None = None
 
 
+class CreativeProjectUpdateRequest(BaseModel):
+    """The complete, deliberately small M1 project-settings form."""
+
+    project_brief: str = Field(default="", max_length=20_000)
+    collaborator_stance: str = Field(default="", max_length=20_000)
+    voice_style_guidance: str = Field(default="", max_length=20_000)
+    expected_version: int | None = Field(default=None, ge=1)
+
+
 # ============================================================================
 # Bridge setup (lazy init on first request)
 # ============================================================================
@@ -232,6 +292,7 @@ _bridge: Any = None
 _context_manager: GovernorContextManager | None = None
 _session_store: SessionStore | None = None
 _governed_chat_adapter: GovernedChatAdapter | None = None
+_creative_project_store: CreativeProjectStore | None = None
 
 
 def _get_governed_chat_adapter() -> GovernedChatAdapter:
@@ -271,6 +332,36 @@ def _get_session_store() -> SessionStore:
             sessions_dir = cm.base_dir / GOVERNOR_CONTEXT_ID / "sessions"
         _session_store = SessionStore(sessions_dir)
     return _session_store
+
+
+def _get_creative_project_store() -> CreativeProjectStore:
+    """Return project state bound to the same context used for governed chat."""
+    global _creative_project_store
+    if _creative_project_store is None:
+        cm = _get_context_manager()
+        context = cm.get_or_create(GOVERNOR_CONTEXT_ID, mode="fiction")
+        if context.mode != "fiction":
+            raise CreativeProjectError(
+                f"context {GOVERNOR_CONTEXT_ID!r} is {context.mode!r}, not fiction"
+            )
+        _creative_project_store = CreativeProjectStore(
+            context.root,
+            GOVERNOR_CONTEXT_ID,
+        )
+    return _creative_project_store
+
+
+def _project_payload(config: CreativeProjectConfig) -> dict[str, Any]:
+    payload = config.model_dump(mode="json")
+    payload["has_guidance"] = config.has_guidance
+    return payload
+
+
+def _build_project_context_message() -> dict[str, str] | None:
+    """Build the persistent writing guidance sent through governed execution."""
+    if GOVERNOR_MODE != "fiction":
+        return None
+    return render_project_context(_get_creative_project_store().get())
 
 
 # ============================================================================
@@ -377,6 +468,95 @@ async def governed_chat_resolve(
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Daemon error: {exc}")
+
+
+@app.get("/v1/project")
+async def get_creative_project() -> dict[str, Any]:
+    """Return creative direction for the active fiction context."""
+    try:
+        return _project_payload(_get_creative_project_store().get())
+    except CreativeProjectContextMismatch as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except CreativeProjectError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.put("/v1/project")
+async def update_creative_project(
+    request: CreativeProjectUpdateRequest,
+) -> dict[str, Any]:
+    """Atomically replace creative direction for the active fiction context."""
+    try:
+        config = _get_creative_project_store().update(
+            project_brief=request.project_brief,
+            collaborator_stance=request.collaborator_stance,
+            voice_style_guidance=request.voice_style_guidance,
+            expected_version=request.expected_version,
+        )
+        return _project_payload(config)
+    except CreativeProjectVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except CreativeProjectContextMismatch as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except CreativeProjectError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/v1/project/export")
+async def export_creative_project() -> dict[str, Any]:
+    """Export writer-facing project state without governance receipt ceremony."""
+    project = _get_creative_project_store().get()
+    story_bible = {
+        "characters": (await list_characters()).get("characters", []),
+        "world_rules": (await list_world_rules()).get("rules", []),
+        "negative_constraints": (await list_forbidden()).get("forbidden", []),
+    }
+
+    sessions = []
+    session_store = _get_session_store()
+    for summary in session_store.list_summaries():
+        session = session_store.get(summary["id"])
+        if session is not None:
+            sessions.append(session.to_dict())
+
+    artifacts = []
+    artifact_store = _get_artifact_store()
+    summaries, _ = artifact_store.list_all()
+    for summary in summaries:
+        meta, _, _ = artifact_store.get(summary.id)
+        revisions = []
+        for version in meta.versions:
+            revisions.append({
+                "version": version.version,
+                "created_at": version.created_at,
+                "source": version.source,
+                "content": artifact_store.get_version(meta.id, version.version),
+            })
+        artifacts.append({
+            "id": meta.id,
+            "title": meta.title,
+            "kind": meta.kind,
+            "language": meta.language,
+            "current_version": meta.current_version,
+            "created_at": meta.created_at,
+            "updated_at": meta.updated_at,
+            "revisions": revisions,
+        })
+
+    return {
+        "schema": "marginalia.creative-project-export/v1",
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "project": {
+            "project_brief": project.project_brief,
+            "collaborator_stance": project.collaborator_stance,
+            "voice_style_guidance": project.voice_style_guidance,
+        },
+        "story_bible": story_bible,
+        "conversations": sessions,
+        "artifacts": artifacts,
+    }
 
 
 _LENGTH_BANDS = {
@@ -591,7 +771,21 @@ async def chat_completions(
     governed_chat = _get_governed_chat_adapter()
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
-    # Inject constraints after last system message
+    # Persistent creative direction is part of the same message list AG governs;
+    # it is not a parallel prompt or an ungoverned provider call.
+    try:
+        project_context = _build_project_context_message()
+    except CreativeProjectError as exc:
+        raise HTTPException(status_code=500, detail=f"Project state error: {exc}")
+    if project_context:
+        insert_idx = 0
+        for i, message in enumerate(messages):
+            if message["role"] == "system":
+                insert_idx = i + 1
+        messages.insert(insert_idx, project_context)
+
+    # Retained donor constraint blocks are relevant only when explicitly
+    # running old code/research tests; normal Marginalia is fiction-only.
     constraints_msg, contract_meta = _build_constraints_message()
     if constraints_msg:
         insert_idx = 0
@@ -734,7 +928,7 @@ async def _stream_via_daemon(
             }
             yield f"data: {json.dumps(sse_chunk)}\n\n"
 
-        # Final done chunk — includes turn_id + receipt for code builder
+        # Final done chunk carries AG's authoritative linkage for API clients.
         done_chunk = {
             "id": request_id,
             "object": "chat.completion.chunk",
@@ -2882,6 +3076,8 @@ async def list_corrections(limit: int = 20) -> dict[str, Any]:
     if ctx is None:
         return {"corrections": [], "message": "No governor context initialized."}
 
+    from governor.violation_resolver import ViolationResolver
+
     resolver = ViolationResolver(
         governor_dir=ctx.governor_dir,
         mode=ctx.mode,
@@ -2965,7 +3161,7 @@ async def health() -> dict[str, Any]:
 
 @app.get("/")
 async def root() -> HTMLResponse:
-    """Serve the combined chat + governor UI."""
+    """Serve the Marginalia fiction-writing room."""
     html_path = _STATIC_DIR / "index.html"
     return HTMLResponse(
         content=html_path.read_text(encoding="utf-8"),
@@ -3122,31 +3318,32 @@ async def api_info() -> dict[str, Any]:
         )
     except Exception:
         backend = "unavailable"
-    return {
-        "name": "Marginalia",
-        "version": _webui_version(),
-        "backend": backend,
-        "provider_owner": "agent-governor-daemon",
-        "openai_compatible": True,
-        "governor_context": GOVERNOR_CONTEXT_ID,
-        "governor_mode": GOVERNOR_MODE,
-        "endpoints": {
-            "ui": "/",
-            "models": "/v1/models",
-            "chat": "/v1/chat/completions",
-            "backends": "/v1/backends",
-            "governed_chat_pending": "/v1/governed-chat/pending",
-            "governed_chat_resolve": "/v1/governed-chat/resolve",
-            "health": "/health",
-            "api_info": "/api/info",
-            # Sessions
-            "sessions_list": "/sessions/",
-            "sessions_create": "/sessions/",
-            "sessions_get": "/sessions/{id}",
-            "sessions_delete": "/sessions/{id}",
-            "sessions_update": "/sessions/{id}",
-            "sessions_append_message": "/sessions/{id}/messages",
-            # Governor
+    endpoints = {
+        "ui": "/",
+        "models": "/v1/models",
+        "chat": "/v1/chat/completions",
+        "backends": "/v1/backends",
+        "governed_chat_pending": "/v1/governed-chat/pending",
+        "governed_chat_resolve": "/v1/governed-chat/resolve",
+        "project": "/v1/project",
+        "project_export": "/v1/project/export",
+        "health": "/health",
+        "api_info": "/api/info",
+        "sessions_list": "/sessions/",
+        "sessions_create": "/sessions/",
+        "sessions_get": "/sessions/{id}",
+        "sessions_delete": "/sessions/{id}",
+        "sessions_update": "/sessions/{id}",
+        "sessions_append_message": "/sessions/{id}/messages",
+        "fiction_characters": "/governor/fiction/characters",
+        "fiction_world_rules": "/governor/fiction/world-rules",
+        "fiction_forbidden": "/governor/fiction/forbidden",
+        "fiction_capture_scan": "/governor/fiction/capture/scan",
+        "fiction_captures": "/governor/fiction/captures",
+        "artifacts": "/governor/artifacts",
+    }
+    if MARGINALIA_ENABLE_DONOR_ROUTES:
+        endpoints.update({
             "governor_contexts": "/governor/contexts",
             "governor_status": "/governor/status",
             "governor_now": "/governor/now",
@@ -3155,23 +3352,15 @@ async def api_info() -> dict[str, Any]:
             "governor_detail": "/governor/detail/{item_id}",
             "governor_corrections": "/governor/corrections",
             "governor_ui": "/governor/ui",
-            # Fiction mode
-            "fiction_characters": "/governor/fiction/characters",
-            "fiction_world_rules": "/governor/fiction/world-rules",
-            "fiction_forbidden": "/governor/fiction/forbidden",
-            # Code mode
             "code_decisions": "/governor/code/decisions",
             "code_constraints": "/governor/code/constraints",
-            # Research mode
             "research_state": "/governor/research/state",
             "research_claims": "/governor/research/claims",
             "research_assumptions": "/governor/research/assumptions",
             "research_uncertainties": "/governor/research/uncertainties",
             "research_links": "/governor/research/links",
-            # Export/Import
             "governor_export": "/governor/export",
             "governor_import": "/governor/import",
-            # V2 Dashboard
             "v2_runs": "/v2/runs",
             "v2_run_detail": "/v2/runs/{run_id}",
             "v2_run_events": "/v2/runs/{run_id}/events",
@@ -3192,13 +3381,21 @@ async def api_info() -> dict[str, Any]:
             "v2_demos": "/v2/demos",
             "v2_demo_playwright": "/v2/demos/{name}/playwright",
             "dashboard": "/dashboard",
-            # V2 Intent Compiler
             "v2_intent_templates": "/v2/intent/templates",
             "v2_intent_schema": "/v2/intent/schema/{template_name}",
             "v2_intent_validate": "/v2/intent/validate",
             "v2_intent_compile": "/v2/intent/compile",
             "v2_intent_policy": "/v2/intent/policy",
-        },
+        })
+    return {
+        "name": "Marginalia",
+        "version": _webui_version(),
+        "backend": backend,
+        "provider_owner": "agent-governor-daemon",
+        "openai_compatible": True,
+        "governor_context": GOVERNOR_CONTEXT_ID,
+        "governor_mode": GOVERNOR_MODE,
+        "endpoints": endpoints,
     }
 
 
@@ -3206,20 +3403,21 @@ async def api_info() -> dict[str, Any]:
 # V2 Dashboard API — Run-centric governance dashboard
 # ============================================================================
 
-from governor.dashboard_ux import (
-    DashboardStore,
-    RunSummary,
-    RunVerdict,
-    StreamEvent,
-    StreamEventType,
-    CancelRequest,
-    build_controls_schema,
-    BUILTIN_TEMPLATES,
-    BUILTIN_ACTIONS,
-    generate_report,
-    make_heartbeat,
-)
-from governor.instrument import InstrumentSystem, RunManifest, EventWriter
+if MARGINALIA_ENABLE_DONOR_ROUTES:
+    from governor.dashboard_ux import (
+        BUILTIN_ACTIONS,
+        BUILTIN_TEMPLATES,
+        CancelRequest,
+        DashboardStore,
+        RunSummary,
+        RunVerdict,
+        StreamEvent,
+        StreamEventType,
+        build_controls_schema,
+        generate_report,
+        make_heartbeat,
+    )
+    from governor.instrument import EventWriter, InstrumentSystem, RunManifest
 
 # Lazy-init singletons for v2 dashboard
 _dashboard_store: DashboardStore | None = None
