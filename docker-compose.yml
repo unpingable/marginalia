@@ -12,8 +12,30 @@ services:
       - GOVERNOR_CONTEXT_ID=${GOVERNOR_CONTEXT_ID:-erin-writing}
       - GOVERNOR_MODE=fiction
       - MARGINALIA_DATA_ROOT=/data
+      - MARGINALIA_BACKUP_ROOT=/backups
+      - MARGINALIA_BACKUP_REQUIRE_REMOTE=${MARGINALIA_BACKUP_REQUIRE_REMOTE:-false}
+      - MARGINALIA_DEPLOYMENT_ID=${MARGINALIA_DEPLOYMENT_ID:-compose}
     volumes:
       - marginalia_data:/data
+      - ${MARGINALIA_BACKUP_HOST_PATH:-./backups}:/backups
+    restart: unless-stopped
+
+  marginalia-backup:
+    image: ${MARGINALIA_IMAGE:-ghcr.io/unpingable/marginalia:0.1.0}
+    container_name: marginalia-backup
+    command: ["python3", "-m", "gov_webui.backup_worker"]
+    environment:
+      - GOVERNOR_CONTEXT_ID=${GOVERNOR_CONTEXT_ID:-erin-writing}
+      - MARGINALIA_DATA_ROOT=/data
+      - MARGINALIA_BACKUP_ROOT=/backups
+      - MARGINALIA_BACKUP_REQUIRE_REMOTE=${MARGINALIA_BACKUP_REQUIRE_REMOTE:-false}
+      - MARGINALIA_BACKUP_POLL_SECONDS=${MARGINALIA_BACKUP_POLL_SECONDS:-900}
+      - MARGINALIA_DEPLOYMENT_ID=${MARGINALIA_DEPLOYMENT_ID:-compose}
+    volumes:
+      - marginalia_data:/data:ro
+      - ${MARGINALIA_BACKUP_HOST_PATH:-./backups}:/backups
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
 volumes:

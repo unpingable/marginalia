@@ -49,6 +49,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from gov_webui.backup_store import BackupError, WorkspaceBackupManager
 from gov_webui.daemon_client import DaemonAuthError, DaemonChatClient, default_socket_path
 from gov_webui.creative_project import (
     CreativeProjectConfig,
@@ -71,6 +72,8 @@ from gov_webui.library_store import (
     LibraryStoreError,
     ProjectNotFoundError,
     ProjectRecord,
+    WorkspaceNotFoundError,
+    WorkspaceRecord,
 )
 from gov_webui.markdown import render_writer_markdown
 from gov_webui.manuscript_store import (
@@ -78,6 +81,7 @@ from gov_webui.manuscript_store import (
     ManuscriptStore,
     ManuscriptStoreError,
 )
+from gov_webui.ops import deployment_metadata, migration_preflight, schema_versions
 from gov_webui.snapshot_store import (
     ProjectSnapshotStore,
     SnapshotNotFoundError,
@@ -114,6 +118,10 @@ MARGINALIA_ENABLE_DONOR_ROUTES = os.environ.get("MARGINALIA_ENABLE_DONOR_ROUTES"
     "1",
     "yes",
 )
+MARGINALIA_BACKUP_ROOT = os.environ.get("MARGINALIA_BACKUP_ROOT", "/backups")
+MARGINALIA_BACKUP_REQUIRE_REMOTE = os.environ.get(
+    "MARGINALIA_BACKUP_REQUIRE_REMOTE", "false"
+).lower() in {"true", "1", "yes"}
 
 if GOVERNOR_MODE != "fiction" and not MARGINALIA_ENABLE_DONOR_ROUTES:
     raise RuntimeError(
@@ -190,7 +198,10 @@ _AUTH_EXEMPT_PATHS = {"/health", "/api/info", "/docs", "/openapi.json"}
 _PRODUCT_EXACT_PATHS = {
     "/",
     "/health",
+    "/health/live",
+    "/health/ready",
     "/api/info",
+    "/v1/system",
     "/v1/models",
     "/v1/markdown",
     "/v1/backends",
@@ -203,6 +214,7 @@ _PRODUCT_EXACT_PATHS = {
     "/v1/project/export.zip",
     "/v1/project/snapshots",
     "/v1/projects",
+    "/v1/workspaces",
     "/v1/manuscript",
     "/v1/search",
     "/v1/entities",
@@ -210,6 +222,7 @@ _PRODUCT_EXACT_PATHS = {
 _PRODUCT_PATH_PREFIXES = (
     "/v1/models/",
     "/v1/projects/",
+    "/v1/workspaces/",
     "/v1/project/",
     "/v1/manuscript/",
     "/v1/conversations/",
@@ -331,11 +344,25 @@ class CreativeProjectUpdateRequest(BaseModel):
 
 class ProjectCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
+    workspace_id: str | None = None
 
 
 class ProjectUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=160)
     archived: bool | None = None
+
+
+class WorkspaceCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+
+
+class WorkspaceUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    backup_enabled: bool | None = None
+    backup_subdirectory: str | None = Field(default=None, min_length=1, max_length=120)
+    backup_schedule: str | None = None
+    backup_hour_utc: int | None = Field(default=None, ge=0, le=23)
+    backup_retention_count: int | None = Field(default=None, ge=1, le=365)
 
 
 class ManuscriptCreateRequest(BaseModel):
@@ -406,6 +433,17 @@ def _get_library_store() -> LibraryStore:
         legacy_ids = [item["id"] for item in _get_default_session_store().list_summaries()]
         _library_store.sync_legacy_sessions(legacy_ids)
     return _library_store
+
+
+def _get_backup_manager() -> WorkspaceBackupManager:
+    """Bind backup operations to the same durable root as the live library."""
+    return WorkspaceBackupManager(
+        data_root=Path(MARGINALIA_DATA_ROOT),
+        backup_root=Path(MARGINALIA_BACKUP_ROOT),
+        default_context_id=GOVERNOR_CONTEXT_ID,
+        deployment=deployment_metadata(),
+        require_remote=MARGINALIA_BACKUP_REQUIRE_REMOTE,
+    )
 
 
 def _project_record(project_id: str | None = None) -> ProjectRecord:
@@ -682,12 +720,176 @@ def _library_project_payload(
 ) -> dict[str, Any]:
     payload = project.model_dump(mode="json")
     payload["conversation_count"] = conversation_count
-    payload["is_default"] = project.id == _get_library_store().snapshot().default_project_id
+    payload["is_default"] = (
+        project.id
+        == _get_library_store().get_workspace(project.workspace_id).default_project_id
+    )
     return payload
 
 
+def _library_workspace_payload(
+    workspace: WorkspaceRecord,
+    *,
+    project_count: int,
+    conversation_count: int,
+) -> dict[str, Any]:
+    payload = workspace.model_dump(mode="json")
+    payload.update(
+        {
+            "project_count": project_count,
+            "conversation_count": conversation_count,
+            "is_default": workspace.id
+            == _get_library_store().snapshot().default_workspace_id,
+        }
+    )
+    return payload
+
+
+@app.get("/v1/workspaces")
+async def list_library_workspaces() -> dict[str, Any]:
+    """List lightweight household contexts; this is not an authentication boundary."""
+    try:
+        library = _get_library_store()
+        conversation_counts = library.conversation_counts()
+        workspaces = library.list_workspaces()
+        return {
+            "default_workspace_id": library.snapshot().default_workspace_id,
+            "workspaces": [
+                _library_workspace_payload(
+                    workspace,
+                    project_count=len(
+                        library.list_projects(workspace_id=workspace.id)
+                    ),
+                    conversation_count=sum(
+                        conversation_counts.get(project.id, 0)
+                        for project in library.list_projects(workspace_id=workspace.id)
+                    ),
+                )
+                for workspace in workspaces
+            ],
+        }
+    except LibraryStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/v1/workspaces", status_code=201)
+async def create_library_workspace(request: WorkspaceCreateRequest) -> dict[str, Any]:
+    """Create one contextual partition and its first project in one atomic update."""
+    try:
+        workspace, project = _get_library_store().create_workspace(request.name)
+        _get_context_manager().get_or_create(project.context_id, mode="fiction")
+        return {
+            **_library_workspace_payload(
+                workspace,
+                project_count=1,
+                conversation_count=0,
+            ),
+            "default_project": _library_project_payload(
+                project,
+                conversation_count=0,
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LibraryStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.patch("/v1/workspaces/{workspace_id}")
+async def update_library_workspace(
+    workspace_id: str,
+    request: WorkspaceUpdateRequest,
+) -> dict[str, Any]:
+    """Rename a workspace or update its operational backup policy."""
+    try:
+        library = _get_library_store()
+        workspace = library.update_workspace(
+            workspace_id,
+            name=request.name,
+            backup_enabled=request.backup_enabled,
+            backup_subdirectory=request.backup_subdirectory,
+            backup_schedule=request.backup_schedule,
+            backup_hour_utc=request.backup_hour_utc,
+            backup_retention_count=request.backup_retention_count,
+        )
+        projects = library.list_projects(workspace_id=workspace.id)
+        counts = library.conversation_counts()
+        return _library_workspace_payload(
+            workspace,
+            project_count=len(projects),
+            conversation_count=sum(counts.get(project.id, 0) for project in projects),
+        )
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LibraryStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/v1/workspaces/{workspace_id}/backups")
+async def list_workspace_backups(workspace_id: str) -> dict[str, Any]:
+    """List backup archives and destination state for one workspace."""
+    try:
+        _get_library_store().get_workspace(workspace_id)
+        manager = _get_backup_manager()
+        return {
+            "workspace_id": workspace_id,
+            "destination": manager.backup_root_status(),
+            "backups": manager.list(workspace_id),
+        }
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except BackupError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/v1/workspaces/{workspace_id}/backups", status_code=201)
+async def create_workspace_backup(workspace_id: str) -> dict[str, Any]:
+    """Create and immediately verify an exact workspace archive."""
+    try:
+        return _get_backup_manager().create(workspace_id)
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except BackupError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/v1/workspaces/{workspace_id}/backups/{filename}/verify")
+async def verify_workspace_backup(workspace_id: str, filename: str) -> dict[str, Any]:
+    """Verify the archive manifest, every payload digest, and the outer checksum."""
+    try:
+        manager = _get_backup_manager()
+        result = manager.verify(manager.resolve_archive(workspace_id, filename))
+        if result["workspace_id"] != workspace_id:
+            raise BackupError("backup manifest belongs to another workspace")
+        return result
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except BackupError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/v1/workspaces/{workspace_id}/backups/{filename}/restore-test")
+async def restore_test_workspace_backup(workspace_id: str, filename: str) -> dict[str, Any]:
+    """Restore into an isolated temporary root and load real durable records."""
+    try:
+        manager = _get_backup_manager()
+        result = manager.restore_test(manager.resolve_archive(workspace_id, filename))
+        if result["workspace_id"] != workspace_id:
+            raise BackupError("backup manifest belongs to another workspace")
+        return result
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except BackupError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/v1/projects")
-async def list_library_projects(include_archived: bool = True) -> dict[str, Any]:
+async def list_library_projects(
+    include_archived: bool = True,
+    workspace_id: str | None = None,
+) -> dict[str, Any]:
     """List writing projects and their conversation counts."""
     try:
         library = _get_library_store()
@@ -695,9 +897,14 @@ async def list_library_projects(include_archived: bool = True) -> dict[str, Any]
         legacy_ids = [item["id"] for item in _get_default_session_store().list_summaries()]
         library.sync_legacy_sessions(legacy_ids)
         counts = library.conversation_counts()
-        projects = library.list_projects(include_archived=include_archived)
+        workspace = library.get_workspace(workspace_id)
+        projects = library.list_projects(
+            include_archived=include_archived,
+            workspace_id=workspace.id,
+        )
         return {
-            "default_project_id": library.snapshot().default_project_id,
+            "workspace_id": workspace.id,
+            "default_project_id": workspace.default_project_id,
             "projects": [
                 _library_project_payload(
                     project,
@@ -706,6 +913,8 @@ async def list_library_projects(include_archived: bool = True) -> dict[str, Any]
                 for project in projects
             ],
         }
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except LibraryStoreError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -714,9 +923,14 @@ async def list_library_projects(include_archived: bool = True) -> dict[str, Any]
 async def create_library_project(request: ProjectCreateRequest) -> dict[str, Any]:
     """Create an isolated fiction project without changing the current one."""
     try:
-        project = _get_library_store().create_project(request.name)
+        project = _get_library_store().create_project(
+            request.name,
+            workspace_id=request.workspace_id,
+        )
         _get_context_manager().get_or_create(project.context_id, mode="fiction")
         return _library_project_payload(project, conversation_count=0)
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except LibraryStoreError as exc:
@@ -2687,6 +2901,13 @@ class ArtifactRestoreRequest(BaseModel):
     expected_current_version: int = Field(ge=1)
 
 
+class ArtifactCanonProposalRequest(BaseModel):
+    project_id: str | None = None
+    kind: str
+    subject: str = Field(default="", max_length=240)
+    statement: str | None = Field(default=None, max_length=20_000)
+
+
 @app.get("/governor/fiction/characters")
 async def list_characters(project_id: str | None = None) -> dict[str, Any]:
     """List all characters for fiction mode."""
@@ -4309,6 +4530,16 @@ async def governor_ui() -> HTMLResponse:
 # ============================================================================
 
 
+@app.get("/health/live")
+async def health_live() -> dict[str, Any]:
+    """Process liveness only; suitable for restart decisions."""
+    return {
+        "status": "alive",
+        "service": "marginalia",
+        "deployment": deployment_metadata(),
+    }
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     """Health check endpoint."""
@@ -4345,6 +4576,43 @@ async def health() -> dict[str, Any]:
             "contract_ok": contract_ok,
             "daemon_dir": GOVERNOR_DAEMON_DIR,
         },
+    }
+
+
+@app.get("/health/ready", response_model=None)
+async def health_ready() -> JSONResponse:
+    """Readiness includes daemon connectivity and durable-schema validation."""
+    runtime = await health()
+    preflight = migration_preflight(
+        data_root=Path(MARGINALIA_DATA_ROOT),
+        default_context_id=GOVERNOR_CONTEXT_ID,
+        apply_migrations=False,
+    )
+    ready = runtime["status"] == "healthy" and bool(preflight["ready"])
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={
+            "status": "ready" if ready else "not_ready",
+            "runtime": runtime,
+            "migration": preflight,
+            "deployment": deployment_metadata(),
+        },
+    )
+
+
+@app.get("/v1/system")
+async def system_status() -> dict[str, Any]:
+    """Expose operational provenance without changing application state."""
+    return {
+        "service": "marginalia",
+        "deployment": deployment_metadata(),
+        "schemas": schema_versions(),
+        "migration": migration_preflight(
+            data_root=Path(MARGINALIA_DATA_ROOT),
+            default_context_id=GOVERNOR_CONTEXT_ID,
+            apply_migrations=False,
+        ),
+        "backup_destination": _get_backup_manager().backup_root_status(),
     }
 
 
@@ -4519,6 +4787,7 @@ async def api_info() -> dict[str, Any]:
         "governed_chat_resolve": "/v1/governed-chat/resolve",
         "project": "/v1/project",
         "projects": "/v1/projects",
+        "workspaces": "/v1/workspaces",
         "project_export": "/v1/project/export",
         "project_export_zip": "/v1/project/export.zip",
         "project_snapshots": "/v1/project/snapshots",
@@ -4526,6 +4795,9 @@ async def api_info() -> dict[str, Any]:
         "project_entities": "/v1/entities",
         "manuscript": "/v1/manuscript",
         "health": "/health",
+        "health_live": "/health/live",
+        "health_ready": "/health/ready",
+        "system": "/v1/system",
         "api_info": "/api/info",
         "sessions_list": "/sessions/",
         "sessions_create": "/sessions/",
@@ -4541,6 +4813,7 @@ async def api_info() -> dict[str, Any]:
         "fiction_capture_scan": "/governor/fiction/capture/scan",
         "fiction_captures": "/governor/fiction/captures",
         "artifacts": "/governor/artifacts",
+        "workspace_backups": "/v1/workspaces/{workspace_id}/backups",
     }
     if MARGINALIA_ENABLE_DONOR_ROUTES:
         endpoints.update(
@@ -4592,6 +4865,8 @@ async def api_info() -> dict[str, Any]:
     return {
         "name": "Marginalia",
         "version": _webui_version(),
+        "deployment": deployment_metadata(),
+        "schemas": schema_versions(),
         "backend": backend,
         "provider_owner": "agent-governor-daemon",
         "openai_compatible": True,
@@ -5499,6 +5774,106 @@ async def artifacts_create(request: ArtifactCreateRequest) -> JSONResponse:
             ),
             status_code=201,
         )
+    except ArtifactStoreError as exc:
+        return _artifact_exception_response(exc)
+
+
+@app.post("/governor/artifacts/{artifact_id}/canon-proposal", status_code=201)
+async def artifacts_propose_canon(
+    artifact_id: str,
+    request: ArtifactCanonProposalRequest,
+) -> dict[str, Any]:
+    """Place artifact text in the review queue; this never writes canon directly."""
+    from gov_webui.artifact_store import ArtifactStoreError
+
+    if request.kind not in {"character", "relationship", "world_rule", "constraint"}:
+        raise HTTPException(status_code=422, detail="invalid canon proposal kind")
+    try:
+        project = _project_record(request.project_id)
+        artifact, content, _ = _get_artifact_store(project.id).get(artifact_id)
+        statement = (request.statement if request.statement is not None else content).strip()
+        if not statement:
+            raise HTTPException(status_code=422, detail="canon proposal must not be empty")
+        source_messages = artifact.provenance.message_ids
+        candidate = _get_canon_review_store(project.id).add(
+            kind=request.kind,
+            confidence=1.0,
+            subject=request.subject.strip() or (
+                artifact.title if request.kind in {"character", "relationship"} else ""
+            ),
+            statement=statement,
+            conversation_id=artifact.provenance.conversation_id,
+            message_id=source_messages[0] if source_messages else "",
+            draft={
+                "source": "artifact",
+                "artifact_id": artifact.id,
+                "artifact_version": artifact.current_version,
+                "artifact_type": artifact.artifact_type,
+                "source_message_ids": source_messages,
+            },
+        )
+        return {
+            "canonical": False,
+            "review_required": True,
+            "candidate": candidate.model_dump(mode="json"),
+        }
+    except ArtifactStoreError as exc:
+        return _artifact_exception_response(exc)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/governor/artifacts/{artifact_id}/canon-comparison")
+async def artifacts_compare_canon(
+    artifact_id: str,
+    project_id: str | None = None,
+    include_working_copy: bool = True,
+) -> dict[str, Any]:
+    """Run the existing deterministic continuity checker against accepted canon."""
+    from gov_webui.artifact_store import ArtifactStoreError
+    from governor.continuity import ContinuityChecker, create_registry
+
+    try:
+        project = _project_record(project_id)
+        store = _get_artifact_store(project.id)
+        artifact, committed, _ = store.get(artifact_id)
+        working_copy, _ = store.get_working_copy(artifact_id)
+        content = working_copy if include_working_copy and working_copy is not None else committed
+        context = _get_context_manager().get_or_create(project.context_id, mode="fiction")
+        anchors = create_registry(context.governor_dir).all()
+        report = ContinuityChecker().check(content, anchors)
+        lowered = content.casefold()
+        references = []
+        for anchor in anchors:
+            human_id = re.sub(
+                r"^(char|rule|forbid)-",
+                "",
+                anchor.id,
+                flags=re.IGNORECASE,
+            ).replace("-", " ")
+            terms = [human_id, *anchor.required_patterns, *anchor.forbidden_patterns]
+            references.append(
+                {
+                    "id": anchor.id,
+                    "type": anchor.anchor_type.value,
+                    "description": anchor.description,
+                    "severity": anchor.severity.value,
+                    "mentioned": any(
+                        term.strip() and term.casefold() in lowered for term in terms
+                    ),
+                }
+            )
+        return {
+            "ok": True,
+            "project_id": project.id,
+            "artifact_id": artifact.id,
+            "artifact_version": artifact.current_version,
+            "working_copy_used": include_working_copy and working_copy is not None,
+            "canonical_anchor_count": len(anchors),
+            "canonical_references": references,
+            "continuity": report.to_dict(),
+            "canonical_content_changed": False,
+        }
     except ArtifactStoreError as exc:
         return _artifact_exception_response(exc)
 

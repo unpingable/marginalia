@@ -15,6 +15,11 @@ This is the ordinary fiction-product surface. Mutating endpoints require
 | `/v1/project/snapshots/{id}` | GET | Verify and read one checkpoint |
 | `/v1/projects` | GET / POST | List projects or create an isolated fiction project |
 | `/v1/projects/{id}` | PATCH | Rename, archive, or restore a project |
+| `/v1/workspaces` | GET / POST | List or create no-auth contextual household workspaces |
+| `/v1/workspaces/{id}` | PATCH | Rename a workspace or configure its backup policy |
+| `/v1/workspaces/{id}/backups` | GET / POST | List or create verified workspace backups |
+| `/v1/workspaces/{id}/backups/{file}/verify` | POST | Verify archive members and the outer checksum |
+| `/v1/workspaces/{id}/backups/{file}/restore-test` | POST | Rebuild and validate the backup in an isolated temporary root |
 | `/v1/search` | GET | Search conversations, messages, artifacts, manuscript nodes, and canon |
 | `/v1/entities` | GET | List accepted characters with exploration backlinks |
 
@@ -79,6 +84,8 @@ until the writer explicitly accepts it.
 | `/governor/artifacts/{id}/working-copy` | PUT / DELETE | Autosave or discard mutable text without creating a revision |
 | `/governor/artifacts/{id}/version/{version}` | GET | Read a historical revision |
 | `/governor/artifacts/{id}/compare` | GET | Compare two committed revisions |
+| `/governor/artifacts/{id}/canon-comparison` | GET | Deterministically check draft/working-copy text against accepted canon |
+| `/governor/artifacts/{id}/canon-proposal` | POST | Create a provenance-linked pending canon review item |
 | `/governor/artifacts/{id}/version/{version}/restore` | POST | Restore old text as a new revision |
 
 `GET /governor/artifacts` supports `view=active|trash|all`, `q`, `status`, and
@@ -108,6 +115,9 @@ duplicates or changes artifact content.
 |---|---|---|
 | `/` | GET | Marginalia writing room |
 | `/health` | GET | AG contract and provider readiness |
+| `/health/live` | GET | Process liveness for restart decisions |
+| `/health/ready` | GET | Provider/daemon and durable-schema readiness, with HTTP 503 on failure |
+| `/v1/system` | GET | Deployment identity, schema/preflight state, and backup destination status |
 | `/api/info` | GET | Product identity and reachable product endpoints |
 
 ## Quarantined donor routes

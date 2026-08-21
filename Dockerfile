@@ -16,12 +16,6 @@ RUN npm install --global "@openai/codex@${CODEX_VERSION}" \
 
 FROM python:3.11-slim@sha256:a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1
 
-LABEL org.opencontainers.image.title="Marginalia" \
-      org.opencontainers.image.description="Governed creative-writing local appliance" \
-      org.opencontainers.image.source="https://github.com/unpingable/marginalia" \
-      org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.version="0.1.0"
-
 WORKDIR /app
 
 # One exact runtime/build resolution for local, test, and container execution.
@@ -55,6 +49,23 @@ COPY --from=codex-cli /codex /opt/codex/codex
 RUN python3 -c "import importlib.metadata as m; import fiction_governor, governor, receipt_kernel, receipt_v1, gov_webui; assert m.version('agent-governor') == '2.8.1'; assert m.version('marginalia') == '0.1.0'" \
     && /opt/codex/codex --version
 
+# Operational identity is applied after dependency/application installation so
+# a new commit label does not invalidate the expensive reproducible build layers.
+ARG MARGINALIA_BUILD_SHA=unknown
+ARG MARGINALIA_BUILD_TIME=unknown
+ARG MARGINALIA_IMAGE_REF=unknown
+LABEL org.opencontainers.image.title="Marginalia" \
+      org.opencontainers.image.description="Governed creative-writing local appliance" \
+      org.opencontainers.image.source="https://github.com/unpingable/marginalia" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="0.1.0" \
+      org.opencontainers.image.revision="${MARGINALIA_BUILD_SHA}" \
+      org.opencontainers.image.created="${MARGINALIA_BUILD_TIME}" \
+      org.opencontainers.image.ref.name="${MARGINALIA_IMAGE_REF}"
+ENV MARGINALIA_BUILD_SHA="${MARGINALIA_BUILD_SHA}" \
+    MARGINALIA_BUILD_TIME="${MARGINALIA_BUILD_TIME}" \
+    MARGINALIA_IMAGE_REF="${MARGINALIA_IMAGE_REF}"
+
 # Entrypoints: normalize the bundled subscription-backed Codex provider, then
 # start governor and uvicorn with one state root.
 COPY codex-provider.sh /app/codex-provider.sh
@@ -66,7 +77,7 @@ EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')" || exit 1
 
 # Run AG daemon + Marginalia with one aligned state root.
 CMD ["/app/entrypoint.sh"]

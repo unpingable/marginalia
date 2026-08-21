@@ -29,6 +29,14 @@ export GOVERNOR_CONTEXTS_DIR="$DAEMON_DIR"
 export GOVERNOR_CONTEXT_ID="$CONTEXT_ID"
 export GOVERNOR_MODE="$MODE"
 
+# Refuse to boot on unknown/corrupt durable state. Supported additive migrations
+# make an exact source copy and a hash receipt before replacing the library index.
+echo "Checking Marginalia durable schemas"
+python3 -m gov_webui.ops \
+    --data-root "$DATA_ROOT" \
+    --context-id "$CONTEXT_ID" \
+    preflight --apply-migrations
+
 SOCKET_PATH="${GOVERNOR_SOCKET:-$(python3 -c \
     'from pathlib import Path; from gov_webui.daemon_client import default_socket_path; import sys; print(default_socket_path(Path(sys.argv[1])))' \
     "$DAEMON_DIR")}"

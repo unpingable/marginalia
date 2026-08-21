@@ -77,10 +77,11 @@ startup health, browser opening, updates, diagnostics, and shutdown.
 
 ## Writing library and migration
 
-Marginalia adds projects, conversation lifecycle, explicit forks, and artifact
+Marginalia adds lightweight household workspaces above projects, conversation lifecycle, explicit forks, and artifact
 provenance without rewriting the original content stores. Existing session
-JSON files are enrolled lazily into a `Default project`; their message payloads
-are not rewritten. Organization is stored atomically at
+JSON files are enrolled under Erin's `Default project`; their message payloads
+are not rewritten. Workspaces are contextual partitions with one-click
+creation and switching, not authentication or security boundaries. Organization is stored atomically at
 `$MARGINALIA_DATA_ROOT/marginalia/library.json`. Each additional project owns
 an isolated fiction context for its direction, canon, conversations, pending
 state, and artifacts.
@@ -105,6 +106,26 @@ The ZIP export includes a compiled manuscript, readable conversation/artifact
 Markdown, canon, project direction, and the full machine-readable record.
 Unified search and character backlinks are computed from existing content and
 do not promote, annotate, or otherwise change canon.
+
+Artifacts can be proposed to the existing canon review queue and compared
+against accepted canon without model calls or hidden promotion. Manuscript
+nodes can start an explicit governed drafting conversation; keeping its output
+creates a provenance-linked artifact and links it back to the outline node.
+
+## Household operations
+
+The Compose stack includes a read-only-data backup worker. Backup policy is
+configured per workspace, while the host supplies one mounted backup root such
+as `/tank/nfs/marginalia`. Archives carry file and outer checksums plus build
+metadata, and every restore test rebuilds into an isolated temporary root.
+Deployments may require a remote filesystem explicitly, preventing a confined
+container runtime from silently substituting local disk for the NAS path.
+Startup validates durable schemas and applies only supported additive
+migrations with a source copy and hash receipt.
+
+See [docs/OPERATIONS.md](docs/OPERATIONS.md) for NAS configuration, health and
+version endpoints, exact backup/verification commands, and the no-overwrite
+disaster-restore procedure.
 
 ## Creative project direction
 

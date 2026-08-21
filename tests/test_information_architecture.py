@@ -204,6 +204,146 @@ async def test_fork_project_move_artifact_provenance_and_canon_isolation(
 
 
 @pytest.mark.asyncio
+async def test_lightweight_workspaces_and_artifact_canon_control_plane(
+    library_client,
+) -> None:
+    client, _, _ = library_client
+    original = (await client.get("/v1/workspaces")).json()
+    assert original["default_workspace_id"] == "erin"
+    assert original["workspaces"][0]["name"] == "Erin"
+
+    james = (await client.post("/v1/workspaces", json={"name": "James"})).json()
+    assert james["name"] == "James"
+    assert james["default_project"]["workspace_id"] == james["id"]
+    assert (await client.get("/v1/projects", params={"workspace_id": "erin"})).json()[
+        "projects"
+    ][0]["id"] == "default"
+    james_projects = (
+        await client.get("/v1/projects", params={"workspace_id": james["id"]})
+    ).json()["projects"]
+    assert {item["workspace_id"] for item in james_projects} == {james["id"]}
+
+    artifact = (
+        await client.post(
+            "/governor/artifacts",
+            json={
+                "title": "Lantern consequence",
+                "content": "Elena lets the forbidden lantern burn all night.",
+                "kind": "markdown",
+                "artifact_type": "scene",
+                "project_id": "default",
+            },
+        )
+    ).json()["artifact"]
+    await client.post(
+        "/governor/fiction/forbidden",
+        json={
+            "description": "The lantern must never burn overnight.",
+            "patterns": ["burn all night"],
+            "project_id": "default",
+        },
+    )
+
+    comparison = (
+        await client.get(
+            f"/governor/artifacts/{artifact['id']}/canon-comparison",
+            params={"project_id": "default"},
+        )
+    ).json()
+    assert comparison["canonical_content_changed"] is False
+    assert comparison["continuity"]["passed"] is False
+    assert comparison["continuity"]["violations"][0]["anchor_type"] == "prohibition"
+
+    rules_before = (
+        await client.get(
+            "/governor/fiction/world-rules", params={"project_id": "default"}
+        )
+    ).json()["rules"]
+    proposal_response = await client.post(
+        f"/governor/artifacts/{artifact['id']}/canon-proposal",
+        json={
+            "project_id": "default",
+            "kind": "world_rule",
+            "statement": "Lantern smoke reveals hidden doors.",
+        },
+    )
+    assert proposal_response.status_code == 201
+    proposal = proposal_response.json()
+    assert proposal["canonical"] is False
+    assert proposal["candidate"]["draft"]["artifact_id"] == artifact["id"]
+    assert proposal["candidate"]["draft"]["artifact_version"] == 1
+    assert (
+        await client.get(
+            "/governor/fiction/world-rules", params={"project_id": "default"}
+        )
+    ).json()["rules"] == rules_before
+
+    accepted = await client.post(
+        f"/governor/fiction/capture/{proposal['candidate']['id']}/accept",
+        json={
+            "capture_type": "world_rule",
+            "description": proposal["candidate"]["statement"],
+            "project_id": "default",
+        },
+    )
+    assert accepted.status_code == 200
+    rules_after = (
+        await client.get(
+            "/governor/fiction/world-rules", params={"project_id": "default"}
+        )
+    ).json()["rules"]
+    assert len(rules_after) == len(rules_before) + 1
+
+
+@pytest.mark.asyncio
+async def test_workspace_backup_api_and_operational_provenance(
+    library_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, adapter, contexts = library_client
+    data_root = contexts.parent
+    backup_root = data_root / "backups"
+    monkeypatch.setattr(adapter, "MARGINALIA_DATA_ROOT", str(data_root))
+    monkeypatch.setattr(adapter, "MARGINALIA_BACKUP_ROOT", str(backup_root))
+
+    policy = await client.patch(
+        "/v1/workspaces/erin",
+        json={
+            "backup_enabled": True,
+            "backup_schedule": "daily",
+            "backup_hour_utc": 6,
+            "backup_retention_count": 7,
+            "backup_subdirectory": "erin-novel",
+        },
+    )
+    assert policy.status_code == 200
+    assert policy.json()["backup_subdirectory"] == "erin-novel"
+
+    created_response = await client.post("/v1/workspaces/erin/backups")
+    assert created_response.status_code == 201
+    created = created_response.json()
+    assert created["verified"] is True
+    listing = (await client.get("/v1/workspaces/erin/backups")).json()
+    assert listing["destination"]["writable"] is True
+    assert listing["backups"][0]["filename"] == created["filename"]
+
+    verify = await client.post(
+        f"/v1/workspaces/erin/backups/{created['filename']}/verify"
+    )
+    rehearse = await client.post(
+        f"/v1/workspaces/erin/backups/{created['filename']}/restore-test"
+    )
+    assert verify.json()["outer_checksum_verified"] is True
+    assert rehearse.json()["restore_tested"] is True
+
+    system = (await client.get("/v1/system")).json()
+    assert system["service"] == "marginalia"
+    assert system["schemas"]["library"] == 2
+    assert system["migration"]["ready"] is True
+    assert system["deployment"]["version"]
+
+
+@pytest.mark.asyncio
 async def test_manuscript_and_canon_review_foundations_survive_restart(
     library_client,
 ) -> None:

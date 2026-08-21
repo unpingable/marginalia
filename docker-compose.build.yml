@@ -4,4 +4,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        MARGINALIA_BUILD_SHA: ${MARGINALIA_BUILD_SHA:-unknown}
+        MARGINALIA_BUILD_TIME: ${MARGINALIA_BUILD_TIME:-unknown}
+        MARGINALIA_IMAGE_REF: ${MARGINALIA_IMAGE_REF:-marginalia:local}
+    image: marginalia:local
+  marginalia-backup:
     image: marginalia:local

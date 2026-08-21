@@ -347,7 +347,16 @@
         <div><div class="brand-name">Marginalia</div><div class="brand-sub">Writing room</div></div>
       </div>
       <div class="rail-body">
-        <div class="section-label" style="margin-top:0">Project</div>
+        <div class="section-label" style="margin-top:0">Workspace</div>
+        <div class="project-picker">
+          <select id="workspace-select" aria-label="Current household workspace"></select>
+          <button class="icon-button" id="new-workspace" title="Open a new workspace" aria-label="Open a new workspace">＋</button>
+        </div>
+        <div class="project-actions">
+          <button class="text-button" id="rename-workspace">Rename</button>
+          <button class="text-button" id="workspace-backups">Backups</button>
+        </div>
+        <div class="section-label">Project</div>
         <div class="project-picker">
           <select id="project-select" aria-label="Current project"></select>
           <button class="icon-button" id="new-project" title="Create project" aria-label="Create project">＋</button>
@@ -375,7 +384,7 @@
           </div>
         </div>
         <div class="sessions" id="sessions"></div>
-        <div class="rail-footer">Explorations stay in conversations and artifacts. Only choices you accept enter canon.</div>
+        <div class="rail-footer"><div>Explorations stay in conversations and artifacts. Only choices you accept enter canon.</div><div id="version-display">Version unavailable</div></div>
       </div>
     </aside>
 
@@ -500,7 +509,7 @@
             <div class="artifact-save-state" id="artifact-save-state">Committed revisions are permanent; typing is autosaved as a working copy.</div>
             <div class="revision-row"><span id="artifact-version"></span><select id="revision-select" aria-label="Revision history"></select><button class="text-button" id="view-revision">View</button><button class="text-button" id="compare-revision">Compare</button><button class="text-button" id="restore-revision">Restore</button></div>
             <pre class="revision-diff" id="revision-diff"></pre>
-            <div class="form-actions"><button class="text-button" id="artifact-source">Source</button><button class="text-button" id="trash-artifact">Move to trash</button><button class="primary-button" id="save-artifact">Save revision</button></div>
+            <div class="form-actions"><button class="text-button" id="artifact-source">Source</button><button class="text-button" id="compare-canon">Compare with canon</button><button class="text-button" id="propose-canon">Propose for canon</button><button class="text-button" id="trash-artifact">Move to trash</button><button class="primary-button" id="save-artifact">Save revision</button></div>
           </div>
         </section>
 
@@ -568,15 +577,58 @@
     </div>
   </dialog>
 
+  <dialog id="backup-dialog">
+    <form id="backup-form">
+      <div class="dialog-header"><h2>Workspace backups</h2><button type="button" class="icon-button" id="close-backups">Close</button></div>
+      <div class="dialog-body">
+        <div class="ia-note">Backups are configured separately for this workspace. They contain its projects, conversations, artifacts, manuscript, canon, snapshots, and provenance.</div>
+        <div class="save-state" id="backup-destination">Checking backup destination…</div>
+        <div class="artifact-tools">
+          <div class="field"><label for="backup-schedule">Schedule</label><select id="backup-schedule"><option value="manual">Manual only</option><option value="daily">Daily</option></select></div>
+          <div class="field"><label for="backup-hour">Daily hour (UTC)</label><input id="backup-hour" type="number" min="0" max="23"></div>
+        </div>
+        <div class="artifact-tools">
+          <div class="field"><label for="backup-subdirectory">NAS subdirectory</label><input id="backup-subdirectory" maxlength="120"></div>
+          <div class="field"><label for="backup-retention">Archives to retain</label><input id="backup-retention" type="number" min="1" max="365"></div>
+        </div>
+        <label class="save-state"><input id="backup-enabled" type="checkbox"> Enable scheduled backups for this workspace</label>
+        <div class="group" style="margin-top:0">
+          <div class="group-heading"><span class="group-title">Verified archives</span><button type="button" class="text-button" id="backup-now">Back up now</button></div>
+          <div class="item-list" id="backup-list"></div>
+        </div>
+      </div>
+      <div class="dialog-footer"><span class="save-state" id="backup-save-state">Restore always rehearses in isolation and never overwrites the live service.</span><button class="primary-button">Save backup policy</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="canon-proposal-dialog">
+    <form id="canon-proposal-form">
+      <div class="dialog-header"><h2>Propose for canon</h2><button type="button" class="icon-button" id="close-canon-proposal">Close</button></div>
+      <div class="dialog-body">
+        <div class="ia-note">This creates a review item only. The artifact stays exploratory and canon does not change until you explicitly accept the proposal.</div>
+        <div class="field"><label for="canon-proposal-kind">Canon type</label><select id="canon-proposal-kind"><option value="character">Character</option><option value="world_rule">World rule</option><option value="constraint">Constraint</option><option value="relationship">Relationship</option></select></div>
+        <div class="field"><label for="canon-proposal-subject">Subject or character name</label><input id="canon-proposal-subject" maxlength="240"></div>
+        <div class="field"><label for="canon-proposal-statement">Statement to review</label><textarea id="canon-proposal-statement" maxlength="20000"></textarea></div>
+      </div>
+      <div class="dialog-footer"><span class="save-state">Next stop: Possible canon.</span><button class="primary-button">Add to review</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="canon-comparison-dialog">
+    <div class="dialog-header"><h2>Draft compared with canon</h2><button type="button" class="icon-button" id="close-canon-comparison">Close</button></div>
+    <div class="dialog-body" id="canon-comparison-results"></div>
+  </dialog>
+
   <div class="toast" id="toast" role="status"></div>
 
   <script>
     const state = {
-      projects: [], activeProjectId: null, sessions: [], activeSession: null,
+      workspaces: [], activeWorkspaceId: null, projects: [], activeProjectId: null, sessions: [], activeSession: null,
       conversationView: "active", conversationSort: "updated_desc", conversationQuery: "",
       model: "", project: null, artifacts: [], activeArtifact: null, busy: false,
       artifactSource: null, manuscript: {nodes: [], version: 1}, snapshots: [],
       selectedMessageIds: new Set(), artifactView: "active", artifactQuery: "", entities: [], canonCounts: null,
+      system: null, outlineMessageTargets: new Map(), artifactTargetNodeId: null, pendingOutlineNodeId: null,
     };
     const $ = (selector) => document.querySelector(selector);
     const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -601,6 +653,10 @@
 
     function activeProject() {
       return state.projects.find((project) => project.id === state.activeProjectId) || null;
+    }
+
+    function activeWorkspace() {
+      return state.workspaces.find((workspace) => workspace.id === state.activeWorkspaceId) || null;
     }
 
     function toast(message) {
@@ -656,8 +712,38 @@
       }
     }
 
+    async function loadSystem() {
+      state.system = await api("/v1/system");
+      const deployment = state.system.deployment || {};
+      const revision = deployment.build_sha && deployment.build_sha !== "unknown"
+        ? ` · ${deployment.build_sha.slice(0, 8)}` : "";
+      $("#version-display").textContent = `v${deployment.version || "unknown"}${revision}`;
+    }
+
+    async function loadWorkspaces() {
+      const data = await api("/v1/workspaces");
+      state.workspaces = data.workspaces || [];
+      const remembered = window.localStorage.getItem("marginalia.workspace");
+      if (!state.activeWorkspaceId) {
+        state.activeWorkspaceId = state.workspaces.some((item) => item.id === remembered)
+          ? remembered : data.default_workspace_id;
+      }
+      if (!state.workspaces.some((item) => item.id === state.activeWorkspaceId)) {
+        state.activeWorkspaceId = data.default_workspace_id;
+      }
+      const select = $("#workspace-select");
+      select.replaceChildren();
+      state.workspaces.forEach((workspace) => {
+        const option = document.createElement("option");
+        option.value = workspace.id;
+        option.textContent = `${workspace.name} (${workspace.project_count})`;
+        select.append(option);
+      });
+      select.value = state.activeWorkspaceId;
+    }
+
     async function loadProjects() {
-      const data = await api("/v1/projects?include_archived=true");
+      const data = await api(`/v1/projects?include_archived=true&workspace_id=${encodeURIComponent(state.activeWorkspaceId)}`);
       state.projects = data.projects || [];
       const remembered = window.localStorage.getItem("marginalia.project");
       if (!state.activeProjectId) {
@@ -681,6 +767,147 @@
       $("#archive-project").textContent = selected?.archived ? "Restore project" : "Archive project";
     }
 
+    async function switchWorkspace(workspaceId) {
+      state.activeWorkspaceId = workspaceId;
+      window.localStorage.setItem("marginalia.workspace", workspaceId);
+      state.activeProjectId = null;
+      state.activeSession = null;
+      state.activeArtifact = null;
+      await loadProjects();
+      await switchProject(state.activeProjectId);
+      await loadWorkspaces();
+    }
+
+    async function createWorkspace() {
+      const name = window.prompt("Workspace name");
+      if (!name?.trim()) return;
+      try {
+        const workspace = await api("/v1/workspaces", {
+          method: "POST",
+          body: JSON.stringify({name}),
+        });
+        await loadWorkspaces();
+        await switchWorkspace(workspace.id);
+        toast(`${workspace.name} workspace opened`);
+      } catch (error) { toast(error.message); }
+    }
+
+    async function renameWorkspace() {
+      const workspace = activeWorkspace();
+      if (!workspace) return;
+      const name = window.prompt("Workspace name", workspace.name);
+      if (!name?.trim() || name.trim() === workspace.name) return;
+      try {
+        await api(`/v1/workspaces/${encodeURIComponent(workspace.id)}`, {
+          method: "PATCH", body: JSON.stringify({name}),
+        });
+        await loadWorkspaces();
+        toast("Workspace renamed");
+      } catch (error) { toast(error.message); }
+    }
+
+    async function openWorkspaceBackups() {
+      const workspace = activeWorkspace();
+      if (!workspace) return;
+      try {
+        const [system, listing] = await Promise.all([
+          api("/v1/system"),
+          api(`/v1/workspaces/${encodeURIComponent(workspace.id)}/backups`),
+        ]);
+        state.system = system;
+        const destination = listing.destination || system.backup_destination || {};
+        $("#backup-enabled").checked = workspace.backup_enabled;
+        $("#backup-schedule").value = workspace.backup_schedule;
+        $("#backup-hour").value = workspace.backup_hour_utc;
+        $("#backup-subdirectory").value = workspace.backup_subdirectory;
+        $("#backup-retention").value = workspace.backup_retention_count;
+        const stateLabel = destination.usable
+          ? `ready · ${destination.filesystem_type || "filesystem"}`
+          : destination.require_remote && !destination.remote
+            ? `blocked · ${destination.filesystem_type || "unknown"} is not remote storage`
+            : destination.read_only ? "read-only" : "not writable";
+        $("#backup-destination").textContent = `Destination: ${destination.path || "not configured"} · ${stateLabel}`;
+        renderBackups(listing.backups || []);
+        if (!$("#backup-dialog").open) $("#backup-dialog").showModal();
+      } catch (error) { toast(error.message); }
+    }
+
+    function renderBackups(backups) {
+      const container = $("#backup-list");
+      container.replaceChildren();
+      if (!backups.length) return empty(container, "No workspace backup has completed yet.");
+      backups.forEach((backup) => {
+        const card = itemCard(
+          backup.filename,
+          `${new Date(backup.created_at).toLocaleString()} · ${Math.max(1, Math.round(backup.size / 1024))} KB`,
+        );
+        const actions = document.createElement("div");
+        actions.className = "message-actions";
+        const verify = document.createElement("button");
+        verify.type = "button"; verify.className = "text-button"; verify.textContent = "Verify";
+        verify.addEventListener("click", () => verifyBackup(backup.filename, false));
+        const rehearse = document.createElement("button");
+        rehearse.type = "button"; rehearse.className = "text-button"; rehearse.textContent = "Test restore";
+        rehearse.addEventListener("click", () => verifyBackup(backup.filename, true));
+        actions.append(verify, rehearse); card.append(actions); container.append(card);
+      });
+    }
+
+    async function saveBackupPolicy(event) {
+      event.preventDefault();
+      const workspace = activeWorkspace();
+      if (!workspace) return;
+      try {
+        const enabled = $("#backup-enabled").checked;
+        if (enabled && !state.system?.backup_destination?.usable) {
+          const proceed = window.confirm("The configured backup destination is not currently safe to use. Save this policy anyway?");
+          if (!proceed) return;
+        }
+        await api(`/v1/workspaces/${encodeURIComponent(workspace.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            backup_enabled: enabled,
+            backup_schedule: $("#backup-schedule").value,
+            backup_hour_utc: Number($("#backup-hour").value),
+            backup_subdirectory: $("#backup-subdirectory").value,
+            backup_retention_count: Number($("#backup-retention").value),
+          }),
+        });
+        await loadWorkspaces();
+        $("#backup-dialog").close();
+        toast("Workspace backup policy saved");
+      } catch (error) { toast(error.message); }
+    }
+
+    async function createBackupNow() {
+      const workspace = activeWorkspace();
+      if (!workspace) return;
+      $("#backup-save-state").textContent = "Creating and verifying backup…";
+      try {
+        const result = await api(`/v1/workspaces/${encodeURIComponent(workspace.id)}/backups`, {method: "POST"});
+        $("#backup-save-state").textContent = `Verified ${result.file_count} files · ${result.filename}`;
+        await openWorkspaceBackups();
+        toast("Verified workspace backup created");
+      } catch (error) {
+        $("#backup-save-state").textContent = error.message;
+        toast(error.message);
+      }
+    }
+
+    async function verifyBackup(filename, restoreTest) {
+      const workspace = activeWorkspace();
+      if (!workspace) return;
+      const action = restoreTest ? "restore-test" : "verify";
+      $("#backup-save-state").textContent = restoreTest ? "Rehearsing isolated restore…" : "Verifying archive…";
+      try {
+        const result = await api(`/v1/workspaces/${encodeURIComponent(workspace.id)}/backups/${encodeURIComponent(filename)}/${action}`, {method: "POST"});
+        $("#backup-save-state").textContent = restoreTest
+          ? `Restore passed: ${result.sessions_loaded} conversations loaded, ${result.messages_loaded} messages checked.`
+          : `Verified ${result.file_count} files and archive checksum.`;
+        toast(restoreTest ? "Restore rehearsal passed" : "Backup verified");
+      } catch (error) { $("#backup-save-state").textContent = error.message; toast(error.message); }
+    }
+
     async function switchProject(projectId) {
       state.activeProjectId = projectId;
       window.localStorage.setItem("marginalia.project", projectId);
@@ -701,7 +928,7 @@
       const name = window.prompt("Project name");
       if (!name?.trim()) return;
       try {
-        const project = await api("/v1/projects", {method: "POST", body: JSON.stringify({name})});
+        const project = await api("/v1/projects", {method: "POST", body: JSON.stringify({name, workspace_id: state.activeWorkspaceId})});
         await loadProjects();
         await switchProject(project.id);
         toast("Project created");
@@ -819,9 +1046,9 @@
       });
     }
 
-    async function createSession() {
+    async function createSession(title = "New conversation") {
       const session = await api("/sessions/", {
-        method: "POST", body: JSON.stringify({model: state.model, title: "New conversation", project_id: state.activeProjectId}),
+        method: "POST", body: JSON.stringify({model: state.model, title, project_id: state.activeProjectId}),
       });
       state.activeSession = session;
       renderConversation();
@@ -1034,7 +1261,7 @@
         const userMessage = await appendSessionMessage("user", content);
         renderMessage("user", content, userMessage.id);
         prompt.value = "";
-        if (firstMessage) {
+        if (firstMessage && state.activeSession.title === "New conversation") {
           const title = content.replace(/\s+/g, " ").slice(0, 52);
           state.activeSession = await api(`/sessions/${state.activeSession.id}`, {
             method: "PATCH", body: JSON.stringify({title}),
@@ -1053,9 +1280,14 @@
         waiting.remove();
         const answer = response.choices?.[0]?.message?.content || "";
         const assistantMessage = await appendSessionMessage("assistant", answer, response.model || state.model);
+        if (state.pendingOutlineNodeId) {
+          state.outlineMessageTargets.set(assistantMessage.id, state.pendingOutlineNodeId);
+          state.pendingOutlineNodeId = null;
+        }
         renderMessage("assistant", answer, assistantMessage.id);
         await Promise.all([refreshPending(), scanForCanon(answer, assistantMessage.id)]);
       } catch (error) {
+        state.pendingOutlineNodeId = null;
         $$(".thinking").forEach((node) => node.closest(".message")?.remove());
         renderMessage("assistant", `I couldn't complete that response. ${error.message}`);
       } finally {
@@ -1308,6 +1540,9 @@
           });
           status.value = node.status;
           status.addEventListener("change", () => updateManuscriptNode(node.id, {status: status.value}));
+          const draft = document.createElement("button");
+          draft.className = "text-button"; draft.textContent = "Draft"; draft.title = "Generate from this outline section";
+          draft.addEventListener("click", () => generateFromOutline(node));
           const up = document.createElement("button");
           up.className = "text-button"; up.textContent = "↑"; up.title = "Move up";
           up.addEventListener("click", () => moveManuscriptNode(node.id, node.parent_id, Math.max(0, node.position - 1)));
@@ -1317,7 +1552,7 @@
           const remove = document.createElement("button");
           remove.className = "text-button"; remove.textContent = "×"; remove.title = "Remove from manuscript";
           remove.addEventListener("click", () => deleteManuscriptNode(node));
-          actions.append(status, up, down, remove);
+          actions.append(status, draft, up, down, remove);
           row.append(text, actions);
           row.addEventListener("dragstart", (event) => {
             row.classList.add("dragging");
@@ -1337,6 +1572,30 @@
         });
       };
       renderLevel(null, 0);
+    }
+
+    async function generateFromOutline(node) {
+      if (state.busy) return toast("Wait for the current response to finish");
+      try {
+        let currentDraft = "";
+        if (node.artifact_id) {
+          const artifact = await api(projectPath(`/governor/artifacts/${encodeURIComponent(node.artifact_id)}`));
+          currentDraft = artifact.working_copy ?? artifact.content ?? "";
+        }
+        await createSession(`Draft: ${node.title}`);
+        state.pendingOutlineNodeId = node.id;
+        const parent = node.parent_id
+          ? state.manuscript.nodes.find((item) => item.id === node.parent_id)?.title : null;
+        $("#prompt").value = [
+          `Draft the ${node.kind} “${node.title}”${parent ? ` within “${parent}”` : ""}.`,
+          "Use the project direction and accepted canon already in context. Treat this as exploratory writing, not new canon.",
+          currentDraft ? `Revise or continue this existing section draft:\n\n${currentDraft}` : "Write a complete first-pass section suitable for keeping as a draft artifact.",
+        ].join("\n\n");
+        $("#composer").requestSubmit();
+      } catch (error) {
+        state.pendingOutlineNodeId = null;
+        toast(error.message);
+      }
     }
 
     function chooseManuscriptParent(kind) {
@@ -1424,6 +1683,8 @@
         conversationId: state.activeSession?.id || null,
         messageIds,
       } : null;
+      state.artifactTargetNodeId = messageIds.length === 1
+        ? state.outlineMessageTargets.get(messageIds[0]) || null : null;
       $("#new-artifact-title").value = messageIds.length ? (state.activeSession?.title || "Untitled draft") : "Untitled draft";
       $("#new-artifact-type").value = "draft";
       $("#new-artifact-status").value = "idea";
@@ -1432,6 +1693,9 @@
       $("#artifact-provenance-note").textContent = messageIds.length
         ? `This artifact will retain its originating conversation and ${messageIds.length} source message${messageIds.length === 1 ? "" : "s"}.`
         : "This new artifact is not linked to a conversation message.";
+      if (state.artifactTargetNodeId) {
+        $("#artifact-provenance-note").textContent += " It will also become the draft linked to its outline section.";
+      }
       $("#artifact-create-dialog").showModal();
     }
 
@@ -1456,8 +1720,20 @@
             tags: $("#new-artifact-tags").value.split(",").map((value) => value.trim()).filter(Boolean),
           }),
         });
+        if (state.artifactTargetNodeId) {
+          await api(`/v1/manuscript/${encodeURIComponent(state.artifactTargetNodeId)}`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              project_id: state.activeProjectId,
+              artifact_id: result.artifact.id,
+              set_artifact: true,
+              status: "drafting",
+            }),
+          });
+          state.artifactTargetNodeId = null;
+        }
         $("#artifact-create-dialog").close();
-        await loadArtifacts();
+        await Promise.all([loadArtifacts(), loadManuscript()]);
         await openArtifact(result.artifact.id);
         state.selectedMessageIds.clear();
         updateSelectionButton();
@@ -1576,6 +1852,78 @@
         const node = sourceId ? document.querySelector(`[data-message-id="${CSS.escape(sourceId)}"]`) : null;
         node?.scrollIntoView({behavior: "smooth", block: "center"});
         node?.classList.add("selected");
+      } catch (error) { toast(error.message); }
+    }
+
+    function openCanonProposal(event) {
+      event.preventDefault();
+      const artifact = state.activeArtifact?.artifact;
+      if (!artifact) return;
+      const kind = artifact.artifact_type === "character" ? "character"
+        : artifact.artifact_type === "world_rule" ? "world_rule" : "world_rule";
+      $("#canon-proposal-kind").value = kind;
+      $("#canon-proposal-subject").value = kind === "character" ? artifact.title : "";
+      $("#canon-proposal-statement").value = $("#artifact-content").value;
+      $("#canon-proposal-dialog").showModal();
+    }
+
+    async function submitCanonProposal(event) {
+      event.preventDefault();
+      const artifact = state.activeArtifact?.artifact;
+      if (!artifact) return;
+      try {
+        await api(`/governor/artifacts/${encodeURIComponent(artifact.id)}/canon-proposal`, {
+          method: "POST",
+          body: JSON.stringify({
+            project_id: state.activeProjectId,
+            kind: $("#canon-proposal-kind").value,
+            subject: $("#canon-proposal-subject").value,
+            statement: $("#canon-proposal-statement").value,
+          }),
+        });
+        $("#canon-proposal-dialog").close();
+        await loadCanonReviews();
+        setWorkspaceTab("bible");
+        toast("Added to Possible canon — review still required");
+      } catch (error) { toast(error.message); }
+    }
+
+    async function compareArtifactWithCanon(event) {
+      event.preventDefault();
+      const artifact = state.activeArtifact?.artifact;
+      if (!artifact) return;
+      clearTimeout(saveArtifact.autosaveTimer);
+      try {
+        await api(projectPath(`/governor/artifacts/${encodeURIComponent(artifact.id)}/working-copy`), {
+          method: "PUT",
+          body: JSON.stringify({
+            content: $("#artifact-content").value,
+            base_version: artifact.current_version,
+          }),
+        });
+        const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(artifact.id)}/canon-comparison`));
+        const container = $("#canon-comparison-results");
+        container.replaceChildren();
+        const continuity = result.continuity;
+        const summary = document.createElement("div");
+        summary.className = "ia-note";
+        summary.textContent = result.canonical_anchor_count
+          ? continuity.passed
+            ? `No lexical conflicts found across ${result.canonical_anchor_count} accepted canon entries.`
+            : `${continuity.violations.length} possible conflict${continuity.violations.length === 1 ? "" : "s"} found. The draft and canon were not changed.`
+          : "There is no accepted canon to compare with yet.";
+        container.append(summary);
+        continuity.violations.forEach((violation) => {
+          container.append(itemCard(violation.description, `${violation.anchor_id} · ${violation.severity}`));
+        });
+        const mentioned = result.canonical_references.filter((item) => item.mentioned);
+        if (mentioned.length) {
+          const label = document.createElement("div");
+          label.className = "group-title"; label.textContent = "Canon referenced in this draft";
+          container.append(label);
+          mentioned.forEach((reference) => container.append(itemCard(reference.description, reference.type)));
+        }
+        $("#canon-comparison-dialog").showModal();
       } catch (error) { toast(error.message); }
     }
 
@@ -1774,8 +2122,15 @@
     }
 
     function wireEvents() {
-      $("#new-session").addEventListener("click", createSession);
+      $("#new-session").addEventListener("click", () => createSession());
       $("#project-select").addEventListener("change", (event) => switchProject(event.target.value));
+      $("#workspace-select").addEventListener("change", (event) => switchWorkspace(event.target.value));
+      $("#new-workspace").addEventListener("click", createWorkspace);
+      $("#rename-workspace").addEventListener("click", renameWorkspace);
+      $("#workspace-backups").addEventListener("click", openWorkspaceBackups);
+      $("#close-backups").addEventListener("click", () => $("#backup-dialog").close());
+      $("#backup-form").addEventListener("submit", saveBackupPolicy);
+      $("#backup-now").addEventListener("click", createBackupNow);
       $("#new-project").addEventListener("click", createProject);
       $("#rename-project").addEventListener("click", renameProject);
       $("#archive-project").addEventListener("click", archiveProject);
@@ -1839,6 +2194,11 @@
       $("#restore-revision").addEventListener("click", restoreRevision);
       $("#trash-artifact").addEventListener("click", trashArtifact);
       $("#artifact-source").addEventListener("click", openArtifactSource);
+      $("#propose-canon").addEventListener("click", openCanonProposal);
+      $("#compare-canon").addEventListener("click", compareArtifactWithCanon);
+      $("#close-canon-proposal").addEventListener("click", () => $("#canon-proposal-dialog").close());
+      $("#canon-proposal-form").addEventListener("submit", submitCanonProposal);
+      $("#close-canon-comparison").addEventListener("click", () => $("#canon-comparison-dialog").close());
       $("#artifact-content").addEventListener("input", queueArtifactAutosave);
       $("#artifact-status").addEventListener("change", saveArtifactLifecycle);
       $("#artifact-tags").addEventListener("change", saveArtifactLifecycle);
@@ -1890,9 +2250,9 @@
     async function start() {
       wireEvents();
       toggleFocusMode(window.localStorage.getItem("marginalia.focus") === "true");
-      try { await loadProjects(); await loadProject(); } catch (error) { toast(error.message); }
+      try { await loadWorkspaces(); await loadProjects(); await loadProject(); } catch (error) { toast(error.message); }
       const tasks = [
-        loadProvider(), loadSessions(), loadBible(), loadArtifacts().then(loadManuscript),
+        loadSystem(), loadProvider(), loadSessions(), loadBible(), loadArtifacts().then(loadManuscript),
         loadCanonReviews(), loadSnapshots(), refreshPending(),
       ];
       const results = await Promise.allSettled(tasks);
