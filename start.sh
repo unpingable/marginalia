@@ -11,10 +11,10 @@ export MARGINALIA_BUILD_TIME="${MARGINALIA_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M
 export MARGINALIA_IMAGE_REF="${MARGINALIA_IMAGE_REF:-marginalia:local}"
 export MARGINALIA_DEPLOYMENT_ID="${MARGINALIA_DEPLOYMENT_ID:-compose-${HOSTNAME:-host}}"
 
-docker compose \
-  -f docker-compose.yml \
-  -f docker-compose.build.yml \
-  up --build -d "$@"
+source "$SCRIPT_DIR/compose-files.sh"
+COMPOSE_FILES+=(-f docker-compose.build.yml)
+
+docker compose "${COMPOSE_FILES[@]}" up --build -d "$@"
 
 echo "Marginalia: http://localhost:${MARGINALIA_PORT:-8000}"
 echo "Provider ownership: Agent Governor daemon (BACKEND_TYPE=${BACKEND_TYPE:-anthropic})"

@@ -235,3 +235,20 @@ def test_release_contract_names_and_pins_the_complete_marginalia_appliance() -> 
     assert f"marginalia:{project['version']}" in (
         REPO_ROOT / "docker-compose.yml"
     ).read_text()
+
+
+def test_start_scripts_enable_the_direct_nfs_backup_override() -> None:
+    nfs_compose = (REPO_ROOT / "docker-compose.nfs.yml").read_text()
+    compose_files = (REPO_ROOT / "compose-files.sh").read_text()
+    assert "type: nfs" in nfs_compose
+    assert "MARGINALIA_BACKUP_NFS_HOST" in nfs_compose
+    assert "MARGINALIA_BACKUP_NFS_EXPORT" in nfs_compose
+    assert "marginalia_backups_nfs:/backups" in nfs_compose
+    assert 'source "$SCRIPT_DIR/.env"' not in compose_files
+    assert "IFS='=' read -r dotenv_key dotenv_value" in compose_files
+    assert "MARGINALIA_BACKUP_NFS_HOST:?" in compose_files
+    assert "MARGINALIA_BACKUP_NFS_EXPORT:?" in compose_files
+
+    for launcher in ("start.sh", "start-codex.sh"):
+        script = (REPO_ROOT / launcher).read_text()
+        assert 'source "$SCRIPT_DIR/compose-files.sh"' in script

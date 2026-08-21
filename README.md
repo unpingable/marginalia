@@ -115,9 +115,10 @@ creates a provenance-linked artifact and links it back to the outline node.
 ## Household operations
 
 The Compose stack includes a read-only-data backup worker. Backup policy is
-configured per workspace, while the host supplies one mounted backup root such
-as `/tank/nfs/marginalia`. Archives carry file and outer checksums plus build
-metadata, and every restore test rebuilds into an isolated temporary root.
+configured per workspace, while the deployment supplies one Docker-managed NFS
+volume or host-mounted backup root such as `/tank/nfs/marginalia`. Archives
+carry file and outer checksums plus build metadata, and every restore test
+rebuilds into an isolated temporary root.
 Deployments may require a remote filesystem explicitly, preventing a confined
 container runtime from silently substituting local disk for the NAS path.
 Startup validates durable schemas and applies only supported additive

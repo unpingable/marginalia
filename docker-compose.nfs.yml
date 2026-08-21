@@ -1,0 +1,22 @@
+# Optional direct-NFS override. The start scripts include this file whenever
+# MARGINALIA_BACKUP_NFS_HOST or MARGINALIA_BACKUP_NFS_EXPORT is configured.
+# Mounting through Docker avoids daemon mount-namespace problems with confined
+# Docker installations while keeping the application contract at /backups.
+
+services:
+  marginalia:
+    volumes:
+      - marginalia_backups_nfs:/backups
+
+  marginalia-backup:
+    volumes:
+      - marginalia_backups_nfs:/backups
+
+volumes:
+  marginalia_backups_nfs:
+    name: ${MARGINALIA_BACKUP_NFS_VOLUME:-marginalia_backups_nfs}
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=${MARGINALIA_BACKUP_NFS_HOST:?set MARGINALIA_BACKUP_NFS_HOST},nfsvers=${MARGINALIA_BACKUP_NFS_VERSION:-4},rw
+      device: :${MARGINALIA_BACKUP_NFS_EXPORT:?set MARGINALIA_BACKUP_NFS_EXPORT}

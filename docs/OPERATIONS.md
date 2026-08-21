@@ -6,25 +6,32 @@ Marginalia's Compose deployment has two processes built from the same image:
 - `marginalia-backup` reads `/data` and performs enabled workspace schedules.
 
 Both use the existing `marginalia_data` volume. The worker mounts that volume
-read-only. The host backup path is mounted at `/backups`; no backup operation
-rewrites the live data volume.
+read-only. A Docker-managed NFS volume (recommended) or host bind is mounted at
+`/backups`; no backup operation rewrites the live data volume.
 
 ## Configure the backup destination
 
-Copy `.env.example` to the untracked `.env` and set the host path:
+Copy `.env.example` to the untracked `.env` and configure the NFS export:
 
 ```bash
-MARGINALIA_BACKUP_HOST_PATH=/tank/nfs/marginalia
+MARGINALIA_BACKUP_NFS_HOST=192.168.69.10
+MARGINALIA_BACKUP_NFS_EXPORT=/tank/nfs/marginalia
+MARGINALIA_BACKUP_NFS_VERSION=4
+MARGINALIA_BACKUP_NFS_VOLUME=marginalia_backups_nfs
 MARGINALIA_BACKUP_REQUIRE_REMOTE=true
 MARGINALIA_DEPLOYMENT_ID=household-compose
 ```
 
-The host must mount the NAS before Compose starts, and the mount must be
-writable. Marginalia does not mount or remount NFS and will not fall back to
-the container filesystem if `MARGINALIA_BACKUP_REQUIRE_REMOTE=true`. The API
-reads Linux mount metadata and refuses backup creation unless `/backups` is on
-NFS, CIFS/SMB, or SSHFS. Confirm the host mount first:
-the host:
+The start scripts automatically include `docker-compose.nfs.yml` when either
+NFS variable is set and require both values. Docker mounts that export directly,
+so confined Docker daemons do not depend on their view of the host mount
+namespace. Marginalia will not fall back to container storage when
+`MARGINALIA_BACKUP_REQUIRE_REMOTE=true`; the API reads Linux mount metadata and
+refuses backup creation unless `/backups` is on NFS, CIFS/SMB, or SSHFS.
+
+For a conventional Docker installation, a host-mounted NAS remains available
+as a fallback: leave the NFS variables unset and set
+`MARGINALIA_BACKUP_HOST_PATH=/tank/nfs/marginalia`. Confirm that mount first:
 
 ```bash
 findmnt -T /tank/nfs/marginalia
@@ -108,7 +115,7 @@ restore there first:
 ```bash
 docker volume create marginalia_restore_candidate
 docker run --rm \
-  --volume /tank/nfs/marginalia:/backups:ro \
+  --volume marginalia_backups_nfs:/backups:ro \
   --volume marginalia_restore_candidate:/restore \
   marginalia:local \
   python3 -m gov_webui.ops --backup-root /backups \
