@@ -30,6 +30,14 @@ def product_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     adapter._session_store = None
     adapter._creative_project_store = None
     adapter._artifact_store = None
+    adapter._library_store = None
+    adapter._session_stores.clear()
+    adapter._governed_chat_adapters.clear()
+    adapter._creative_project_stores.clear()
+    adapter._artifact_stores.clear()
+    adapter._canon_review_stores.clear()
+    adapter._manuscript_stores.clear()
+    adapter._snapshot_stores.clear()
     adapter._governed_chat_adapter = fake_governed_chat(
         content="The governed project response.",
         model="fiction-model",
@@ -43,6 +51,14 @@ def product_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     adapter._session_store = None
     adapter._creative_project_store = None
     adapter._artifact_store = None
+    adapter._library_store = None
+    adapter._session_stores.clear()
+    adapter._governed_chat_adapters.clear()
+    adapter._creative_project_stores.clear()
+    adapter._artifact_stores.clear()
+    adapter._canon_review_stores.clear()
+    adapter._manuscript_stores.clear()
+    adapter._snapshot_stores.clear()
     adapter._governed_chat_adapter = None
     adapter._pending_captures.clear()
 
@@ -115,9 +131,7 @@ def test_codex_provider_wrapper_delegates_default_model_to_cli(tmp_path: Path) -
         "/openapi.json",
     ],
 )
-def test_donor_operator_routes_are_unreachable_by_default(
-    product_client, path: str
-) -> None:
+def test_donor_operator_routes_are_unreachable_by_default(product_client, path: str) -> None:
     client, _ = product_client
     assert client.get(path).status_code == 404
 
@@ -145,8 +159,7 @@ def test_conversation_surface_renders_assistant_markdown(product_client) -> None
 
     assert response.status_code == 200
     assert response.json()["html"] == (
-        "<h2>Shuffle All</h2>\n"
-        "<p>It is <em>almost</em> inevitable.</p>\n"
+        "<h2>Shuffle All</h2>\n<p>It is <em>almost</em> inevitable.</p>\n"
     )
 
     shell = client.get("/").text
@@ -157,10 +170,12 @@ def test_conversation_surface_renders_assistant_markdown(product_client) -> None
 def test_runtime_entrypoint_refuses_nonfiction_mode(tmp_path: Path) -> None:
     environment = os.environ.copy()
     environment.pop("MARGINALIA_ENABLE_DONOR_ROUTES", None)
-    environment.update({
-        "GOVERNOR_MODE": "research",
-        "MARGINALIA_DATA_ROOT": str(tmp_path / "data"),
-    })
+    environment.update(
+        {
+            "GOVERNOR_MODE": "research",
+            "MARGINALIA_DATA_ROOT": str(tmp_path / "data"),
+        }
+    )
 
     result = subprocess.run(
         [str(REPO_ROOT / "entrypoint.sh")],
@@ -216,8 +231,7 @@ def test_project_settings_persist_and_reach_every_governed_fiction_request(
     for call in calls:
         messages = call.kwargs["messages"]
         project_messages = [
-            message for message in messages
-            if "MARGINALIA_PROJECT_CONTEXT_V1" in message["content"]
+            message for message in messages if "MARGINALIA_PROJECT_CONTEXT_V1" in message["content"]
         ]
         assert len(project_messages) == 1
         prompt = project_messages[0]["content"]
@@ -237,23 +251,29 @@ def test_project_b_cannot_receive_project_a_prompt_context(product_client) -> No
         },
     )
 
-    adapter.GOVERNOR_CONTEXT_ID = "second-novel"
-    adapter._creative_project_store = None
-    adapter._session_store = None
-    # Use a fresh complete fake after changing only the application context.
-    adapter._governed_chat_adapter = fake_governed_chat(
+    project_b_record = client.post(
+        "/v1/projects", json={"name": "Second novel"}
+    ).json()
+    # Use a fresh complete fake for the second project's governed context.
+    project_b_chat = fake_governed_chat(
         content="Project B response", model="fiction-model"
     )
+    adapter._governed_chat_adapters[project_b_record["context_id"]] = project_b_chat
 
-    project_b = client.get("/v1/project").json()
-    assert project_b["context_id"] == "second-novel"
+    project_b = client.get(
+        "/v1/project", params={"project_id": project_b_record["id"]}
+    ).json()
+    assert project_b["context_id"] == project_b_record["context_id"]
     assert project_b["has_guidance"] is False
     response = client.post(
         "/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "Begin B."}]},
+        json={
+            "messages": [{"role": "user", "content": "Begin B."}],
+            "project_id": project_b_record["id"],
+        },
     )
     assert response.status_code == 200
-    messages = adapter._governed_chat_adapter.chat_send.call_args.kwargs["messages"]
+    messages = project_b_chat.chat_send.call_args.kwargs["messages"]
     assert messages == [{"role": "user", "content": "Begin B."}]
     assert "PROJECT_A_SECRET" not in str(messages)
 

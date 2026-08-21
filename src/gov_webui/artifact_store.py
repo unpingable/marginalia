@@ -81,9 +81,7 @@ class ArtifactContentMissingError(ArtifactStoreError):
         self.artifact_id = artifact_id
         self.version = version
         self.path = path
-        super().__init__(
-            f"Content file missing: artifact {artifact_id} v{version} at {path}"
-        )
+        super().__init__(f"Content file missing: artifact {artifact_id} v{version} at {path}")
 
 
 # ============================================================================
@@ -95,15 +93,31 @@ class ArtifactVersion(BaseModel):
     version: int
     created_at: str  # ISO8601 UTC
     content_hash: str  # SHA256 hex[:16]
-    source: str = "manual"  # "promote" | "manual" | "edit"
+    source: str = "manual"  # "promote" | "manual" | "edit" | "restore"
     message_id: str | None = None
     source_turn_seq: int | None = None
+
+
+class ArtifactProvenance(BaseModel):
+    """Where an exploratory artifact first came from."""
+
+    conversation_id: str | None = None
+    message_ids: list[str] = Field(default_factory=list)
+    captured_at: str = ""
 
 
 class ArtifactMeta(BaseModel):
     id: str  # uuid4().hex[:12]
     title: str
     kind: str = "text"  # "text" | "markdown" | "code"
+    artifact_type: str = "draft"
+    project_id: str = ""
+    provenance: ArtifactProvenance = Field(default_factory=ArtifactProvenance)
+    status: str = "idea"
+    tags: list[str] = Field(default_factory=list)
+    trashed_at: str | None = None
+    working_copy_updated_at: str | None = None
+    working_copy_base_version: int | None = None
     language: str = ""
     current_version: int = 1
     versions: list[ArtifactVersion] = Field(default_factory=list)
@@ -123,6 +137,14 @@ class ArtifactSummary(BaseModel):
     id: str
     title: str
     kind: str
+    artifact_type: str
+    project_id: str
+    provenance: ArtifactProvenance
+    status: str = "idea"
+    tags: list[str] = Field(default_factory=list)
+    trashed_at: str | None = None
+    working_copy_updated_at: str | None = None
+    working_copy_base_version: int | None = None
     language: str
     current_version: int
     created_at: str
@@ -146,7 +168,9 @@ class ArtifactStore:
     """File-backed artifact store with per-artifact optimistic concurrency."""
 
     ALLOWED_KINDS = {"text", "markdown", "code"}
-    ALLOWED_SOURCES = {"promote", "manual", "edit"}
+    ALLOWED_ARTIFACT_TYPES = {"draft", "scene", "character", "world_rule", "note"}
+    ALLOWED_STATUSES = {"idea", "drafting", "revised", "final"}
+    ALLOWED_SOURCES = {"promote", "manual", "edit", "restore"}
 
     def __init__(
         self,
@@ -159,6 +183,7 @@ class ArtifactStore:
         self._base = base
         self._index_path = base / "index.json"
         self._content_dir = base / "content"
+        self._working_dir = base / "working"
         self._max_title_len = max_title_len
         self._max_content_bytes = max_content_bytes
         self._lock = threading.Lock()
@@ -166,6 +191,7 @@ class ArtifactStore:
         # Ensure directories exist
         self._base.mkdir(parents=True, exist_ok=True)
         self._content_dir.mkdir(parents=True, exist_ok=True)
+        self._working_dir.mkdir(parents=True, exist_ok=True)
 
         # Bootstrap index if missing
         if not self._index_path.exists():
@@ -222,6 +248,9 @@ class ArtifactStore:
             raise ArtifactContentMissingError(artifact_id, version, str(p))
         return p.read_text(encoding="utf-8")
 
+    def _working_path(self, artifact_id: str) -> Path:
+        return self._working_dir / f"{artifact_id}.txt"
+
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
@@ -238,13 +267,41 @@ class ArtifactStore:
                 f"Invalid source '{source}'. Allowed: {sorted(self.ALLOWED_SOURCES)}"
             )
 
+    def _validate_artifact_type(self, artifact_type: str) -> None:
+        if artifact_type not in self.ALLOWED_ARTIFACT_TYPES:
+            raise ArtifactValidationError(
+                "Invalid artifact type "
+                f"'{artifact_type}'. Allowed: {sorted(self.ALLOWED_ARTIFACT_TYPES)}"
+            )
+
+    def _validate_status(self, status: str) -> None:
+        if status not in self.ALLOWED_STATUSES:
+            raise ArtifactValidationError(
+                f"Invalid status '{status}'. Allowed: {sorted(self.ALLOWED_STATUSES)}"
+            )
+
+    @staticmethod
+    def _clean_tags(tags: list[str] | None) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in tags or []:
+            tag = " ".join(raw.split())
+            key = tag.casefold()
+            if not tag or key in seen:
+                continue
+            if len(tag) > 60:
+                raise ArtifactValidationError("Artifact tags are limited to 60 characters")
+            cleaned.append(tag)
+            seen.add(key)
+        if len(cleaned) > 30:
+            raise ArtifactValidationError("Artifacts are limited to 30 tags")
+        return cleaned
+
     def _validate_title(self, title: str) -> None:
         if not title or not title.strip():
             raise ArtifactValidationError("Title must not be empty")
         if len(title) > self._max_title_len:
-            raise ArtifactValidationError(
-                f"Title exceeds {self._max_title_len} characters"
-            )
+            raise ArtifactValidationError(f"Title exceeds {self._max_title_len} characters")
 
     def _validate_content(self, content: str) -> None:
         size = len(content.encode("utf-8"))
@@ -263,14 +320,22 @@ class ArtifactStore:
         title: str,
         content: str,
         kind: str = "text",
+        artifact_type: str = "draft",
+        project_id: str = "",
+        status: str = "idea",
+        tags: list[str] | None = None,
         language: str = "",
         message_id: str | None = None,
+        conversation_id: str | None = None,
+        source_message_ids: list[str] | None = None,
         source: str = "manual",
         source_turn_seq: int | None = None,
     ) -> tuple[ArtifactMeta, str, int]:
         """Create a new artifact. Returns (meta, content, index_version)."""
         # 1. Validate
         self._validate_kind(kind)
+        self._validate_artifact_type(artifact_type)
+        self._validate_status(status)
         self._validate_source(source)
         self._validate_title(title)
         self._validate_content(content)
@@ -278,6 +343,9 @@ class ArtifactStore:
         now = _now_iso()
         artifact_id = uuid4().hex[:12]
         chash = _content_hash(content)
+        message_ids = list(source_message_ids or [])
+        if message_id and message_id not in message_ids:
+            message_ids.append(message_id)
 
         ver = ArtifactVersion(
             version=1,
@@ -291,6 +359,15 @@ class ArtifactStore:
             id=artifact_id,
             title=title,
             kind=kind,
+            artifact_type=artifact_type,
+            project_id=project_id,
+            provenance=ArtifactProvenance(
+                conversation_id=conversation_id,
+                message_ids=message_ids,
+                captured_at=now,
+            ),
+            status=status,
+            tags=self._clean_tags(tags),
             language=language,
             current_version=1,
             versions=[ver],
@@ -370,6 +447,9 @@ class ArtifactStore:
 
             # Write content first, then index
             self._write_content(artifact_id, new_version, content)
+            self._working_path(artifact_id).unlink(missing_ok=True)
+            meta.working_copy_updated_at = None
+            meta.working_copy_base_version = None
             index.version += 1
             index.updated_at = now
             self._write_index(index)
@@ -412,6 +492,14 @@ class ArtifactStore:
                 id=m.id,
                 title=m.title,
                 kind=m.kind,
+                artifact_type=m.artifact_type,
+                project_id=m.project_id,
+                provenance=m.provenance,
+                status=m.status,
+                tags=list(m.tags),
+                trashed_at=m.trashed_at,
+                working_copy_updated_at=m.working_copy_updated_at,
+                working_copy_base_version=m.working_copy_base_version,
                 language=m.language,
                 current_version=m.current_version,
                 created_at=m.created_at,
@@ -421,6 +509,104 @@ class ArtifactStore:
         ]
         summaries.sort(key=lambda s: s.updated_at, reverse=True)
         return summaries, index.version
+
+    def set_lifecycle(
+        self,
+        artifact_id: str,
+        *,
+        status: str | None = None,
+        tags: list[str] | None = None,
+        trashed: bool | None = None,
+    ) -> tuple[ArtifactMeta, int]:
+        """Update organizational metadata without creating a content revision."""
+        if status is not None:
+            self._validate_status(status)
+        cleaned_tags = self._clean_tags(tags) if tags is not None else None
+        with self._lock:
+            index = self._load_index()
+            meta = index.artifacts.get(artifact_id)
+            if meta is None:
+                raise ArtifactNotFoundError(artifact_id)
+            now = _now_iso()
+            if status is not None:
+                meta.status = status
+            if cleaned_tags is not None:
+                meta.tags = cleaned_tags
+            if trashed is not None:
+                meta.trashed_at = now if trashed else None
+            meta.updated_at = now
+            index.version += 1
+            index.updated_at = now
+            self._write_index(index)
+        return meta, index.version
+
+    def save_working_copy(
+        self,
+        artifact_id: str,
+        *,
+        content: str,
+        base_version: int,
+    ) -> tuple[ArtifactMeta, int]:
+        """Autosave mutable draft text without creating a durable revision."""
+        self._validate_content(content)
+        with self._lock:
+            index = self._load_index()
+            meta = index.artifacts.get(artifact_id)
+            if meta is None:
+                raise ArtifactNotFoundError(artifact_id)
+            if base_version != meta.current_version:
+                raise StaleArtifactVersionError(
+                    artifact_id=artifact_id,
+                    expected_current_version=base_version,
+                    current_version=meta.current_version,
+                    index_version=index.version,
+                )
+            now = _now_iso()
+            path = self._working_path(artifact_id)
+            fd, temporary = tempfile.mkstemp(dir=str(self._working_dir), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(content)
+                os.replace(temporary, path)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
+            meta.working_copy_updated_at = now
+            meta.working_copy_base_version = base_version
+            index.version += 1
+            index.updated_at = now
+            self._write_index(index)
+            return meta.model_copy(deep=True), index.version
+
+    def get_working_copy(self, artifact_id: str) -> tuple[str | None, int | None]:
+        """Return autosaved text and its base revision, if one exists."""
+        with self._lock:
+            index = self._load_index()
+            meta = index.artifacts.get(artifact_id)
+            if meta is None:
+                raise ArtifactNotFoundError(artifact_id)
+            path = self._working_path(artifact_id)
+            if meta.working_copy_updated_at is None or not path.exists():
+                return None, None
+            return path.read_text(encoding="utf-8"), meta.working_copy_base_version
+
+    def discard_working_copy(self, artifact_id: str) -> tuple[ArtifactMeta, int]:
+        """Discard only the mutable autosave; committed revisions remain intact."""
+        with self._lock:
+            index = self._load_index()
+            meta = index.artifacts.get(artifact_id)
+            if meta is None:
+                raise ArtifactNotFoundError(artifact_id)
+            self._working_path(artifact_id).unlink(missing_ok=True)
+            meta.working_copy_updated_at = None
+            meta.working_copy_base_version = None
+            index.version += 1
+            index.updated_at = _now_iso()
+            self._write_index(index)
+            return meta.model_copy(deep=True), index.version
 
     def delete(self, artifact_id: str) -> tuple[bool, int]:
         """Delete artifact from index (content files left on disk). Returns (True, index_version)."""

@@ -26,6 +26,7 @@ def store(tmp_path):
 # 1. create writes metadata and v1 content
 # ------------------------------------------------------------------
 
+
 def test_create_artifact_writes_metadata_and_v1_content(store):
     meta, content, idx_ver = store.create(
         title="Hello", content="world", kind="text", language="", source="manual"
@@ -45,15 +46,12 @@ def test_create_artifact_writes_metadata_and_v1_content(store):
 # 2. update creates new version; old version remains readable
 # ------------------------------------------------------------------
 
+
 def test_update_creates_new_version_and_old_version_remains_readable(store):
-    meta, _, _ = store.create(
-        title="Draft", content="v1 content", kind="markdown", language=""
-    )
+    meta, _, _ = store.create(title="Draft", content="v1 content", kind="markdown", language="")
     aid = meta.id
 
-    meta2, content2, _ = store.update(
-        aid, content="v2 content", expected_current_version=1
-    )
+    meta2, content2, _ = store.update(aid, content="v2 content", expected_current_version=1)
     assert meta2.current_version == 2
     assert content2 == "v2 content"
     assert len(meta2.versions) == 2
@@ -66,6 +64,7 @@ def test_update_creates_new_version_and_old_version_remains_readable(store):
 # ------------------------------------------------------------------
 # 3. stale version raises structured error
 # ------------------------------------------------------------------
+
 
 def test_stale_version_raises_structured_error(store):
     meta, _, _ = store.create(title="Doc", content="a", kind="text", language="")
@@ -89,6 +88,7 @@ def test_stale_version_raises_structured_error(store):
 # 4. list_all returns metadata only, sorted by updated_at desc
 # ------------------------------------------------------------------
 
+
 def test_list_all_returns_metadata_only_sorted_by_updated_desc(store):
     store.create(title="First", content="a", kind="text", language="")
     store.create(title="Second", content="b", kind="text", language="")
@@ -106,6 +106,7 @@ def test_list_all_returns_metadata_only_sorted_by_updated_desc(store):
 # ------------------------------------------------------------------
 # 5. delete removes from index
 # ------------------------------------------------------------------
+
 
 def test_delete_removes_from_index(store):
     meta, _, _ = store.create(title="Gone", content="bye", kind="text", language="")
@@ -125,6 +126,7 @@ def test_delete_removes_from_index(store):
 # 6. get specific version returns correct content
 # ------------------------------------------------------------------
 
+
 def test_get_specific_version_returns_correct_content(store):
     meta, _, _ = store.create(title="Doc", content="v1", kind="text", language="")
     aid = meta.id
@@ -140,11 +142,10 @@ def test_get_specific_version_returns_correct_content(store):
 # 7. persist and reload roundtrip
 # ------------------------------------------------------------------
 
+
 def test_persist_and_reload_roundtrip(tmp_path):
     store1 = ArtifactStore(tmp_path)
-    meta, _, _ = store1.create(
-        title="Persist", content="data", kind="markdown", language="md"
-    )
+    meta, _, _ = store1.create(title="Persist", content="data", kind="markdown", language="md")
     aid = meta.id
 
     # Create a new store from the same directory
@@ -159,6 +160,7 @@ def test_persist_and_reload_roundtrip(tmp_path):
 # 8. create with invalid kind raises validation error
 # ------------------------------------------------------------------
 
+
 def test_create_invalid_kind_raises_validation_error(store):
     with pytest.raises(ArtifactValidationError, match="Invalid kind"):
         store.create(title="Bad", content="x", kind="spreadsheet", language="")
@@ -167,6 +169,7 @@ def test_create_invalid_kind_raises_validation_error(store):
 # ------------------------------------------------------------------
 # 9. create with oversized content raises validation error
 # ------------------------------------------------------------------
+
 
 def test_create_oversized_content_raises_validation_error(tmp_path):
     store = ArtifactStore(tmp_path, max_content_bytes=100)
@@ -178,6 +181,7 @@ def test_create_oversized_content_raises_validation_error(tmp_path):
 # 10. get missing artifact raises artifact not found
 # ------------------------------------------------------------------
 
+
 def test_get_missing_artifact_raises_artifact_not_found(store):
     with pytest.raises(ArtifactNotFoundError) as exc_info:
         store.get("nonexistent123")
@@ -187,6 +191,7 @@ def test_get_missing_artifact_raises_artifact_not_found(store):
 # ------------------------------------------------------------------
 # 11. missing content file raises content missing
 # ------------------------------------------------------------------
+
 
 def test_missing_content_file_raises_content_missing(store):
     meta, _, _ = store.create(title="Orphan", content="here", kind="text", language="")
@@ -207,6 +212,7 @@ def test_missing_content_file_raises_content_missing(store):
 # 12. thread safety: concurrent creates do not corrupt index
 # ------------------------------------------------------------------
 
+
 def test_thread_safety_concurrent_creates_do_not_corrupt_index(tmp_path):
     store = ArtifactStore(tmp_path)
     errors = []
@@ -214,9 +220,7 @@ def test_thread_safety_concurrent_creates_do_not_corrupt_index(tmp_path):
 
     def create_one(i):
         try:
-            store.create(
-                title=f"Thread-{i}", content=f"content-{i}", kind="text", language=""
-            )
+            store.create(title=f"Thread-{i}", content=f"content-{i}", kind="text", language="")
         except Exception as e:
             errors.append(e)
 
@@ -236,28 +240,40 @@ def test_thread_safety_concurrent_creates_do_not_corrupt_index(tmp_path):
 # 13. promote source provenance
 # ------------------------------------------------------------------
 
+
 def test_promote_source_provenance(store):
     meta, _, _ = store.create(
         title="From Chat",
         content="promoted text",
         kind="markdown",
+        artifact_type="scene",
+        project_id="project-1",
         language="",
         source="promote",
         message_id="msg-abc-123",
+        conversation_id="conversation-1",
+        source_message_ids=["msg-abc-123"],
     )
 
     assert meta.versions[0].source == "promote"
     assert meta.versions[0].message_id == "msg-abc-123"
+    assert meta.artifact_type == "scene"
+    assert meta.project_id == "project-1"
+    assert meta.provenance.conversation_id == "conversation-1"
+    assert meta.provenance.message_ids == ["msg-abc-123"]
+    assert meta.provenance.captured_at
 
     # Reload and verify persistence
     meta2, _, _ = store.get(meta.id)
     assert meta2.versions[0].source == "promote"
     assert meta2.versions[0].message_id == "msg-abc-123"
+    assert meta2.provenance.conversation_id == "conversation-1"
 
 
 # ------------------------------------------------------------------
 # 14. source_turn_seq round-trip
 # ------------------------------------------------------------------
+
 
 def test_source_turn_seq_round_trip(store):
     """Create with source_turn_seq → read back → field present. Without → None."""
@@ -287,6 +303,7 @@ def test_source_turn_seq_round_trip(store):
 # ------------------------------------------------------------------
 # 15. source_turn_seq missing on old versions (backward compat)
 # ------------------------------------------------------------------
+
 
 def test_source_turn_seq_missing_on_old_versions(tmp_path):
     """Index entries written without source_turn_seq field load as None."""
@@ -332,4 +349,95 @@ def test_source_turn_seq_missing_on_old_versions(tmp_path):
     store2 = ArtifactStore(tmp_path)
     meta, content, _ = store2.get("old123456ab")
     assert meta.versions[0].source_turn_seq is None
+    assert meta.artifact_type == "draft"
+    assert meta.project_id == ""
+    assert meta.provenance.conversation_id is None
+    assert meta.provenance.message_ids == []
+    assert meta.status == "idea"
+    assert meta.tags == []
+    assert meta.trashed_at is None
+    assert meta.working_copy_updated_at is None
     assert content == "legacy content"
+
+
+def test_working_copy_autosaves_without_revision_and_clears_on_commit(store):
+    meta, _, _ = store.create(title="Draft", content="Committed", kind="markdown")
+    saved, _ = store.save_working_copy(
+        meta.id,
+        content="Uncommitted typing",
+        base_version=1,
+    )
+    assert saved.current_version == 1
+    assert saved.working_copy_updated_at
+    assert store.get_working_copy(meta.id) == ("Uncommitted typing", 1)
+    assert store.get(meta.id)[1] == "Committed"
+
+    committed, content, _ = store.update(
+        meta.id,
+        content="Uncommitted typing",
+        expected_current_version=1,
+        source="edit",
+    )
+    assert committed.current_version == 2
+    assert content == "Uncommitted typing"
+    assert store.get_working_copy(meta.id) == (None, None)
+
+
+def test_working_copy_rejects_stale_base_and_can_be_discarded(store):
+    meta, _, _ = store.create(title="Draft", content="One")
+    store.save_working_copy(meta.id, content="Typing", base_version=1)
+    discarded, _ = store.discard_working_copy(meta.id)
+    assert discarded.current_version == 1
+    assert store.get_working_copy(meta.id) == (None, None)
+    store.update(meta.id, content="Two", expected_current_version=1)
+    with pytest.raises(StaleArtifactVersionError):
+        store.save_working_copy(meta.id, content="Stale", base_version=1)
+
+
+@pytest.mark.parametrize(
+    "artifact_type",
+    ["draft", "scene", "character", "world_rule", "note"],
+)
+def test_writer_artifact_types_round_trip(store, artifact_type):
+    meta, _, _ = store.create(
+        title="Kept output",
+        content="Persistent exploration",
+        artifact_type=artifact_type,
+    )
+    assert store.get(meta.id)[0].artifact_type == artifact_type
+
+
+def test_invalid_writer_artifact_type_is_rejected(store):
+    with pytest.raises(ArtifactValidationError, match="Invalid artifact type"):
+        store.create(title="No", content="x", artifact_type="canon")
+
+
+def test_artifact_lifecycle_metadata_is_durable_without_new_revision(tmp_path):
+    store = ArtifactStore(tmp_path)
+    meta, _, _ = store.create(
+        title="Scene",
+        content="Draft words",
+        artifact_type="scene",
+        status="drafting",
+        tags=["Elena", " ending ", "elena"],
+    )
+    updated, _ = store.set_lifecycle(
+        meta.id,
+        status="revised",
+        tags=["Elena", "Final act"],
+        trashed=True,
+    )
+    assert updated.current_version == 1
+    assert updated.status == "revised"
+    assert updated.tags == ["Elena", "Final act"]
+    assert updated.trashed_at
+
+    restored = ArtifactStore(tmp_path).get(meta.id)[0]
+    assert restored.status == "revised"
+    assert restored.tags == ["Elena", "Final act"]
+    assert restored.trashed_at == updated.trashed_at
+
+
+def test_invalid_artifact_status_is_rejected(store):
+    with pytest.raises(ArtifactValidationError, match="Invalid status"):
+        store.create(title="No", content="x", status="published")

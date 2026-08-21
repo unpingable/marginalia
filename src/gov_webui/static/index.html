@@ -78,7 +78,12 @@
     .brand-name { font: 600 21px/1 var(--serif); letter-spacing: .02em; }
     .brand-sub { color: var(--muted); font-size: 10px; margin-top: 4px; letter-spacing: .08em; text-transform: uppercase; }
 
-    .rail-body { height: calc(100% - 72px); display: flex; flex-direction: column; padding: 16px 12px; }
+    .rail-body { height: calc(100% - 72px); display: flex; flex-direction: column; padding: 12px; }
+    .project-picker { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-bottom: 8px; }
+    .project-picker select, .conversation-tools input, .conversation-tools select {
+      width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--sheet); color: var(--ink); padding: 8px; font-size: 11px;
+    }
+    .project-actions { display: flex; gap: 9px; margin: 0 4px 12px; }
     .new-conversation {
       width: 100%;
       padding: 10px 12px;
@@ -91,14 +96,18 @@
     }
     .new-conversation:hover { background: var(--accent-soft); }
     .section-label {
-      margin: 22px 8px 8px;
+      margin: 16px 8px 8px;
       color: var(--muted);
       font-size: 10px;
       font-weight: 750;
       letter-spacing: .12em;
       text-transform: uppercase;
     }
-    .sessions { overflow-y: auto; display: grid; gap: 4px; }
+    .conversation-tools { display: grid; gap: 6px; margin-bottom: 8px; }
+    .conversation-tools-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .sessions { overflow-y: auto; display: grid; gap: 5px; }
+    .session-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; border-radius: 8px; }
+    .session-row:hover, .session-row.active { background: var(--sheet); box-shadow: 0 1px 0 var(--line); }
     .session {
       border: 0;
       border-radius: 8px;
@@ -110,8 +119,13 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .session:hover, .session.active { background: var(--sheet); box-shadow: 0 1px 0 var(--line); }
-    .session.active { color: var(--accent); font-weight: 650; }
+    .session:hover, .session.active { color: var(--accent); }
+    .session.active { font-weight: 650; }
+    .session-badges { color: var(--muted); font-size: 10px; }
+    .session-menu { border: 0; background: transparent; color: var(--muted); padding: 9px 7px; }
+    .session-menu:hover { color: var(--accent); }
+    .session-popover { grid-column: 1 / -1; display: none; flex-wrap: wrap; gap: 8px; padding: 0 9px 8px; }
+    .session-popover.visible { display: flex; }
     .rail-footer { margin-top: auto; padding: 12px 8px 2px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 
     .chat-panel { display: grid; grid-template-rows: 72px 1fr auto; background: var(--sheet); }
@@ -125,7 +139,7 @@
     }
     .conversation-title { font: 600 20px/1.2 var(--serif); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .context-status { color: var(--muted); font-size: 11px; margin-top: 4px; }
-    .provider-status { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .chat-header-actions, .provider-status { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; white-space: nowrap; }
     .provider-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--sage); box-shadow: 0 0 0 3px var(--sage-soft); }
     .provider-dot.offline { background: var(--warning); box-shadow: 0 0 0 3px #f0dfc8; }
 
@@ -189,6 +203,7 @@
     .message.assistant .message-body hr { margin: 1.4em 0; border: 0; border-top: 1px solid var(--line); }
     .message.assistant .message-body.thinking p { margin: 0; }
     .message-actions { display: flex; gap: 8px; margin-top: 10px; }
+    .message.selected { box-shadow: inset 3px 0 var(--sage); }
     .text-button { border: 0; background: none; padding: 3px 0; color: var(--muted); font-size: 11px; }
     .text-button:hover { color: var(--accent); }
     .thinking { color: var(--muted); font: italic 16px/1.5 var(--serif); }
@@ -239,7 +254,7 @@
     .icon-button:hover, .small-button:hover { border-color: var(--accent); color: var(--accent); }
     .primary-button { border-color: var(--accent); background: var(--accent); color: #fff; }
     .primary-button:hover { filter: brightness(.94); }
-    .workspace-tabs { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--line); }
+    .workspace-tabs { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); }
     .workspace-tab { border: 0; border-bottom: 2px solid transparent; padding: 12px 6px 10px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; }
     .workspace-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
     .workspace-scroll { overflow-y: auto; padding: 16px; }
@@ -271,6 +286,32 @@
     .artifact-editor.visible { display: grid; gap: 9px; }
     .artifact-editor textarea { min-height: 250px; font: 14px/1.55 var(--serif); }
     .revision-row { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 10px; }
+    .artifact-tools { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+    .artifact-list-tools { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-bottom: 9px; }
+    .artifact-list-tools input, .artifact-list-tools select { min-width: 0; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: var(--ink); padding: 7px 8px; font-size: 10px; }
+    .artifact-save-state { min-height: 14px; color: var(--muted); font-size: 10px; }
+    .revision-diff { display: none; max-height: 220px; overflow: auto; margin: 0; padding: 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); white-space: pre-wrap; font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .revision-diff.visible { display: block; }
+    .search-results { display: grid; gap: 7px; max-height: min(58vh, 560px); overflow-y: auto; }
+    .search-result { width: 100%; text-align: left; cursor: pointer; }
+    .search-kind { color: var(--accent); font-size: 9px; font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }
+    .branch-tree { display: grid; gap: 5px; max-height: min(62vh, 620px); overflow-y: auto; }
+    .branch-node { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 9px 10px; border-left: 2px solid var(--line); background: var(--paper); cursor: pointer; }
+    .branch-node:hover { border-left-color: var(--accent); }
+    body.focus-mode .app { grid-template-columns: minmax(0, 1fr); }
+    body.focus-mode .rail, body.focus-mode .workspace { display: none; }
+    .ia-note { margin-bottom: 14px; padding: 10px 11px; border-left: 3px solid var(--sage); background: var(--sage-soft); color: #35483b; font-size: 11px; line-height: 1.45; }
+    .artifact-type { color: var(--accent); font-size: 9px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .manuscript-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+    .manuscript-stats { margin-bottom: 10px; color: var(--muted); font-size: 11px; }
+    .manuscript-tree { display: grid; gap: 5px; }
+    .manuscript-node { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 8px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--sheet); }
+    .manuscript-node[draggable="true"] { cursor: grab; }
+    .manuscript-node.dragging { opacity: .45; }
+    .manuscript-node-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 12px/1.3 var(--serif); }
+    .manuscript-node-meta { color: var(--muted); font-size: 9px; margin-top: 2px; text-transform: capitalize; }
+    .manuscript-node-actions { display: flex; align-items: center; gap: 4px; }
+    .manuscript-node-actions select { max-width: 74px; border: 1px solid var(--line); border-radius: 5px; background: #fff; padding: 3px; font-size: 9px; }
 
     dialog { width: min(620px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 15px; padding: 0; background: var(--sheet); color: var(--ink); box-shadow: var(--shadow); }
     dialog::backdrop { background: rgb(39 37 34 / 35%); backdrop-filter: blur(2px); }
@@ -306,10 +347,35 @@
         <div><div class="brand-name">Marginalia</div><div class="brand-sub">Writing room</div></div>
       </div>
       <div class="rail-body">
+        <div class="section-label" style="margin-top:0">Project</div>
+        <div class="project-picker">
+          <select id="project-select" aria-label="Current project"></select>
+          <button class="icon-button" id="new-project" title="Create project" aria-label="Create project">＋</button>
+        </div>
+        <div class="project-actions">
+          <button class="text-button" id="rename-project">Rename</button>
+          <button class="text-button" id="archive-project">Archive project</button>
+        </div>
         <button class="new-conversation" id="new-session">＋ New conversation</button>
         <div class="section-label">Conversations</div>
+        <div class="conversation-tools">
+          <input id="conversation-search" type="search" placeholder="Search title or content" aria-label="Search conversations">
+          <div class="conversation-tools-row">
+            <select id="conversation-view" aria-label="Conversation filter">
+              <option value="active">Active</option>
+              <option value="pinned">Pinned</option>
+              <option value="archived">Archived</option>
+              <option value="all">All</option>
+            </select>
+            <select id="conversation-sort" aria-label="Conversation sort">
+              <option value="updated_desc">Recent</option>
+              <option value="updated_asc">Oldest</option>
+              <option value="title">Title</option>
+            </select>
+          </div>
+        </div>
         <div class="sessions" id="sessions"></div>
-        <div class="rail-footer">Your project guidance and story bible stay active across conversations.</div>
+        <div class="rail-footer">Explorations stay in conversations and artifacts. Only choices you accept enter canon.</div>
       </div>
     </aside>
 
@@ -319,8 +385,16 @@
           <div class="conversation-title" id="conversation-title">New conversation</div>
           <div class="context-status" id="context-status">Fiction workspace</div>
         </div>
-        <div class="provider-status" title="Responses pass through the project's active writing rules">
-          <span class="provider-dot" id="provider-dot"></span><span id="provider-name">Connecting…</span>
+        <div class="chat-header-actions">
+          <button class="text-button" id="rename-conversation">Rename</button>
+          <button class="text-button" id="fork-conversation">Fork</button>
+          <button class="text-button" id="keep-selection" hidden>Keep selection</button>
+          <button class="text-button" id="open-search" title="Search project (Ctrl/⌘ K)">Search</button>
+          <button class="text-button" id="open-branches">Branches</button>
+          <button class="text-button" id="focus-mode" aria-pressed="false">Focus</button>
+          <div class="provider-status" title="Responses pass through the project's active writing rules">
+            <span class="provider-dot" id="provider-dot"></span><span id="provider-name">Connecting…</span>
+          </div>
         </div>
       </header>
 
@@ -352,18 +426,21 @@
 
     <aside class="workspace" id="workspace" aria-label="Project workspace">
       <header class="workspace-header">
-        <div class="workspace-title">The project</div>
+        <div class="workspace-title" id="workspace-project-name">The project</div>
         <div>
-          <button class="icon-button" id="export-project" title="Export project">Export</button>
+          <button class="icon-button" id="snapshot-project" title="Create project checkpoint">Snapshot</button>
+          <button class="icon-button" id="export-project" title="Export project bundle">Export</button>
           <button class="icon-button" id="edit-project">Edit</button>
         </div>
       </header>
       <nav class="workspace-tabs" aria-label="Project sections">
-        <button class="workspace-tab active" data-workspace-tab="bible">Story bible</button>
-        <button class="workspace-tab" data-workspace-tab="drafts">Drafts</button>
+        <button class="workspace-tab active" data-workspace-tab="bible">Canon</button>
+        <button class="workspace-tab" data-workspace-tab="drafts">Exploration</button>
+        <button class="workspace-tab" data-workspace-tab="manuscript">Manuscript</button>
       </nav>
       <div class="workspace-scroll">
         <section class="workspace-view active" data-workspace-view="bible">
+          <div class="ia-note">Canonical project memory: accepted characters, world rules, and constraints only. Suggestions never enter canon until you choose “Add to canon.”</div>
           <div class="guidance-summary empty" id="guidance-summary">No project guidance yet. Add a brief, collaborator stance, and voice notes.</div>
 
           <div class="group">
@@ -404,16 +481,40 @@
         </section>
 
         <section class="workspace-view" data-workspace-view="drafts">
+          <div class="ia-note">Exploration: drafts, scenes, character sketches, notes, and alternate ideas. Saving one does not make it canon.</div>
           <div class="group" style="margin-top:0">
-            <div class="group-heading"><span class="group-title">Saved drafts</span><button class="text-button" id="new-artifact">＋ New</button></div>
+            <div class="group-heading"><span class="group-title">Artifacts</span><button class="text-button" id="new-artifact">＋ New</button></div>
+            <div class="artifact-list-tools">
+              <input id="artifact-search" type="search" placeholder="Search drafts and tags" aria-label="Search artifacts">
+              <select id="artifact-view" aria-label="Artifact filter"><option value="active">Active</option><option value="trash">Trash</option><option value="all">All</option></select>
+            </div>
             <div class="item-list" id="artifacts"></div>
           </div>
           <div class="artifact-editor" id="artifact-editor">
             <div class="field"><label for="artifact-title">Title</label><input id="artifact-title"></div>
+            <div class="artifact-tools">
+              <div class="field"><label for="artifact-status">Status</label><select id="artifact-status"><option value="idea">Idea</option><option value="drafting">Drafting</option><option value="revised">Revised</option><option value="final">Final</option></select></div>
+              <div class="field"><label for="artifact-tags">Tags</label><input id="artifact-tags" placeholder="Elena, ending, revision"></div>
+            </div>
             <div class="field"><label for="artifact-content">Draft</label><textarea id="artifact-content"></textarea></div>
-            <div class="revision-row"><span id="artifact-version"></span><select id="revision-select" aria-label="Revision history"></select><button class="text-button" id="view-revision">View</button></div>
-            <div class="form-actions"><button class="primary-button" id="save-artifact">Save revision</button></div>
+            <div class="artifact-save-state" id="artifact-save-state">Committed revisions are permanent; typing is autosaved as a working copy.</div>
+            <div class="revision-row"><span id="artifact-version"></span><select id="revision-select" aria-label="Revision history"></select><button class="text-button" id="view-revision">View</button><button class="text-button" id="compare-revision">Compare</button><button class="text-button" id="restore-revision">Restore</button></div>
+            <pre class="revision-diff" id="revision-diff"></pre>
+            <div class="form-actions"><button class="text-button" id="artifact-source">Source</button><button class="text-button" id="trash-artifact">Move to trash</button><button class="primary-button" id="save-artifact">Save revision</button></div>
           </div>
+        </section>
+
+        <section class="workspace-view" data-workspace-view="manuscript">
+          <div class="ia-note">Manuscript order references your artifacts; it never duplicates their text. Reordering the book does not alter the underlying drafts.</div>
+          <div class="manuscript-tools">
+            <button class="small-button" data-new-manuscript-kind="part">＋ Part</button>
+            <button class="small-button" data-new-manuscript-kind="chapter">＋ Chapter</button>
+            <button class="small-button" data-new-manuscript-kind="scene">＋ Scene</button>
+            <button class="small-button" id="compile-markdown">Markdown</button>
+            <button class="small-button" id="compile-docx">DOCX</button>
+          </div>
+          <div class="manuscript-stats" id="manuscript-stats">No manuscript structure yet.</div>
+          <div class="manuscript-tree" id="manuscript-tree"></div>
         </section>
       </div>
     </aside>
@@ -426,17 +527,56 @@
         <div class="field"><label for="project-brief">Project brief</label><textarea id="project-brief" placeholder="What are you writing? What matters about its premise, form, or destination?"></textarea></div>
         <div class="field"><label for="collaborator-stance">Collaborator stance</label><textarea id="collaborator-stance" placeholder="Be a continuity-conscious co-writer. Ask before making major plot decisions."></textarea></div>
         <div class="field"><label for="voice-guidance">Voice and style guidance</label><textarea id="voice-guidance" placeholder="Close third person; precise sensory detail; restrained dialogue; avoid ornamental metaphors."></textarea></div>
+        <div class="group" style="margin-top:0">
+          <div class="group-heading"><span class="group-title">Project checkpoints</span><span class="count" id="snapshot-count"></span></div>
+          <div class="item-list" id="snapshots"></div>
+        </div>
       </div>
       <div class="dialog-footer"><span class="save-state" id="project-save-state">Applied to every conversation in this project.</span><button class="primary-button" id="save-project" value="default">Save direction</button></div>
     </form>
+  </dialog>
+
+  <dialog id="artifact-create-dialog">
+    <form method="dialog" id="artifact-create-form">
+      <div class="dialog-header"><h2>Keep as artifact</h2><button type="button" class="icon-button" id="close-artifact-create">Close</button></div>
+      <div class="dialog-body">
+        <div class="field"><label for="new-artifact-title">Title</label><input id="new-artifact-title" required maxlength="200"></div>
+        <div class="field"><label for="new-artifact-type">Type</label><select id="new-artifact-type"><option value="draft">Draft</option><option value="scene">Scene</option><option value="character">Character</option><option value="world_rule">World rule</option><option value="note">Note</option></select></div>
+        <div class="field"><label for="new-artifact-status">Status</label><select id="new-artifact-status"><option value="idea">Idea</option><option value="drafting">Drafting</option><option value="revised">Revised</option><option value="final">Final</option></select></div>
+        <div class="field"><label for="new-artifact-tags">Tags</label><input id="new-artifact-tags" placeholder="character, subplot, ending"></div>
+        <div class="field"><label for="new-artifact-content">Content</label><textarea id="new-artifact-content"></textarea></div>
+        <div class="save-state" id="artifact-provenance-note">This artifact will retain its originating conversation and source message.</div>
+      </div>
+      <div class="dialog-footer"><span class="save-state">Artifacts remain exploratory until separately accepted into canon.</span><button class="primary-button" value="default">Keep this</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="project-search-dialog">
+    <div class="dialog-header"><h2>Search this project</h2><button type="button" class="icon-button" id="close-search">Close</button></div>
+    <div class="dialog-body">
+      <div class="field"><label for="project-search-input">Conversations, drafts, manuscript, and canon</label><input id="project-search-input" type="search" placeholder="Search anything in this book"></div>
+      <div class="save-state" id="project-search-count">Start typing to search the whole project.</div>
+      <div class="search-results" id="project-search-results"></div>
+    </div>
+  </dialog>
+
+  <dialog id="branch-dialog">
+    <div class="dialog-header"><h2>Conversation branches</h2><button type="button" class="icon-button" id="close-branches">Close</button></div>
+    <div class="dialog-body">
+      <div class="save-state">Forks share history only up to their fork point. Every branch remains independently editable afterward.</div>
+      <div class="branch-tree" id="branch-tree"></div>
+    </div>
   </dialog>
 
   <div class="toast" id="toast" role="status"></div>
 
   <script>
     const state = {
-      sessions: [], activeSession: null, model: "", project: null,
-      artifacts: [], activeArtifact: null, busy: false,
+      projects: [], activeProjectId: null, sessions: [], activeSession: null,
+      conversationView: "active", conversationSort: "updated_desc", conversationQuery: "",
+      model: "", project: null, artifacts: [], activeArtifact: null, busy: false,
+      artifactSource: null, manuscript: {nodes: [], version: 1}, snapshots: [],
+      selectedMessageIds: new Set(), artifactView: "active", artifactQuery: "", entities: [], canonCounts: null,
     };
     const $ = (selector) => document.querySelector(selector);
     const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -452,6 +592,15 @@
         throw new Error(detail);
       }
       return response.json();
+    }
+
+    function projectPath(path) {
+      if (!state.activeProjectId) return path;
+      return `${path}${path.includes("?") ? "&" : "?"}project_id=${encodeURIComponent(state.activeProjectId)}`;
+    }
+
+    function activeProject() {
+      return state.projects.find((project) => project.id === state.activeProjectId) || null;
     }
 
     function toast(message) {
@@ -507,8 +656,84 @@
       }
     }
 
+    async function loadProjects() {
+      const data = await api("/v1/projects?include_archived=true");
+      state.projects = data.projects || [];
+      const remembered = window.localStorage.getItem("marginalia.project");
+      if (!state.activeProjectId) {
+        state.activeProjectId = state.projects.some((project) => project.id === remembered)
+          ? remembered : data.default_project_id;
+      }
+      if (!state.projects.some((project) => project.id === state.activeProjectId)) {
+        state.activeProjectId = data.default_project_id;
+      }
+      const select = $("#project-select");
+      select.replaceChildren();
+      state.projects.forEach((project) => {
+        const option = document.createElement("option");
+        option.value = project.id;
+        option.textContent = `${project.archived ? "Archived · " : ""}${project.name} (${project.conversation_count})`;
+        select.append(option);
+      });
+      select.value = state.activeProjectId;
+      const selected = activeProject();
+      $("#workspace-project-name").textContent = selected?.name || "The project";
+      $("#archive-project").textContent = selected?.archived ? "Restore project" : "Archive project";
+    }
+
+    async function switchProject(projectId) {
+      state.activeProjectId = projectId;
+      window.localStorage.setItem("marginalia.project", projectId);
+      state.activeSession = null;
+      state.activeArtifact = null;
+      $("#artifact-editor").classList.remove("visible");
+      renderConversation();
+      await loadProjects();
+      const results = await Promise.allSettled([
+        loadProject(), loadSessions(), loadBible(), loadArtifacts().then(loadManuscript),
+        loadCanonReviews(), loadSnapshots(), refreshPending(),
+      ]);
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure) toast(failure.reason?.message || "Some project state could not be loaded");
+    }
+
+    async function createProject() {
+      const name = window.prompt("Project name");
+      if (!name?.trim()) return;
+      try {
+        const project = await api("/v1/projects", {method: "POST", body: JSON.stringify({name})});
+        await loadProjects();
+        await switchProject(project.id);
+        toast("Project created");
+      } catch (error) { toast(error.message); }
+    }
+
+    async function renameProject() {
+      const project = activeProject();
+      if (!project) return;
+      const name = window.prompt("Project name", project.name);
+      if (!name?.trim() || name.trim() === project.name) return;
+      try {
+        await api(`/v1/projects/${encodeURIComponent(project.id)}`, {method: "PATCH", body: JSON.stringify({name})});
+        await loadProjects();
+        toast("Project renamed");
+      } catch (error) { toast(error.message); }
+    }
+
+    async function archiveProject() {
+      const project = activeProject();
+      if (!project) return;
+      const action = project.archived ? "restore" : "archive";
+      if (!window.confirm(`${action[0].toUpperCase()}${action.slice(1)} “${project.name}”? Its content will be retained.`)) return;
+      try {
+        await api(`/v1/projects/${encodeURIComponent(project.id)}`, {method: "PATCH", body: JSON.stringify({archived: !project.archived})});
+        await loadProjects();
+        toast(`Project ${project.archived ? "restored" : "archived"}`);
+      } catch (error) { toast(error.message); }
+    }
+
     async function loadProject() {
-      state.project = await api("/v1/project");
+      state.project = await api(projectPath("/v1/project"));
       $("#project-brief").value = state.project.project_brief;
       $("#collaborator-stance").value = state.project.collaborator_stance;
       $("#voice-guidance").value = state.project.voice_style_guidance;
@@ -537,6 +762,7 @@
             collaborator_stance: $("#collaborator-stance").value,
             voice_style_guidance: $("#voice-guidance").value,
             expected_version: state.project?.version,
+            project_id: state.activeProjectId,
           }),
         });
         await loadProject();
@@ -547,23 +773,55 @@
     }
 
     async function loadSessions() {
-      const data = await api("/sessions/");
+      const params = new URLSearchParams({
+        project_id: state.activeProjectId,
+        view: state.conversationView,
+        sort: state.conversationSort,
+      });
+      if (state.conversationQuery) params.set("q", state.conversationQuery);
+      const data = await api(`/sessions/?${params}`);
       state.sessions = data.sessions || [];
       const container = $("#sessions");
       container.replaceChildren();
       if (!state.sessions.length) return empty(container, "No conversations yet.");
       state.sessions.forEach((session) => {
+        const row = document.createElement("div");
+        row.className = `session-row${state.activeSession?.id === session.id ? " active" : ""}`;
         const button = document.createElement("button");
         button.className = `session${state.activeSession?.id === session.id ? " active" : ""}`;
-        button.textContent = session.title || "Untitled conversation";
+        button.textContent = `${session.pinned ? "★ " : ""}${session.parent_session_id ? "↳ " : ""}${session.title || "Untitled conversation"}`;
+        button.title = `${session.word_count || 0} words${session.parent_session_id ? " · forked exploration" : ""}`;
         button.addEventListener("click", () => openSession(session.id));
-        container.append(button);
+        const menuButton = document.createElement("button");
+        menuButton.className = "session-menu";
+        menuButton.textContent = "•••";
+        menuButton.setAttribute("aria-label", `Manage ${session.title}`);
+        const popover = document.createElement("div");
+        popover.className = "session-popover";
+        const actions = [
+          ["Rename", () => renameConversation(session)],
+          [session.pinned ? "Unpin" : "Pin", () => updateConversation(session.id, {pinned: !session.pinned})],
+          [session.archived ? "Restore" : "Archive", () => updateConversation(session.id, {archived: !session.archived})],
+          ["Fork", () => forkConversation(session.id)],
+          ["Move", () => moveConversation(session)],
+          ["Delete", () => deleteConversation(session)],
+        ];
+        actions.forEach(([label, handler]) => {
+          const action = document.createElement("button");
+          action.className = "text-button";
+          action.textContent = label;
+          action.addEventListener("click", handler);
+          popover.append(action);
+        });
+        menuButton.addEventListener("click", () => popover.classList.toggle("visible"));
+        row.append(button, menuButton, popover);
+        container.append(row);
       });
     }
 
     async function createSession() {
       const session = await api("/sessions/", {
-        method: "POST", body: JSON.stringify({model: state.model, title: "New conversation"}),
+        method: "POST", body: JSON.stringify({model: state.model, title: "New conversation", project_id: state.activeProjectId}),
       });
       state.activeSession = session;
       renderConversation();
@@ -574,8 +832,73 @@
 
     async function openSession(id) {
       state.activeSession = await api(`/sessions/${encodeURIComponent(id)}`);
+      state.selectedMessageIds.clear();
       renderConversation();
       await loadSessions();
+    }
+
+    async function updateConversation(id, payload) {
+      try {
+        const updated = await api(`/sessions/${encodeURIComponent(id)}`, {method: "PATCH", body: JSON.stringify(payload)});
+        if (state.activeSession?.id === id) state.activeSession = updated;
+        if (payload.project_id && payload.project_id !== state.activeProjectId) {
+          state.activeSession = null;
+          renderConversation();
+        }
+        await Promise.all([loadSessions(), loadProjects()]);
+      } catch (error) { toast(error.message); }
+    }
+
+    async function renameConversation(session = state.activeSession) {
+      if (!session) return;
+      const title = window.prompt("Conversation title", session.title || "Untitled conversation");
+      if (!title?.trim() || title.trim() === session.title) return;
+      await updateConversation(session.id, {title});
+      $("#conversation-title").textContent = title.trim();
+      toast("Conversation renamed");
+    }
+
+    async function deleteConversation(session) {
+      if (!window.confirm(`Delete “${session.title || "Untitled conversation"}”? This cannot be undone.`)) return;
+      try {
+        await api(`/sessions/${encodeURIComponent(session.id)}`, {method: "DELETE"});
+        if (state.activeSession?.id === session.id) {
+          state.activeSession = null;
+          renderConversation();
+        }
+        await Promise.all([loadSessions(), loadProjects()]);
+        toast("Conversation deleted");
+      } catch (error) { toast(error.message); }
+    }
+
+    async function moveConversation(session) {
+      const choices = state.projects.filter((project) => !project.archived && project.id !== session.project_id);
+      if (!choices.length) return toast("Create another active project first");
+      const answer = window.prompt(`Move to which project?\n${choices.map((project) => project.name).join("\n")}`);
+      if (!answer) return;
+      const target = choices.find((project) => project.id === answer || project.name.toLowerCase() === answer.trim().toLowerCase());
+      if (!target) return toast("Project not found");
+      await updateConversation(session.id, {project_id: target.id});
+      toast(`Moved to ${target.name}`);
+    }
+
+    async function forkConversation(sessionId = state.activeSession?.id, messageId = null) {
+      if (!sessionId) return;
+      let source = state.activeSession?.id === sessionId ? state.activeSession : state.sessions.find((item) => item.id === sessionId);
+      const title = window.prompt("Fork title", `${source?.title || "Conversation"} — alternate`);
+      if (!title?.trim()) return;
+      try {
+        const fork = await api(`/sessions/${encodeURIComponent(sessionId)}/fork`, {
+          method: "POST",
+          body: JSON.stringify({title, message_id: messageId, project_id: state.activeProjectId}),
+        });
+        state.conversationView = "active";
+        $("#conversation-view").value = "active";
+        state.activeSession = fork;
+        renderConversation();
+        await Promise.all([loadSessions(), loadProjects()]);
+        toast("Alternate conversation created");
+      } catch (error) { toast(error.message); }
     }
 
     function buildWelcome() {
@@ -607,6 +930,27 @@
         session.messages.forEach((message) => renderMessage(message.role, message.content, message.id));
       }
       messages.scrollTop = messages.scrollHeight;
+      updateSelectionButton();
+      updateContextStatus();
+    }
+
+    function conversationWordCount() {
+      return (state.activeSession?.messages || []).reduce((total, message) => total + (message.content.trim().match(/\S+/g)?.length || 0), 0);
+    }
+
+    function updateContextStatus() {
+      const counts = state.canonCounts;
+      const branch = state.activeSession?.parent_session_id ? "Forked exploration · " : "";
+      const words = state.activeSession ? `${conversationWordCount()} words · ` : "";
+      if (!counts) return;
+      $("#context-status").textContent = `${branch}${words}${counts.characters} characters · ${counts.rules} world rules · ${counts.forbidden} boundaries active`;
+    }
+
+    function updateSelectionButton() {
+      const button = $("#keep-selection");
+      const count = state.selectedMessageIds.size;
+      button.hidden = count === 0;
+      button.textContent = count ? `Keep ${count} selected` : "Keep selection";
     }
 
     function renderMessage(role, content, id = "") {
@@ -623,14 +967,32 @@
       body.textContent = content;
       if (role === "assistant" && content) void renderAssistantMarkdown(body, content);
       wrapper.append(label, body);
-      if (role === "assistant" && content) {
+      if (content && id) {
         const actions = document.createElement("div");
         actions.className = "message-actions";
-        const save = document.createElement("button");
-        save.className = "text-button";
-        save.textContent = "Save as draft";
-        save.addEventListener("click", () => createArtifact(content, id));
-        actions.append(save);
+        const fork = document.createElement("button");
+        fork.className = "text-button";
+        fork.textContent = "Fork from here";
+        fork.addEventListener("click", () => forkConversation(state.activeSession?.id, id));
+        actions.append(fork);
+        const select = document.createElement("button");
+        select.className = "text-button";
+        select.textContent = state.selectedMessageIds.has(id) ? "Selected" : "Select";
+        select.addEventListener("click", () => {
+          if (state.selectedMessageIds.has(id)) state.selectedMessageIds.delete(id);
+          else state.selectedMessageIds.add(id);
+          wrapper.classList.toggle("selected", state.selectedMessageIds.has(id));
+          select.textContent = state.selectedMessageIds.has(id) ? "Selected" : "Select";
+          updateSelectionButton();
+        });
+        actions.append(select);
+        if (role === "assistant") {
+          const keep = document.createElement("button");
+          keep.className = "text-button";
+          keep.textContent = "Keep this";
+          keep.addEventListener("click", () => showArtifactDialog(content, id));
+          actions.prepend(keep);
+        }
         wrapper.append(actions);
       }
       $("#messages").append(wrapper);
@@ -686,7 +1048,7 @@
         const messages = state.activeSession.messages.map(({role, content: text}) => ({role, content: text}));
         const response = await api("/v1/chat/completions", {
           method: "POST",
-          body: JSON.stringify({model: state.model, messages, stream: false}),
+          body: JSON.stringify({model: state.model, messages, stream: false, project_id: state.activeProjectId}),
         });
         waiting.remove();
         const answer = response.choices?.[0]?.message?.content || "";
@@ -705,7 +1067,7 @@
 
     async function refreshPending() {
       try {
-        const {pending} = await api("/v1/governed-chat/pending");
+        const {pending} = await api(projectPath("/v1/governed-chat/pending"));
         const card = $("#pending-card");
         card.classList.toggle("visible", Boolean(pending));
         if (pending) {
@@ -716,7 +1078,7 @@
     }
 
     async function resolvePending(action) {
-      const payload = {action};
+      const payload = {action, project_id: state.activeProjectId};
       if (action === "fix") {
         const corrected = window.prompt("What corrected text should replace the blocked response?");
         if (corrected === null) return;
@@ -739,13 +1101,28 @@
     }
 
     async function loadBible() {
-      const [characters, rules, forbidden] = await Promise.all([
-        api("/governor/fiction/characters"), api("/governor/fiction/world-rules"), api("/governor/fiction/forbidden"),
+      const [characters, rules, forbidden, entities] = await Promise.all([
+        api(projectPath("/governor/fiction/characters")), api(projectPath("/governor/fiction/world-rules")), api(projectPath("/governor/fiction/forbidden")), api(projectPath("/v1/entities")),
       ]);
+      state.entities = entities.entities || [];
       const charNode = $("#characters");
       charNode.replaceChildren();
       if (!characters.characters?.length) empty(charNode, "No characters accepted yet.");
-      else characters.characters.forEach((character) => charNode.append(itemCard(character.name, [character.description, character.wont].filter(Boolean).join(" · "))));
+      else characters.characters.forEach((character) => {
+        const card = itemCard(character.name, [character.description, character.wont].filter(Boolean).join(" · "));
+        const entity = state.entities.find((item) => item.id === character.id);
+        if (entity?.reference_count) {
+          const actions = document.createElement("div");
+          actions.className = "message-actions";
+          const references = document.createElement("button");
+          references.className = "text-button";
+          references.textContent = `${entity.reference_count} reference${entity.reference_count === 1 ? "" : "s"}`;
+          references.addEventListener("click", () => openProjectSearch(character.name));
+          actions.append(references);
+          card.append(actions);
+        }
+        charNode.append(card);
+      });
       const ruleNode = $("#world-rules");
       ruleNode.replaceChildren();
       if (!rules.rules?.length) empty(ruleNode, "No world rules yet.");
@@ -754,12 +1131,24 @@
       forbiddenNode.replaceChildren();
       if (!forbidden.forbidden?.length) empty(forbiddenNode, "No negative constraints yet.");
       else forbidden.forbidden.forEach((item) => forbiddenNode.append(itemCard("Boundary", item.description)));
-      $("#context-status").textContent = `${characters.characters?.length || 0} characters · ${rules.rules?.length || 0} world rules · ${forbidden.forbidden?.length || 0} boundaries active`;
+      state.canonCounts = {
+        characters: characters.characters?.length || 0,
+        rules: rules.rules?.length || 0,
+        forbidden: forbidden.forbidden?.length || 0,
+      };
+      updateContextStatus();
     }
 
     async function scanForCanon(text, messageId) {
       try {
-        const result = await api("/governor/fiction/capture/scan", {method: "POST", body: JSON.stringify({text, message_id: messageId})});
+        const result = await api("/governor/fiction/capture/scan", {method: "POST", body: JSON.stringify({text, conversation_id: state.activeSession?.id || null, message_id: messageId, project_id: state.activeProjectId})});
+        renderSuggestions(result.captures || []);
+      } catch (_) {}
+    }
+
+    async function loadCanonReviews() {
+      try {
+        const result = await api(projectPath("/governor/fiction/captures?status=pending"));
         renderSuggestions(result.captures || []);
       } catch (_) {}
     }
@@ -782,7 +1171,18 @@
         reject.className = "text-button";
         reject.textContent = "Dismiss";
         reject.addEventListener("click", () => decideCapture(capture, false, card));
-        actions.append(accept, reject);
+        const edit = document.createElement("button");
+        edit.className = "text-button";
+        edit.textContent = "Edit";
+        edit.addEventListener("click", () => editCapture(capture));
+        actions.append(accept, edit, reject);
+        if (capture.conversation_id) {
+          const source = document.createElement("button");
+          source.className = "text-button";
+          source.textContent = "Source";
+          source.addEventListener("click", () => openConversationSource(capture.conversation_id, capture.message_id));
+          actions.append(source);
+        }
         card.append(actions);
         container.append(card);
       });
@@ -793,12 +1193,12 @@
         if (accept) {
           await api(`/governor/fiction/capture/${encodeURIComponent(capture.id)}/accept`, {
             method: "POST",
-            body: JSON.stringify({name: capture.subject || "", description: capture.statement || "", capture_type: capture.kind || ""}),
+            body: JSON.stringify({name: capture.subject || "", description: capture.statement || "", capture_type: capture.kind || "", project_id: state.activeProjectId}),
           });
           await loadBible();
           toast("Added to canon");
         } else {
-          await api(`/governor/fiction/capture/${encodeURIComponent(capture.id)}/reject`, {method: "POST"});
+          await api(projectPath(`/governor/fiction/capture/${encodeURIComponent(capture.id)}/reject`), {method: "POST"});
         }
         card.remove();
         const remaining = $("#suggestions").children.length;
@@ -807,40 +1207,278 @@
       } catch (error) { toast(error.message); }
     }
 
+    async function editCapture(capture) {
+      const subject = window.prompt("Canon subject", capture.subject || "");
+      if (subject === null) return;
+      const statement = window.prompt("Canon statement", capture.statement || "");
+      if (!statement?.trim()) return;
+      try {
+        await api(`/governor/fiction/capture/${encodeURIComponent(capture.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({subject, statement, project_id: state.activeProjectId}),
+        });
+        await loadCanonReviews();
+        toast("Suggestion updated; it is still not canon");
+      } catch (error) { toast(error.message); }
+    }
+
+    async function openConversationSource(conversationId, messageId = null) {
+      try {
+        await openSession(conversationId);
+        const node = messageId ? document.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`) : null;
+        node?.scrollIntoView({behavior: "smooth", block: "center"});
+        if (node) {
+          node.classList.add("selected");
+          setTimeout(() => node.classList.remove("selected"), 2200);
+        }
+      } catch (error) { toast(error.message); }
+    }
+
     async function loadArtifacts() {
-      const data = await api("/governor/artifacts");
+      const params = new URLSearchParams({view: state.artifactView});
+      if (state.artifactQuery) params.set("q", state.artifactQuery);
+      const data = await api(projectPath(`/governor/artifacts?${params.toString()}`));
       state.artifacts = data.artifacts || [];
       const container = $("#artifacts");
       container.replaceChildren();
       if (!state.artifacts.length) return empty(container, "Save a response or begin a new draft.");
       state.artifacts.forEach((artifact) => {
-        const card = itemCard(artifact.title, `Revision ${artifact.current_version}`);
+        const working = artifact.working_copy_updated_at ? " · autosaved changes" : "";
+        const card = itemCard(artifact.title, `${artifact.artifact_type.replace("_", " ")} · ${artifact.status} · ${artifact.word_count || 0} words · Revision ${artifact.current_version}${working}`);
         card.classList.add("artifact-card");
         card.addEventListener("click", () => openArtifact(artifact.id));
+        const actions = document.createElement("div");
+        actions.className = "message-actions";
+        const add = document.createElement("button");
+        add.className = "text-button";
+        add.textContent = "Add to manuscript";
+        add.addEventListener("click", (event) => {
+          event.stopPropagation();
+          void createManuscriptNode("scene", artifact);
+        });
+        actions.append(add);
+        card.append(actions);
         container.append(card);
       });
     }
 
-    async function createArtifact(content = "", messageId = null) {
-      const title = window.prompt("Draft title", "Untitled draft");
+    function manuscriptChildren(parentId) {
+      return state.manuscript.nodes
+        .filter((node) => node.parent_id === parentId)
+        .sort((a, b) => a.position - b.position || a.created_at.localeCompare(b.created_at));
+    }
+
+    async function loadManuscript() {
+      const [manuscript, compiled] = await Promise.all([
+        api(projectPath("/v1/manuscript")),
+        api(projectPath("/v1/manuscript/compile?format=markdown")),
+      ]);
+      state.manuscript = manuscript;
+      $("#manuscript-stats").textContent = manuscript.nodes.length
+        ? `${compiled.node_count} sections · ${compiled.word_count} words${compiled.missing_artifact_ids.length ? ` · ${compiled.missing_artifact_ids.length} missing links` : ""}`
+        : "No manuscript structure yet.";
+      const tree = $("#manuscript-tree");
+      tree.replaceChildren();
+      if (!manuscript.nodes.length) return empty(tree, "Add a part, chapter, or scene—or send an artifact here from Exploration.");
+
+      const renderLevel = (parentId, depth) => {
+        manuscriptChildren(parentId).forEach((node) => {
+          const row = document.createElement("div");
+          row.className = "manuscript-node";
+          row.draggable = true;
+          row.dataset.nodeId = node.id;
+          row.style.marginLeft = `${Math.min(depth, 4) * 12}px`;
+          const text = document.createElement("div");
+          const title = document.createElement("div");
+          title.className = "manuscript-node-title";
+          title.textContent = node.title;
+          const artifact = state.artifacts.find((item) => item.id === node.artifact_id);
+          const meta = document.createElement("div");
+          meta.className = "manuscript-node-meta";
+          meta.textContent = `${node.kind}${artifact ? ` · ${artifact.word_count || 0} words` : node.artifact_id ? " · missing artifact" : ""}`;
+          text.append(title, meta);
+          if (node.artifact_id) text.addEventListener("click", () => openArtifact(node.artifact_id));
+
+          const actions = document.createElement("div");
+          actions.className = "manuscript-node-actions";
+          const status = document.createElement("select");
+          ["idea", "drafting", "revised", "final"].forEach((value) => {
+            const option = document.createElement("option");
+            option.value = value; option.textContent = value; status.append(option);
+          });
+          status.value = node.status;
+          status.addEventListener("change", () => updateManuscriptNode(node.id, {status: status.value}));
+          const up = document.createElement("button");
+          up.className = "text-button"; up.textContent = "↑"; up.title = "Move up";
+          up.addEventListener("click", () => moveManuscriptNode(node.id, node.parent_id, Math.max(0, node.position - 1)));
+          const down = document.createElement("button");
+          down.className = "text-button"; down.textContent = "↓"; down.title = "Move down";
+          down.addEventListener("click", () => moveManuscriptNode(node.id, node.parent_id, node.position + 1));
+          const remove = document.createElement("button");
+          remove.className = "text-button"; remove.textContent = "×"; remove.title = "Remove from manuscript";
+          remove.addEventListener("click", () => deleteManuscriptNode(node));
+          actions.append(status, up, down, remove);
+          row.append(text, actions);
+          row.addEventListener("dragstart", (event) => {
+            row.classList.add("dragging");
+            event.dataTransfer.setData("text/plain", node.id);
+          });
+          row.addEventListener("dragend", () => row.classList.remove("dragging"));
+          row.addEventListener("dragover", (event) => event.preventDefault());
+          row.addEventListener("drop", (event) => {
+            event.preventDefault();
+            const movingId = event.dataTransfer.getData("text/plain");
+            if (!movingId || movingId === node.id) return;
+            const acceptsChildren = node.kind === "part" || node.kind === "chapter";
+            void moveManuscriptNode(movingId, acceptsChildren ? node.id : node.parent_id, acceptsChildren ? 9999 : node.position);
+          });
+          tree.append(row);
+          renderLevel(node.id, depth + 1);
+        });
+      };
+      renderLevel(null, 0);
+    }
+
+    function chooseManuscriptParent(kind) {
+      const allowed = kind === "chapter" ? ["part"] : kind === "scene" ? ["part", "chapter"] : [];
+      const choices = state.manuscript.nodes.filter((node) => allowed.includes(node.kind));
+      if (!choices.length) return null;
+      if (choices.length === 1) return choices[0].id;
+      const answer = window.prompt(`Place inside which section? Leave blank for the manuscript root.\n${choices.map((node) => node.title).join("\n")}`);
+      if (!answer) return null;
+      return choices.find((node) => node.id === answer || node.title.toLowerCase() === answer.trim().toLowerCase())?.id || null;
+    }
+
+    async function createManuscriptNode(kind, artifact = null) {
+      const title = window.prompt(`${kind[0].toUpperCase()}${kind.slice(1)} title`, artifact?.title || `Untitled ${kind}`);
+      if (!title?.trim()) return;
+      try {
+        await api("/v1/manuscript", {method: "POST", body: JSON.stringify({
+          project_id: state.activeProjectId,
+          kind,
+          title,
+          parent_id: chooseManuscriptParent(kind),
+          artifact_id: artifact?.id || null,
+          status: artifact?.status || "idea",
+        })});
+        await loadManuscript();
+        setWorkspaceTab("manuscript");
+        toast("Added to manuscript");
+      } catch (error) { toast(error.message); }
+    }
+
+    async function updateManuscriptNode(id, payload) {
+      try {
+        await api(`/v1/manuscript/${encodeURIComponent(id)}`, {method: "PATCH", body: JSON.stringify({...payload, project_id: state.activeProjectId})});
+        await loadManuscript();
+      } catch (error) { toast(error.message); }
+    }
+
+    async function moveManuscriptNode(id, parentId, position) {
+      try {
+        await api(`/v1/manuscript/${encodeURIComponent(id)}/move`, {method: "POST", body: JSON.stringify({project_id: state.activeProjectId, parent_id: parentId, position})});
+        await loadManuscript();
+      } catch (error) { toast(error.message); }
+    }
+
+    async function deleteManuscriptNode(node) {
+      if (!window.confirm(`Remove “${node.title}” from the manuscript? The linked artifact will be retained.`)) return;
+      try {
+        await api(projectPath(`/v1/manuscript/${encodeURIComponent(node.id)}`), {method: "DELETE"});
+        await loadManuscript();
+      } catch (error) { toast(error.message); }
+    }
+
+    function downloadBlob(blob, filename) {
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    async function compileMarkdown() {
+      try {
+        const result = await api(projectPath("/v1/manuscript/compile?format=markdown"));
+        downloadBlob(new Blob([result.markdown], {type: "text/markdown"}), result.filename);
+      } catch (error) { toast(error.message); }
+    }
+
+    async function compileDocx() {
+      try {
+        const response = await fetch(projectPath("/v1/manuscript/compile?format=docx"));
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        const disposition = response.headers.get("content-disposition") || "";
+        const filename = disposition.match(/filename="([^"]+)"/)?.[1] || "marginalia-manuscript.docx";
+        downloadBlob(await response.blob(), filename);
+      } catch (error) { toast(error.message); }
+    }
+
+    function showArtifactDialog(content = "", messageId = null) {
+      const messageIds = Array.isArray(messageId) ? messageId : messageId ? [messageId] : [];
+      if (messageIds.length) {
+        const selected = state.activeSession?.messages?.filter((message) => messageIds.includes(message.id)) || [];
+        content = selected.map((message) => message.content).join("\n\n");
+      }
+      state.artifactSource = messageIds.length ? {
+        conversationId: state.activeSession?.id || null,
+        messageIds,
+      } : null;
+      $("#new-artifact-title").value = messageIds.length ? (state.activeSession?.title || "Untitled draft") : "Untitled draft";
+      $("#new-artifact-type").value = "draft";
+      $("#new-artifact-status").value = "idea";
+      $("#new-artifact-tags").value = "";
+      $("#new-artifact-content").value = content;
+      $("#artifact-provenance-note").textContent = messageIds.length
+        ? `This artifact will retain its originating conversation and ${messageIds.length} source message${messageIds.length === 1 ? "" : "s"}.`
+        : "This new artifact is not linked to a conversation message.";
+      $("#artifact-create-dialog").showModal();
+    }
+
+    async function createArtifact(event) {
+      event.preventDefault();
+      const title = $("#new-artifact-title").value.trim();
       if (!title) return;
       try {
         const result = await api("/governor/artifacts", {
           method: "POST",
-          body: JSON.stringify({title, content, kind: "markdown", source: messageId ? "promote" : "manual", message_id: messageId}),
+          body: JSON.stringify({
+            title,
+            content: $("#new-artifact-content").value,
+            kind: "markdown",
+            artifact_type: $("#new-artifact-type").value,
+            project_id: state.activeProjectId,
+            source: state.artifactSource ? "promote" : "manual",
+            conversation_id: state.artifactSource?.conversationId || null,
+            source_message_ids: state.artifactSource?.messageIds || [],
+            message_id: state.artifactSource?.messageIds?.[0] || null,
+            status: $("#new-artifact-status").value,
+            tags: $("#new-artifact-tags").value.split(",").map((value) => value.trim()).filter(Boolean),
+          }),
         });
+        $("#artifact-create-dialog").close();
         await loadArtifacts();
         await openArtifact(result.artifact.id);
+        state.selectedMessageIds.clear();
+        updateSelectionButton();
         setWorkspaceTab("drafts");
-        toast("Draft saved");
+        toast("Artifact kept in exploration");
       } catch (error) { toast(error.message); }
     }
 
     async function openArtifact(id) {
-      const result = await api(`/governor/artifacts/${encodeURIComponent(id)}`);
+      const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(id)}`));
       state.activeArtifact = result;
       $("#artifact-title").value = result.artifact.title;
-      $("#artifact-content").value = result.content;
+      $("#artifact-content").value = result.working_copy ?? result.content;
+      $("#artifact-status").value = result.artifact.status;
+      $("#artifact-tags").value = (result.artifact.tags || []).join(", ");
+      $("#trash-artifact").textContent = result.artifact.trashed_at ? "Restore from trash" : "Move to trash";
+      $("#artifact-source").hidden = !result.artifact.provenance?.conversation_id;
+      $("#artifact-save-state").textContent = result.working_copy !== null
+        ? `Working copy autosaved ${new Date(result.artifact.working_copy_updated_at).toLocaleString()}. Save a revision when ready.`
+        : "Committed revisions are permanent; typing is autosaved as a working copy.";
+      $("#revision-diff").classList.remove("visible");
       $("#artifact-version").textContent = `Current: v${result.artifact.current_version}`;
       const select = $("#revision-select");
       select.replaceChildren();
@@ -857,8 +1495,9 @@
     async function saveArtifact(event) {
       event.preventDefault();
       if (!state.activeArtifact) return;
+      clearTimeout(saveArtifact.autosaveTimer);
       try {
-        const result = await api(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}`, {
+        const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}`), {
           method: "PUT",
           body: JSON.stringify({
             title: $("#artifact-title").value,
@@ -874,31 +1513,291 @@
       } catch (error) { toast(error.message); }
     }
 
+    function queueArtifactAutosave() {
+      const artifactId = state.activeArtifact?.artifact?.id;
+      const baseVersion = state.activeArtifact?.artifact?.current_version;
+      if (!artifactId || !baseVersion) return;
+      $("#artifact-save-state").textContent = "Autosaving working copy…";
+      clearTimeout(saveArtifact.autosaveTimer);
+      saveArtifact.autosaveTimer = setTimeout(async () => {
+        if (state.activeArtifact?.artifact?.id !== artifactId) return;
+        try {
+          const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(artifactId)}/working-copy`), {
+            method: "PUT",
+            body: JSON.stringify({content: $("#artifact-content").value, base_version: baseVersion}),
+          });
+          state.activeArtifact.artifact = {...state.activeArtifact.artifact, ...result.artifact};
+          $("#artifact-save-state").textContent = `Working copy autosaved ${new Date(result.artifact.working_copy_updated_at).toLocaleTimeString()}.`;
+        } catch (error) {
+          $("#artifact-save-state").textContent = `Autosave paused: ${error.message}`;
+        }
+      }, 900);
+    }
+
+    async function saveArtifactLifecycle() {
+      if (!state.activeArtifact) return;
+      try {
+        const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}`), {
+          method: "PATCH",
+          body: JSON.stringify({
+            status: $("#artifact-status").value,
+            tags: $("#artifact-tags").value.split(",").map((value) => value.trim()).filter(Boolean),
+          }),
+        });
+        state.activeArtifact.artifact = result.artifact;
+        await Promise.all([loadArtifacts(), loadManuscript()]);
+        toast("Artifact details saved");
+      } catch (error) { toast(error.message); }
+    }
+
+    async function trashArtifact(event) {
+      event.preventDefault();
+      if (!state.activeArtifact) return;
+      const trashed = !state.activeArtifact.artifact.trashed_at;
+      if (trashed && !window.confirm("Move this artifact to trash? Its revisions and manuscript link will be retained.")) return;
+      try {
+        await api(projectPath(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}`), {
+          method: "PATCH", body: JSON.stringify({trashed}),
+        });
+        state.activeArtifact = null;
+        $("#artifact-editor").classList.remove("visible");
+        await Promise.all([loadArtifacts(), loadManuscript()]);
+        toast(trashed ? "Artifact moved to trash" : "Artifact restored");
+      } catch (error) { toast(error.message); }
+    }
+
+    async function openArtifactSource(event) {
+      event.preventDefault();
+      const provenance = state.activeArtifact?.artifact?.provenance;
+      if (!provenance?.conversation_id) return;
+      try {
+        await openSession(provenance.conversation_id);
+        const sourceId = provenance.message_ids?.[0];
+        const node = sourceId ? document.querySelector(`[data-message-id="${CSS.escape(sourceId)}"]`) : null;
+        node?.scrollIntoView({behavior: "smooth", block: "center"});
+        node?.classList.add("selected");
+      } catch (error) { toast(error.message); }
+    }
+
     async function viewRevision(event) {
       event.preventDefault();
       if (!state.activeArtifact) return;
       try {
         const version = $("#revision-select").value;
-        const result = await api(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}/version/${version}`);
+        const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}/version/${version}`));
         $("#artifact-content").value = result.content;
         toast(`Showing revision ${version}`);
       } catch (error) { toast(error.message); }
     }
 
+    async function compareRevision(event) {
+      event.preventDefault();
+      if (!state.activeArtifact) return;
+      const selected = Number($("#revision-select").value);
+      const current = state.activeArtifact.artifact.current_version;
+      const fromVersion = selected === current && current > 1 ? current - 1 : selected;
+      if (fromVersion === current) return toast("There is only one committed revision");
+      try {
+        const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}/compare?from_version=${fromVersion}&to_version=${current}`));
+        $("#revision-diff").textContent = result.diff || "No text changes.";
+        $("#revision-diff").classList.add("visible");
+      } catch (error) { toast(error.message); }
+    }
+
+    async function restoreRevision(event) {
+      event.preventDefault();
+      if (!state.activeArtifact) return;
+      const version = Number($("#revision-select").value);
+      const current = state.activeArtifact.artifact.current_version;
+      if (version === current) return toast("That is already the current revision");
+      if (!window.confirm(`Restore revision ${version} as a new revision? Existing history will be retained.`)) return;
+      try {
+        const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}/version/${version}/restore`), {
+          method: "POST", body: JSON.stringify({expected_current_version: current}),
+        });
+        state.activeArtifact = result;
+        await loadArtifacts();
+        await openArtifact(result.artifact.id);
+        toast(`Revision ${version} restored as v${result.artifact.current_version}`);
+      } catch (error) { toast(error.message); }
+    }
+
     async function exportProject() {
       try {
-        const payload = await api("/v1/project/export");
-        const blob = new Blob([JSON.stringify(payload, null, 2)], {type: "application/json"});
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(blob);
-        link.download = `marginalia-project-${new Date().toISOString().slice(0, 10)}.json`;
-        link.click();
-        URL.revokeObjectURL(link.href);
+        const response = await fetch(projectPath("/v1/project/export.zip"));
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        const disposition = response.headers.get("content-disposition") || "";
+        const filename = disposition.match(/filename="([^"]+)"/)?.[1] || "marginalia-project.zip";
+        downloadBlob(await response.blob(), filename);
       } catch (error) { toast(error.message); }
+    }
+
+    async function loadSnapshots() {
+      const result = await api(projectPath("/v1/project/snapshots"));
+      state.snapshots = result.snapshots || [];
+      $("#snapshot-count").textContent = state.snapshots.length ? `${state.snapshots.length} saved` : "";
+      const container = $("#snapshots");
+      container.replaceChildren();
+      if (!state.snapshots.length) return empty(container, "No checkpoints yet.");
+      state.snapshots.forEach((snapshot) => {
+        const counts = snapshot.counts || {};
+        container.append(itemCard(
+          snapshot.name,
+          `${new Date(snapshot.created_at).toLocaleString()} · ${counts.conversations || 0} conversations · ${counts.artifacts || 0} artifacts`,
+        ));
+      });
+    }
+
+    async function createSnapshot() {
+      const suggested = `Checkpoint ${new Date().toLocaleDateString()}`;
+      const name = window.prompt("Checkpoint name", suggested);
+      if (!name?.trim()) return;
+      try {
+        await api("/v1/project/snapshots", {method: "POST", body: JSON.stringify({name, project_id: state.activeProjectId})});
+        await loadSnapshots();
+        toast("Project checkpoint saved");
+      } catch (error) { toast(error.message); }
+    }
+
+    function openProjectSearch(initial = "") {
+      const dialog = $("#project-search-dialog");
+      if (!dialog.open) dialog.showModal();
+      $("#project-search-input").value = initial;
+      $("#project-search-input").focus();
+      if (initial) void runProjectSearch(initial);
+      else {
+        $("#project-search-count").textContent = "Start typing to search the whole project.";
+        $("#project-search-results").replaceChildren();
+      }
+    }
+
+    async function runProjectSearch(rawQuery) {
+      const query = rawQuery.trim();
+      const container = $("#project-search-results");
+      if (!query) {
+        container.replaceChildren();
+        $("#project-search-count").textContent = "Start typing to search the whole project.";
+        return;
+      }
+      $("#project-search-count").textContent = "Searching…";
+      try {
+        const result = await api(projectPath(`/v1/search?q=${encodeURIComponent(query)}`));
+        container.replaceChildren();
+        $("#project-search-count").textContent = `${result.total} result${result.total === 1 ? "" : "s"}`;
+        if (!result.results.length) return empty(container, "Nothing matched in this project.");
+        result.results.forEach((item) => {
+          const card = itemCard(item.title, item.snippet);
+          card.classList.add("search-result");
+          const kind = document.createElement("div");
+          kind.className = "search-kind";
+          kind.textContent = item.kind.replaceAll("_", " ");
+          card.prepend(kind);
+          card.addEventListener("click", () => openSearchResult(item));
+          container.append(card);
+        });
+      } catch (error) {
+        $("#project-search-count").textContent = error.message;
+      }
+    }
+
+    async function openSearchResult(item) {
+      $("#project-search-dialog").close();
+      if (item.kind === "conversation" || item.kind === "message") {
+        await openConversationSource(item.conversation_id, item.message_id);
+      } else if (item.kind === "artifact") {
+        if (item.trashed) {
+          state.artifactView = "all";
+          $("#artifact-view").value = "all";
+          await loadArtifacts();
+        }
+        await openArtifact(item.artifact_id);
+      } else if (item.kind === "manuscript") {
+        setWorkspaceTab("manuscript");
+        const node = document.querySelector(`[data-node-id="${CSS.escape(item.id)}"]`);
+        node?.scrollIntoView({behavior: "smooth", block: "center"});
+        node?.classList.add("dragging");
+        if (node) setTimeout(() => node.classList.remove("dragging"), 1600);
+      } else {
+        setWorkspaceTab("bible");
+      }
+    }
+
+    async function openBranchMap() {
+      const dialog = $("#branch-dialog");
+      if (!dialog.open) dialog.showModal();
+      const container = $("#branch-tree");
+      container.replaceChildren();
+      try {
+        const result = await api(projectPath("/v1/conversations/tree"));
+        if (!result.nodes.length) return empty(container, "No conversations yet.");
+        const nodes = new Map(result.nodes.map((node) => [node.id, node]));
+        const renderNode = (id, depth) => {
+          const node = nodes.get(id);
+          if (!node) return;
+          const card = document.createElement("div");
+          card.className = "branch-node";
+          card.style.marginLeft = `${Math.min(depth, 6) * 16}px`;
+          const text = document.createElement("div");
+          const title = document.createElement("div");
+          title.className = "item-name";
+          title.textContent = `${node.pinned ? "★ " : ""}${node.title}`;
+          const meta = document.createElement("div");
+          meta.className = "item-copy";
+          meta.textContent = `${node.message_count} messages · ${node.word_count} words${node.archived ? " · archived" : ""}`;
+          text.append(title, meta);
+          const fork = document.createElement("button");
+          fork.className = "text-button";
+          fork.textContent = "Fork";
+          fork.addEventListener("click", (event) => {
+            event.stopPropagation();
+            void forkConversation(node.id);
+            dialog.close();
+          });
+          card.append(text, fork);
+          card.addEventListener("click", () => {
+            dialog.close();
+            void openSession(node.id);
+          });
+          container.append(card);
+          (node.child_session_ids || []).forEach((childId) => renderNode(childId, depth + 1));
+        };
+        result.roots.forEach((id) => renderNode(id, 0));
+      } catch (error) { empty(container, error.message); }
+    }
+
+    function toggleFocusMode(force = null) {
+      const enabled = force === null ? !document.body.classList.contains("focus-mode") : force;
+      document.body.classList.toggle("focus-mode", enabled);
+      $("#focus-mode").setAttribute("aria-pressed", String(enabled));
+      $("#focus-mode").textContent = enabled ? "Exit focus" : "Focus";
+      window.localStorage.setItem("marginalia.focus", enabled ? "true" : "false");
     }
 
     function wireEvents() {
       $("#new-session").addEventListener("click", createSession);
+      $("#project-select").addEventListener("change", (event) => switchProject(event.target.value));
+      $("#new-project").addEventListener("click", createProject);
+      $("#rename-project").addEventListener("click", renameProject);
+      $("#archive-project").addEventListener("click", archiveProject);
+      $("#rename-conversation").addEventListener("click", () => renameConversation());
+      $("#fork-conversation").addEventListener("click", () => forkConversation());
+      $("#keep-selection").addEventListener("click", () => {
+        const ordered = state.activeSession?.messages?.filter((message) => state.selectedMessageIds.has(message.id)).map((message) => message.id) || [];
+        if (ordered.length) showArtifactDialog("", ordered);
+      });
+      $("#conversation-view").addEventListener("change", (event) => {
+        state.conversationView = event.target.value;
+        void loadSessions();
+      });
+      $("#conversation-sort").addEventListener("change", (event) => {
+        state.conversationSort = event.target.value;
+        void loadSessions();
+      });
+      $("#conversation-search").addEventListener("input", (event) => {
+        state.conversationQuery = event.target.value.trim();
+        clearTimeout(loadSessions.searchTimer);
+        loadSessions.searchTimer = setTimeout(() => void loadSessions(), 180);
+      });
       $("#composer").addEventListener("submit", sendMessage);
       $("#prompt").addEventListener("keydown", (event) => {
         if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); $("#composer").requestSubmit(); }
@@ -911,9 +1810,50 @@
       $("#close-project").addEventListener("click", () => $("#project-settings").close());
       $("#project-form").addEventListener("submit", saveProject);
       $("#export-project").addEventListener("click", exportProject);
-      $("#new-artifact").addEventListener("click", () => createArtifact());
+      $("#snapshot-project").addEventListener("click", createSnapshot);
+      $("#open-search").addEventListener("click", () => openProjectSearch());
+      $("#open-branches").addEventListener("click", openBranchMap);
+      $("#close-branches").addEventListener("click", () => $("#branch-dialog").close());
+      $("#focus-mode").addEventListener("click", () => toggleFocusMode());
+      $("#close-search").addEventListener("click", () => $("#project-search-dialog").close());
+      $("#project-search-input").addEventListener("input", (event) => {
+        clearTimeout(runProjectSearch.timer);
+        runProjectSearch.timer = setTimeout(() => void runProjectSearch(event.target.value), 180);
+      });
+      document.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+          event.preventDefault();
+          openProjectSearch();
+        }
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && state.activeArtifact) {
+          event.preventDefault();
+          $("#save-artifact").click();
+        }
+      });
+      $("#new-artifact").addEventListener("click", () => showArtifactDialog());
+      $("#close-artifact-create").addEventListener("click", () => $("#artifact-create-dialog").close());
+      $("#artifact-create-form").addEventListener("submit", createArtifact);
       $("#save-artifact").addEventListener("click", saveArtifact);
       $("#view-revision").addEventListener("click", viewRevision);
+      $("#compare-revision").addEventListener("click", compareRevision);
+      $("#restore-revision").addEventListener("click", restoreRevision);
+      $("#trash-artifact").addEventListener("click", trashArtifact);
+      $("#artifact-source").addEventListener("click", openArtifactSource);
+      $("#artifact-content").addEventListener("input", queueArtifactAutosave);
+      $("#artifact-status").addEventListener("change", saveArtifactLifecycle);
+      $("#artifact-tags").addEventListener("change", saveArtifactLifecycle);
+      $("#artifact-view").addEventListener("change", (event) => {
+        state.artifactView = event.target.value;
+        void loadArtifacts();
+      });
+      $("#artifact-search").addEventListener("input", (event) => {
+        state.artifactQuery = event.target.value.trim();
+        clearTimeout(loadArtifacts.searchTimer);
+        loadArtifacts.searchTimer = setTimeout(() => void loadArtifacts(), 180);
+      });
+      $$('[data-new-manuscript-kind]').forEach((node) => node.addEventListener("click", () => createManuscriptNode(node.dataset.newManuscriptKind)));
+      $("#compile-markdown").addEventListener("click", compileMarkdown);
+      $("#compile-docx").addEventListener("click", compileDocx);
       $$("[data-workspace-tab]").forEach((node) => node.addEventListener("click", () => setWorkspaceTab(node.dataset.workspaceTab)));
       $$("[data-toggle-form]").forEach((node) => node.addEventListener("click", () => $(`#${node.dataset.toggleForm}`).classList.add("visible")));
       $$("[data-cancel-form]").forEach((node) => node.addEventListener("click", () => $(`#${node.dataset.cancelForm}`).classList.remove("visible")));
@@ -925,6 +1865,7 @@
           await api("/governor/fiction/characters", {method: "POST", body: JSON.stringify({
             name: $("#character-name").value, description: $("#character-description").value,
             voice: $("#character-voice").value, wont: $("#character-wont").value,
+            project_id: state.activeProjectId,
           })});
           event.target.reset(); event.target.classList.remove("visible"); await loadBible(); toast("Character added");
         } catch (error) { toast(error.message); }
@@ -932,7 +1873,7 @@
       $("#rule-form").addEventListener("submit", async (event) => {
         event.preventDefault();
         try {
-          await api("/governor/fiction/world-rules", {method: "POST", body: JSON.stringify({rule: $("#rule-text").value})});
+          await api("/governor/fiction/world-rules", {method: "POST", body: JSON.stringify({rule: $("#rule-text").value, project_id: state.activeProjectId})});
           event.target.reset(); event.target.classList.remove("visible"); await loadBible(); toast("World rule added");
         } catch (error) { toast(error.message); }
       });
@@ -940,7 +1881,7 @@
         event.preventDefault();
         try {
           const patterns = $("#forbidden-patterns").value.split(",").map((value) => value.trim()).filter(Boolean);
-          await api("/governor/fiction/forbidden", {method: "POST", body: JSON.stringify({description: $("#forbidden-description").value, patterns})});
+          await api("/governor/fiction/forbidden", {method: "POST", body: JSON.stringify({description: $("#forbidden-description").value, patterns, project_id: state.activeProjectId})});
           event.target.reset(); event.target.classList.remove("visible"); await loadBible(); toast("Boundary added");
         } catch (error) { toast(error.message); }
       });
@@ -948,8 +1889,12 @@
 
     async function start() {
       wireEvents();
-      try { await loadProject(); } catch (error) { toast(error.message); }
-      const tasks = [loadProvider(), loadSessions(), loadBible(), loadArtifacts(), refreshPending()];
+      toggleFocusMode(window.localStorage.getItem("marginalia.focus") === "true");
+      try { await loadProjects(); await loadProject(); } catch (error) { toast(error.message); }
+      const tasks = [
+        loadProvider(), loadSessions(), loadBible(), loadArtifacts().then(loadManuscript),
+        loadCanonReviews(), loadSnapshots(), refreshPending(),
+      ];
       const results = await Promise.allSettled(tasks);
       const failure = results.find((result) => result.status === "rejected");
       if (failure) toast(failure.reason?.message || "Some project state could not be loaded");

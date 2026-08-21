@@ -28,15 +28,21 @@ not part of the served Marginalia product.
 from __future__ import annotations
 
 import hashlib
+import difflib
+import io
 import importlib.metadata
 import json
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator
+from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,10 +58,33 @@ from gov_webui.creative_project import (
     CreativeProjectVersionConflict,
     render_project_context,
 )
+from gov_webui.canon_review_store import (
+    CanonReviewNotFoundError,
+    CanonReviewStore,
+    CanonReviewStoreError,
+)
 from gov_webui.governed_chat_adapter import GovernedChatAdapter
+from gov_webui.library_store import (
+    ConversationLifecycle,
+    ConversationLifecycleNotFoundError,
+    LibraryStore,
+    LibraryStoreError,
+    ProjectNotFoundError,
+    ProjectRecord,
+)
 from gov_webui.markdown import render_writer_markdown
+from gov_webui.manuscript_store import (
+    ManuscriptNodeNotFoundError,
+    ManuscriptStore,
+    ManuscriptStoreError,
+)
+from gov_webui.snapshot_store import (
+    ProjectSnapshotStore,
+    SnapshotNotFoundError,
+    SnapshotStoreError,
+)
 from governor.context_manager import GovernorContextManager
-from governor.session_store import SessionMessage, SessionStore
+from governor.session_store import ChatSession, SessionMessage, SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +92,7 @@ logger = logging.getLogger(__name__)
 # Configuration from environment
 # ============================================================================
 
-MARGINALIA_DATA_ROOT = os.environ.get(
-    "MARGINALIA_DATA_ROOT", str(Path.home() / ".marginalia")
-)
+MARGINALIA_DATA_ROOT = os.environ.get("MARGINALIA_DATA_ROOT", str(Path.home() / ".marginalia"))
 GOVERNOR_DAEMON_DIR = os.environ.get(
     "GOVERNOR_DAEMON_DIR", str(Path(MARGINALIA_DATA_ROOT) / ".governor")
 )
@@ -76,13 +103,17 @@ CLAUDE_PATH = os.environ.get("CLAUDE_PATH", "claude")  # Path to claude CLI for 
 CODEX_PATH = os.environ.get("CODEX_PATH", "codex")  # Path to codex CLI for codex backend
 GOVERNOR_CONTEXT_ID = os.environ.get("GOVERNOR_CONTEXT_ID", "default")
 GOVERNOR_MODE = os.environ.get("GOVERNOR_MODE", "fiction")
-GOVERNOR_CONTEXTS_DIR = os.environ.get(
-    "GOVERNOR_CONTEXTS_DIR", GOVERNOR_DAEMON_DIR
+GOVERNOR_CONTEXTS_DIR = os.environ.get("GOVERNOR_CONTEXTS_DIR", GOVERNOR_DAEMON_DIR)
+GOVERNOR_SHOW_OK_FOOTER = os.environ.get("GOVERNOR_SHOW_OK_FOOTER", "true").lower() in (
+    "true",
+    "1",
+    "yes",
 )
-GOVERNOR_SHOW_OK_FOOTER = os.environ.get("GOVERNOR_SHOW_OK_FOOTER", "true").lower() in ("true", "1", "yes")
-MARGINALIA_ENABLE_DONOR_ROUTES = os.environ.get(
-    "MARGINALIA_ENABLE_DONOR_ROUTES", ""
-).lower() in ("true", "1", "yes")
+MARGINALIA_ENABLE_DONOR_ROUTES = os.environ.get("MARGINALIA_ENABLE_DONOR_ROUTES", "").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 
 if GOVERNOR_MODE != "fiction" and not MARGINALIA_ENABLE_DONOR_ROUTES:
     raise RuntimeError(
@@ -118,6 +149,7 @@ _current_backend_type: str = BACKEND_TYPE
 # ============================================================================
 # Application setup
 # ============================================================================
+
 
 def _webui_version() -> str:
     """Single source of truth for the API version — derived from the package."""
@@ -168,9 +200,19 @@ _PRODUCT_EXACT_PATHS = {
     "/v1/governed-chat/resolve",
     "/v1/project",
     "/v1/project/export",
+    "/v1/project/export.zip",
+    "/v1/project/snapshots",
+    "/v1/projects",
+    "/v1/manuscript",
+    "/v1/search",
+    "/v1/entities",
 }
 _PRODUCT_PATH_PREFIXES = (
     "/v1/models/",
+    "/v1/projects/",
+    "/v1/project/",
+    "/v1/manuscript/",
+    "/v1/conversations/",
     "/sessions/",
     "/governor/fiction/",
     "/governor/artifacts",
@@ -226,6 +268,7 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     user: str | None = None
+    project_id: str | None = None
 
 
 class ChatCompletionChoice(BaseModel):
@@ -273,6 +316,7 @@ class PendingResolutionRequest(BaseModel):
     reason: str = ""
     scope: str | None = None
     expiry: str | None = None
+    project_id: str | None = None
 
 
 class CreativeProjectUpdateRequest(BaseModel):
@@ -282,12 +326,50 @@ class CreativeProjectUpdateRequest(BaseModel):
     collaborator_stance: str = Field(default="", max_length=20_000)
     voice_style_guidance: str = Field(default="", max_length=20_000)
     expected_version: int | None = Field(default=None, ge=1)
+    project_id: str | None = None
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    archived: bool | None = None
+
+
+class ManuscriptCreateRequest(BaseModel):
+    project_id: str | None = None
+    kind: str
+    title: str = Field(min_length=1, max_length=240)
+    parent_id: str | None = None
+    artifact_id: str | None = None
+    status: str = "idea"
+
+
+class ManuscriptUpdateRequest(BaseModel):
+    project_id: str | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    artifact_id: str | None = None
+    set_artifact: bool = False
+    status: str | None = None
+
+
+class ManuscriptMoveRequest(BaseModel):
+    project_id: str | None = None
+    parent_id: str | None = None
+    position: int = Field(default=0, ge=0)
 
 
 class MarkdownRenderRequest(BaseModel):
     """Writer-visible Markdown, bounded like other project text fields."""
 
     content: str = Field(max_length=200_000)
+
+
+class SnapshotCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    project_id: str | None = None
 
 
 # ============================================================================
@@ -301,21 +383,71 @@ _context_manager: GovernorContextManager | None = None
 _session_store: SessionStore | None = None
 _governed_chat_adapter: GovernedChatAdapter | None = None
 _creative_project_store: CreativeProjectStore | None = None
+_library_store: LibraryStore | None = None
+_session_stores: dict[str, SessionStore] = {}
+_governed_chat_adapters: dict[str, GovernedChatAdapter] = {}
+_creative_project_stores: dict[str, CreativeProjectStore] = {}
+_artifact_stores: dict[str, Any] = {}
+_canon_review_stores: dict[str, CanonReviewStore] = {}
+_manuscript_stores: dict[str, ManuscriptStore] = {}
+_snapshot_stores: dict[str, ProjectSnapshotStore] = {}
 
 
-def _get_governed_chat_adapter() -> GovernedChatAdapter:
-    """Get the single context-bound AG boundary used by Marginalia."""
+def _get_library_store() -> LibraryStore:
+    """Return the additive organization sidecar and enroll legacy sessions."""
+    global _library_store
+    if _library_store is None:
+        cm = _get_context_manager()
+        # In production the context base is DATA_ROOT/.governor, so the
+        # sidecar lives at DATA_ROOT/marginalia/library.json. Deriving it from
+        # the context manager also keeps isolated tests isolated.
+        path = cm.base_dir.parent / "marginalia" / "library.json"
+        _library_store = LibraryStore(path, default_context_id=GOVERNOR_CONTEXT_ID)
+        legacy_ids = [item["id"] for item in _get_default_session_store().list_summaries()]
+        _library_store.sync_legacy_sessions(legacy_ids)
+    return _library_store
+
+
+def _project_record(project_id: str | None = None) -> ProjectRecord:
+    try:
+        return _get_library_store().get_project(project_id)
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _get_governed_chat_adapter(
+    project_id: str | None = None,
+) -> GovernedChatAdapter:
+    """Get an AG boundary bound to the selected project's context."""
     global _governed_chat_adapter
-    if _governed_chat_adapter is None:
+    project = _project_record(project_id)
+    if project.id == _get_library_store().snapshot().default_project_id:
+        if _governed_chat_adapter is not None:
+            return _governed_chat_adapter
+    elif project.context_id in _governed_chat_adapters:
+        return _governed_chat_adapters[project.context_id]
+
+    if (
+        _governed_chat_adapter is None
+        or project.id != _get_library_store().snapshot().default_project_id
+    ):
         socket_path = os.environ.get("GOVERNOR_SOCKET", "")
         if not socket_path:
             socket_path = str(default_socket_path(Path(GOVERNOR_DAEMON_DIR)))
-        _governed_chat_adapter = GovernedChatAdapter(
+        adapter = GovernedChatAdapter(
             DaemonChatClient(socket_path),
-            context_id=GOVERNOR_CONTEXT_ID,
+            context_id=project.context_id,
             expected_governor_dir=GOVERNOR_DAEMON_DIR,
         )
-    return _governed_chat_adapter
+        if project.id == _get_library_store().snapshot().default_project_id:
+            _governed_chat_adapter = adapter
+        else:
+            _governed_chat_adapters[project.context_id] = adapter
+    return (
+        _governed_chat_adapter
+        if project.id == _get_library_store().snapshot().default_project_id
+        else _governed_chat_adapters[project.context_id]
+    )
 
 
 def _get_context_manager() -> GovernorContextManager:
@@ -326,7 +458,7 @@ def _get_context_manager() -> GovernorContextManager:
     return _context_manager
 
 
-def _get_session_store() -> SessionStore:
+def _get_default_session_store() -> SessionStore:
     global _session_store
     if _session_store is None:
         cm = _get_context_manager()
@@ -342,21 +474,81 @@ def _get_session_store() -> SessionStore:
     return _session_store
 
 
-def _get_creative_project_store() -> CreativeProjectStore:
+def _get_session_store(project_id: str | None = None) -> SessionStore:
+    project = _project_record(project_id)
+    if project.context_id == GOVERNOR_CONTEXT_ID:
+        return _get_default_session_store()
+    if project.context_id not in _session_stores:
+        cm = _get_context_manager()
+        ctx = cm.get(project.context_id)
+        sessions_dir = (
+            ctx.root / "sessions"
+            if ctx is not None
+            else cm.base_dir / project.context_id / "sessions"
+        )
+        _session_stores[project.context_id] = SessionStore(sessions_dir)
+    return _session_stores[project.context_id]
+
+
+def _get_creative_project_store(
+    project_id: str | None = None,
+) -> CreativeProjectStore:
     """Return project state bound to the same context used for governed chat."""
     global _creative_project_store
-    if _creative_project_store is None:
+    project = _project_record(project_id)
+    if project.context_id == GOVERNOR_CONTEXT_ID and _creative_project_store is not None:
+        return _creative_project_store
+    if project.context_id in _creative_project_stores:
+        return _creative_project_stores[project.context_id]
+    if _creative_project_store is None or project.context_id != GOVERNOR_CONTEXT_ID:
         cm = _get_context_manager()
-        context = cm.get_or_create(GOVERNOR_CONTEXT_ID, mode="fiction")
+        context = cm.get_or_create(project.context_id, mode="fiction")
         if context.mode != "fiction":
             raise CreativeProjectError(
-                f"context {GOVERNOR_CONTEXT_ID!r} is {context.mode!r}, not fiction"
+                f"context {project.context_id!r} is {context.mode!r}, not fiction"
             )
-        _creative_project_store = CreativeProjectStore(
+        store = CreativeProjectStore(
             context.root,
-            GOVERNOR_CONTEXT_ID,
+            project.context_id,
         )
-    return _creative_project_store
+        if project.context_id == GOVERNOR_CONTEXT_ID:
+            _creative_project_store = store
+        else:
+            _creative_project_stores[project.context_id] = store
+    return (
+        _creative_project_store
+        if project.context_id == GOVERNOR_CONTEXT_ID
+        else _creative_project_stores[project.context_id]
+    )
+
+
+def _get_canon_review_store(project_id: str | None = None) -> CanonReviewStore:
+    project = _project_record(project_id)
+    if project.context_id not in _canon_review_stores:
+        context = _get_context_manager().get_or_create(project.context_id, mode="fiction")
+        _canon_review_stores[project.context_id] = CanonReviewStore(
+            context.root / "marginalia" / "canon-review.json",
+            project_id=project.id,
+        )
+    return _canon_review_stores[project.context_id]
+
+
+def _get_manuscript_store(project_id: str | None = None) -> ManuscriptStore:
+    project = _project_record(project_id)
+    if project.context_id not in _manuscript_stores:
+        context = _get_context_manager().get_or_create(project.context_id, mode="fiction")
+        _manuscript_stores[project.context_id] = ManuscriptStore(
+            context.root / "marginalia" / "manuscript.json"
+        )
+    return _manuscript_stores[project.context_id]
+
+
+def _get_snapshot_store(project_id: str | None = None) -> ProjectSnapshotStore:
+    project = _project_record(project_id)
+    if project.id not in _snapshot_stores:
+        root = _get_context_manager().base_dir.parent / "marginalia" / "snapshots"
+        _snapshot_stores[project.id] = ProjectSnapshotStore(root, project_id=project.id)
+    return _snapshot_stores[project.id]
 
 
 def _project_payload(config: CreativeProjectConfig) -> dict[str, Any]:
@@ -365,11 +557,11 @@ def _project_payload(config: CreativeProjectConfig) -> dict[str, Any]:
     return payload
 
 
-def _build_project_context_message() -> dict[str, str] | None:
+def _build_project_context_message(project_id: str | None = None) -> dict[str, str] | None:
     """Build the persistent writing guidance sent through governed execution."""
     if GOVERNOR_MODE != "fiction":
         return None
-    return render_project_context(_get_creative_project_store().get())
+    return render_project_context(_get_creative_project_store(project_id).get())
 
 
 # ============================================================================
@@ -384,10 +576,7 @@ async def list_models() -> ModelList:
         adapter = _get_governed_chat_adapter()
         models = await adapter.models()
         return ModelList(
-            data=[
-                ModelInfo(id=m["id"], owned_by=m.get("owned_by", "system"))
-                for m in models
-            ]
+            data=[ModelInfo(id=m["id"], owned_by=m.get("owned_by", "system")) for m in models]
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Backend error: {e}")
@@ -426,12 +615,14 @@ async def list_backends() -> dict[str, Any]:
     backend_type = provider.get("type", "unknown")
     connected = bool(provider.get("connected")) and reachable
     return {
-        "backends": [{
-            "type": backend_type,
-            "available": connected,
-            "active": True,
-            "configured_by": "agent-governor-daemon",
-        }],
+        "backends": [
+            {
+                "type": backend_type,
+                "available": connected,
+                "active": True,
+                "configured_by": "agent-governor-daemon",
+            }
+        ],
         "active": backend_type,
         "connected": connected,
         "authoritative": "agent-governor-daemon",
@@ -451,10 +642,10 @@ async def switch_backend(request: BackendSwitchRequest) -> dict[str, Any]:
 
 
 @app.get("/v1/governed-chat/pending")
-async def governed_chat_pending() -> dict[str, Any]:
+async def governed_chat_pending(project_id: str | None = None) -> dict[str, Any]:
     """Observe durable pending state in Marginalia's active context."""
     try:
-        return {"pending": await _get_governed_chat_adapter().pending()}
+        return {"pending": await _get_governed_chat_adapter(project_id).pending()}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Daemon error: {exc}")
 
@@ -470,7 +661,7 @@ async def governed_chat_resolve(
             detail="action must be one of: fix, revise, proceed",
         )
     try:
-        return await _get_governed_chat_adapter().resolve_pending(
+        return await _get_governed_chat_adapter(request.project_id).resolve_pending(
             request.action,
             corrected_text=request.corrected_text,
             new_anchor_text=request.new_anchor_text,
@@ -484,11 +675,320 @@ async def governed_chat_resolve(
         raise HTTPException(status_code=502, detail=f"Daemon error: {exc}")
 
 
+def _library_project_payload(
+    project: ProjectRecord,
+    *,
+    conversation_count: int,
+) -> dict[str, Any]:
+    payload = project.model_dump(mode="json")
+    payload["conversation_count"] = conversation_count
+    payload["is_default"] = project.id == _get_library_store().snapshot().default_project_id
+    return payload
+
+
+@app.get("/v1/projects")
+async def list_library_projects(include_archived: bool = True) -> dict[str, Any]:
+    """List writing projects and their conversation counts."""
+    try:
+        library = _get_library_store()
+        # A legacy session may have appeared since process initialization.
+        legacy_ids = [item["id"] for item in _get_default_session_store().list_summaries()]
+        library.sync_legacy_sessions(legacy_ids)
+        counts = library.conversation_counts()
+        projects = library.list_projects(include_archived=include_archived)
+        return {
+            "default_project_id": library.snapshot().default_project_id,
+            "projects": [
+                _library_project_payload(
+                    project,
+                    conversation_count=counts.get(project.id, 0),
+                )
+                for project in projects
+            ],
+        }
+    except LibraryStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/v1/projects", status_code=201)
+async def create_library_project(request: ProjectCreateRequest) -> dict[str, Any]:
+    """Create an isolated fiction project without changing the current one."""
+    try:
+        project = _get_library_store().create_project(request.name)
+        _get_context_manager().get_or_create(project.context_id, mode="fiction")
+        return _library_project_payload(project, conversation_count=0)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LibraryStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.patch("/v1/projects/{project_id}")
+async def update_library_project(
+    project_id: str,
+    request: ProjectUpdateRequest,
+) -> dict[str, Any]:
+    """Rename or archive a writing project; project content is retained."""
+    try:
+        project = _get_library_store().update_project(
+            project_id,
+            name=request.name,
+            archived=request.archived,
+        )
+        count = _get_library_store().conversation_counts().get(project.id, 0)
+        return _library_project_payload(project, conversation_count=count)
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LibraryStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _validate_manuscript_artifact(
+    project_id: str,
+    artifact_id: str | None,
+) -> None:
+    if artifact_id and not _get_artifact_store(project_id).exists(artifact_id):
+        raise HTTPException(status_code=422, detail="manuscript artifact not found")
+
+
+def _word_count(content: str) -> int:
+    return len(re.findall(r"\b[\w’'-]+\b", content, flags=re.UNICODE))
+
+
+def _safe_export_name(name: str, *, fallback: str = "marginalia-manuscript") -> str:
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", name.strip()).strip("-.")
+    return safe or fallback
+
+
+def _compile_manuscript_payload(project_id: str) -> dict[str, Any]:
+    project = _project_record(project_id)
+    nodes, version = _get_manuscript_store(project.id).ordered_depth_first()
+    artifact_store = _get_artifact_store(project.id)
+    heading_levels = {"part": 1, "chapter": 2, "scene": 3}
+    lines: list[str] = []
+    sections: list[dict[str, Any]] = []
+    missing_artifact_ids: list[str] = []
+    total_words = 0
+    for node in nodes:
+        level = heading_levels[node.kind]
+        lines.extend([f"{'#' * level} {node.title}", ""])
+        content = ""
+        if node.artifact_id:
+            try:
+                _, content, _ = artifact_store.get(node.artifact_id)
+            except Exception:
+                missing_artifact_ids.append(node.artifact_id)
+            if content:
+                lines.extend([content.rstrip(), ""])
+        words = _word_count(content)
+        total_words += words
+        sections.append(
+            {
+                "node": node.model_dump(mode="json"),
+                "content": content,
+                "word_count": words,
+            }
+        )
+    markdown = "\n".join(lines).rstrip() + ("\n" if lines else "")
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "manuscript_version": version,
+        "node_count": len(nodes),
+        "word_count": total_words,
+        "missing_artifact_ids": missing_artifact_ids,
+        "markdown": markdown,
+        "sections": sections,
+    }
+
+
+def _docx_from_manuscript(payload: dict[str, Any]) -> bytes:
+    """Build a minimal standards-compliant DOCX using only the standard library."""
+    paragraphs: list[str] = []
+    heading_styles = {"part": "Title", "chapter": "Heading1", "scene": "Heading2"}
+
+    def paragraph(text: str, style: str | None = None) -> str:
+        style_xml = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
+        if not text:
+            return f"<w:p>{style_xml}</w:p>"
+        return (
+            f"<w:p>{style_xml}<w:r><w:t xml:space=\"preserve\">"
+            f"{xml_escape(text)}</w:t></w:r></w:p>"
+        )
+
+    for section in payload["sections"]:
+        node = section["node"]
+        paragraphs.append(paragraph(node["title"], heading_styles[node["kind"]]))
+        for line in section["content"].splitlines():
+            paragraphs.append(paragraph(line))
+
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{''.join(paragraphs)}<w:sectPr/></w:body></w:document>"
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        "</Types>"
+    )
+    relationships = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="word/document.xml"/>'
+        "</Relationships>"
+    )
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", relationships)
+        archive.writestr("word/document.xml", document_xml)
+    return output.getvalue()
+
+
+@app.get("/v1/manuscript")
+async def get_manuscript(project_id: str | None = None) -> dict[str, Any]:
+    """Return the selected project's ordered manuscript nodes."""
+    project = _project_record(project_id)
+    try:
+        nodes, version = _get_manuscript_store(project.id).list_nodes()
+        return {
+            "project_id": project.id,
+            "version": version,
+            "nodes": [node.model_dump(mode="json") for node in nodes],
+        }
+    except ManuscriptStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/v1/manuscript/compile", response_model=None)
+async def compile_manuscript(
+    project_id: str | None = None,
+    format: str = "markdown",
+) -> dict[str, Any] | Response:
+    """Compile the ordered manuscript to Markdown data or a DOCX download."""
+    project = _project_record(project_id)
+    if format not in {"markdown", "docx"}:
+        raise HTTPException(status_code=422, detail="format must be markdown or docx")
+    payload = _compile_manuscript_payload(project.id)
+    filename = _safe_export_name(project.name)
+    if format == "docx":
+        return Response(
+            content=_docx_from_manuscript(payload),
+            media_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}.docx"'
+            },
+        )
+    payload["filename"] = f"{filename}.md"
+    return payload
+
+
+@app.post("/v1/manuscript", status_code=201)
+async def create_manuscript_node(
+    request: ManuscriptCreateRequest,
+) -> dict[str, Any]:
+    """Add an ordered part, chapter, or scene reference."""
+    project = _project_record(request.project_id)
+    _validate_manuscript_artifact(project.id, request.artifact_id)
+    try:
+        node = _get_manuscript_store(project.id).create(
+            kind=request.kind,
+            title=request.title,
+            parent_id=request.parent_id,
+            artifact_id=request.artifact_id,
+            status=request.status,
+        )
+        return node.model_dump(mode="json")
+    except ManuscriptNodeNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ManuscriptStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.patch("/v1/manuscript/{node_id}")
+async def update_manuscript_node(
+    node_id: str,
+    request: ManuscriptUpdateRequest,
+) -> dict[str, Any]:
+    """Rename, relink, or update the drafting status of a manuscript node."""
+    project = _project_record(request.project_id)
+    if request.set_artifact:
+        _validate_manuscript_artifact(project.id, request.artifact_id)
+    try:
+        node = _get_manuscript_store(project.id).update(
+            node_id,
+            title=request.title,
+            artifact_id=request.artifact_id,
+            set_artifact=request.set_artifact,
+            status=request.status,
+        )
+        return node.model_dump(mode="json")
+    except ManuscriptNodeNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ManuscriptStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/v1/manuscript/{node_id}/move")
+async def move_manuscript_node(
+    node_id: str,
+    request: ManuscriptMoveRequest,
+) -> dict[str, Any]:
+    """Move a manuscript node to an explicit parent and sibling position."""
+    project = _project_record(request.project_id)
+    try:
+        node = _get_manuscript_store(project.id).move(
+            node_id,
+            parent_id=request.parent_id,
+            position=request.position,
+        )
+        return node.model_dump(mode="json")
+    except ManuscriptNodeNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ManuscriptStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.delete("/v1/manuscript/{node_id}")
+async def delete_manuscript_node(
+    node_id: str,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """Delete an empty manuscript node; artifacts and child nodes are retained."""
+    project = _project_record(project_id)
+    try:
+        if not _get_manuscript_store(project.id).delete(node_id):
+            raise HTTPException(status_code=404, detail="manuscript node not found")
+        return {"success": True}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ManuscriptStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/v1/project")
-async def get_creative_project() -> dict[str, Any]:
+async def get_creative_project(project_id: str | None = None) -> dict[str, Any]:
     """Return creative direction for the active fiction context."""
     try:
-        return _project_payload(_get_creative_project_store().get())
+        return _project_payload(_get_creative_project_store(project_id).get())
     except CreativeProjectContextMismatch as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except CreativeProjectError as exc:
@@ -501,7 +1001,7 @@ async def update_creative_project(
 ) -> dict[str, Any]:
     """Atomically replace creative direction for the active fiction context."""
     try:
-        config = _get_creative_project_store().update(
+        config = _get_creative_project_store(request.project_id).update(
             project_brief=request.project_brief,
             collaborator_stance=request.collaborator_stance,
             voice_style_guidance=request.voice_style_guidance,
@@ -518,51 +1018,72 @@ async def update_creative_project(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/v1/project/export")
-async def export_creative_project() -> dict[str, Any]:
-    """Export writer-facing project state without governance receipt ceremony."""
-    project = _get_creative_project_store().get()
+async def _build_project_export(project_id: str | None = None) -> dict[str, Any]:
+    """Build one complete, portable project payload."""
+    library_project = _project_record(project_id)
+    project = _get_creative_project_store(project_id).get()
     story_bible = {
-        "characters": (await list_characters()).get("characters", []),
-        "world_rules": (await list_world_rules()).get("rules", []),
-        "negative_constraints": (await list_forbidden()).get("forbidden", []),
+        "characters": (await list_characters(project_id)).get("characters", []),
+        "world_rules": (await list_world_rules(project_id)).get("rules", []),
+        "negative_constraints": (await list_forbidden(project_id)).get("forbidden", []),
     }
 
-    sessions = []
-    session_store = _get_session_store()
+    sessions: list[dict[str, Any]] = []
+    session_store = _get_session_store(project_id)
     for summary in session_store.list_summaries():
         session = session_store.get(summary["id"])
         if session is not None:
-            sessions.append(session.to_dict())
+            payload = session.to_dict()
+            try:
+                lifecycle = _get_library_store().get_conversation(session.id)
+                payload["lifecycle"] = lifecycle.model_dump(mode="json")
+            except ConversationLifecycleNotFoundError:
+                payload["lifecycle"] = None
+            sessions.append(payload)
 
     artifacts = []
-    artifact_store = _get_artifact_store()
+    artifact_store = _get_artifact_store(project_id)
     summaries, _ = artifact_store.list_all()
     for summary in summaries:
         meta, _, _ = artifact_store.get(summary.id)
         revisions = []
         for version in meta.versions:
-            revisions.append({
-                "version": version.version,
-                "created_at": version.created_at,
-                "source": version.source,
-                "content": artifact_store.get_version(meta.id, version.version),
-            })
-        artifacts.append({
-            "id": meta.id,
-            "title": meta.title,
-            "kind": meta.kind,
-            "language": meta.language,
-            "current_version": meta.current_version,
-            "created_at": meta.created_at,
-            "updated_at": meta.updated_at,
-            "revisions": revisions,
-        })
+            revisions.append(
+                {
+                    "version": version.version,
+                    "created_at": version.created_at,
+                    "source": version.source,
+                    "content": artifact_store.get_version(meta.id, version.version),
+                }
+            )
+        artifacts.append(
+            {
+                "id": meta.id,
+                "title": meta.title,
+                "kind": meta.kind,
+                "artifact_type": meta.artifact_type,
+                "project_id": meta.project_id or library_project.id,
+                "provenance": meta.provenance.model_dump(mode="json"),
+                "status": meta.status,
+                "tags": list(meta.tags),
+                "trashed_at": meta.trashed_at,
+                "language": meta.language,
+                "current_version": meta.current_version,
+                "created_at": meta.created_at,
+                "updated_at": meta.updated_at,
+                "revisions": revisions,
+            }
+        )
+
+    manuscript_nodes, manuscript_version = _get_manuscript_store(project_id).list_nodes()
+    reviews = _get_canon_review_store(project_id).list(status="all")
 
     return {
         "schema": "marginalia.creative-project-export/v1",
         "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "project": {
+            "id": library_project.id,
+            "name": library_project.name,
             "project_brief": project.project_brief,
             "collaborator_stance": project.collaborator_stance,
             "voice_style_guidance": project.voice_style_guidance,
@@ -570,7 +1091,320 @@ async def export_creative_project() -> dict[str, Any]:
         "story_bible": story_bible,
         "conversations": sessions,
         "artifacts": artifacts,
+        "manuscript": {
+            "version": manuscript_version,
+            "nodes": [node.model_dump(mode="json") for node in manuscript_nodes],
+        },
+        "canon_review": [item.model_dump(mode="json") for item in reviews],
     }
+
+
+@app.get("/v1/project/export")
+async def export_creative_project(project_id: str | None = None) -> dict[str, Any]:
+    """Export every writer-owned project record as portable JSON."""
+    return await _build_project_export(project_id)
+
+
+def _project_export_zip(payload: dict[str, Any]) -> bytes:
+    """Create a readable project bundle without third-party document tooling."""
+    project = payload["project"]
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "README.txt",
+            "Marginalia project export\n\n"
+            "Open manuscript.md for the compiled draft. JSON contains the complete "
+            "portable record, including provenance and revisions.\n",
+        )
+        archive.writestr(
+            "project-direction.md",
+            f"# {project['name']}\n\n"
+            f"## Project brief\n\n{project['project_brief'] or '_Not set._'}\n\n"
+            f"## Collaborator stance\n\n{project['collaborator_stance'] or '_Not set._'}\n\n"
+            f"## Voice and style\n\n{project['voice_style_guidance'] or '_Not set._'}\n",
+        )
+        bible = payload["story_bible"]
+        canon_lines = ["# Canon", "", "## Characters", ""]
+        for character in bible["characters"]:
+            canon_lines.extend(
+                [
+                    f"### {character.get('name', 'Character')}",
+                    "",
+                    character.get("description", ""),
+                    "",
+                ]
+            )
+        canon_lines.extend(["## World rules", ""])
+        canon_lines.extend(f"- {item.get('rule', '')}" for item in bible["world_rules"])
+        canon_lines.extend(["", "## Negative constraints", ""])
+        canon_lines.extend(
+            f"- {item.get('description', '')}" for item in bible["negative_constraints"]
+        )
+        archive.writestr("canon.md", "\n".join(canon_lines).rstrip() + "\n")
+
+        artifact_lookup: dict[str, dict[str, Any]] = {}
+        for artifact in payload["artifacts"]:
+            artifact_lookup[artifact["id"]] = artifact
+            latest = artifact["revisions"][-1]["content"] if artifact["revisions"] else ""
+            folder = artifact["artifact_type"].replace("_", "-")
+            filename = _safe_export_name(artifact["title"], fallback=artifact["id"])
+            archive.writestr(f"artifacts/{folder}/{filename}.md", latest)
+
+        manuscript_lines: list[str] = []
+        nodes = {node["id"]: node for node in payload["manuscript"]["nodes"]}
+        children: dict[str | None, list[dict[str, Any]]] = {}
+        for node in nodes.values():
+            children.setdefault(node.get("parent_id"), []).append(node)
+        for siblings in children.values():
+            siblings.sort(key=lambda item: (item.get("position", 0), item["id"]))
+
+        def render_manuscript(parent_id: str | None, depth: int) -> None:
+            for node in children.get(parent_id, []):
+                manuscript_lines.extend(
+                    [f"{'#' * min(depth + 1, 6)} {node['title']}", ""]
+                )
+                artifact = artifact_lookup.get(node.get("artifact_id"))
+                if artifact and artifact["revisions"]:
+                    manuscript_lines.extend([artifact["revisions"][-1]["content"], ""])
+                render_manuscript(node["id"], depth + 1)
+
+        render_manuscript(None, 0)
+        archive.writestr("manuscript.md", "\n".join(manuscript_lines).rstrip() + "\n")
+
+        for conversation in payload["conversations"]:
+            lines = [f"# {conversation['title']}", ""]
+            for message in conversation.get("messages", []):
+                lines.extend(
+                    [f"## {message['role'].title()} · {message['timestamp']}", "", message["content"], ""]
+                )
+            filename = _safe_export_name(conversation["title"], fallback=conversation["id"])
+            archive.writestr(f"conversations/{filename}.md", "\n".join(lines).rstrip() + "\n")
+
+        archive.writestr(
+            "marginalia-project.json",
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        )
+    return stream.getvalue()
+
+
+@app.get("/v1/project/export.zip", response_model=None)
+async def export_creative_project_zip(project_id: str | None = None) -> Response:
+    """Download a writer-readable ZIP plus the complete portable JSON record."""
+    payload = await _build_project_export(project_id)
+    name = _safe_export_name(payload["project"]["name"], fallback="marginalia-project")
+    return Response(
+        content=_project_export_zip(payload),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{name}.zip"'},
+    )
+
+
+@app.get("/v1/project/snapshots")
+async def list_project_snapshots(project_id: str | None = None) -> dict[str, Any]:
+    """List immutable named project checkpoints."""
+    project = _project_record(project_id)
+    try:
+        snapshots = _get_snapshot_store(project.id).list()
+        return {
+            "project_id": project.id,
+            "snapshots": [item.model_dump(mode="json") for item in snapshots],
+        }
+    except SnapshotStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/v1/project/snapshots", status_code=201)
+async def create_project_snapshot(request: SnapshotCreateRequest) -> dict[str, Any]:
+    """Capture a complete immutable project checkpoint."""
+    project = _project_record(request.project_id)
+    try:
+        snapshot = _get_snapshot_store(project.id).create(
+            name=request.name,
+            payload=await _build_project_export(project.id),
+        )
+        return snapshot.model_dump(mode="json")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SnapshotStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/v1/project/snapshots/{snapshot_id}")
+async def get_project_snapshot(
+    snapshot_id: str,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """Return one checkpoint after verifying its content hash."""
+    project = _project_record(project_id)
+    try:
+        snapshot, payload = _get_snapshot_store(project.id).get(snapshot_id)
+        return {"snapshot": snapshot.model_dump(mode="json"), "payload": payload}
+    except SnapshotNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SnapshotStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _search_snippet(text: str, query: str, *, radius: int = 90) -> str:
+    """Return a compact plain-text excerpt around the first match."""
+    flattened = " ".join(text.split())
+    position = flattened.casefold().find(query.casefold())
+    if position < 0:
+        return flattened[: radius * 2] + ("…" if len(flattened) > radius * 2 else "")
+    start = max(0, position - radius)
+    end = min(len(flattened), position + len(query) + radius)
+    return ("…" if start else "") + flattened[start:end] + ("…" if end < len(flattened) else "")
+
+
+async def _search_project_records(project_id: str, query: str) -> list[dict[str, Any]]:
+    normalized = query.strip()
+    folded = normalized.casefold()
+    results: list[dict[str, Any]] = []
+    library = _get_library_store()
+    session_store = _get_session_store(project_id)
+    for summary in session_store.list_summaries():
+        session = session_store.get(summary["id"])
+        if session is None:
+            continue
+        try:
+            lifecycle = library.get_conversation(session.id)
+        except ConversationLifecycleNotFoundError:
+            continue
+        if folded in session.title.casefold():
+            results.append(
+                {
+                    "kind": "conversation",
+                    "id": session.id,
+                    "title": session.title,
+                    "snippet": f"{session.message_count} messages",
+                    "conversation_id": session.id,
+                    "message_id": None,
+                    "artifact_id": None,
+                    "archived": lifecycle.archived,
+                    "updated_at": session.updated_at,
+                }
+            )
+        for message in session.messages:
+            if folded in message.content.casefold():
+                results.append(
+                    {
+                        "kind": "message",
+                        "id": message.id,
+                        "title": session.title,
+                        "snippet": _search_snippet(message.content, normalized),
+                        "conversation_id": session.id,
+                        "message_id": message.id,
+                        "artifact_id": None,
+                        "archived": lifecycle.archived,
+                        "updated_at": message.timestamp,
+                    }
+                )
+
+    artifact_store = _get_artifact_store(project_id)
+    artifact_summaries, _ = artifact_store.list_all()
+    for summary in artifact_summaries:
+        _, content, _ = artifact_store.get(summary.id)
+        searchable = "\n".join([summary.title, content, " ".join(summary.tags)])
+        if folded in searchable.casefold():
+            results.append(
+                {
+                    "kind": "artifact",
+                    "id": summary.id,
+                    "title": summary.title,
+                    "snippet": _search_snippet(content or " ".join(summary.tags), normalized),
+                    "conversation_id": summary.provenance.conversation_id,
+                    "message_id": None,
+                    "artifact_id": summary.id,
+                    "trashed": summary.trashed_at is not None,
+                    "updated_at": summary.updated_at,
+                }
+            )
+
+    bible = {
+        "canon_character": (await list_characters(project_id)).get("characters", []),
+        "canon_rule": (await list_world_rules(project_id)).get("rules", []),
+        "canon_constraint": (await list_forbidden(project_id)).get("forbidden", []),
+    }
+    for kind, records in bible.items():
+        for record in records:
+            title = record.get("name") or ("World rule" if kind == "canon_rule" else "Boundary")
+            text = " ".join(str(value) for value in record.values() if value)
+            if folded in text.casefold():
+                results.append(
+                    {
+                        "kind": kind,
+                        "id": record.get("id", title),
+                        "title": title,
+                        "snippet": _search_snippet(text, normalized),
+                        "conversation_id": None,
+                        "message_id": None,
+                        "artifact_id": None,
+                        "updated_at": "",
+                    }
+                )
+
+    manuscript_nodes, _ = _get_manuscript_store(project_id).list_nodes()
+    for node in manuscript_nodes:
+        if folded in node.title.casefold():
+            results.append(
+                {
+                    "kind": "manuscript",
+                    "id": node.id,
+                    "title": node.title,
+                    "snippet": f"{node.kind.title()} · {node.status}",
+                    "conversation_id": None,
+                    "message_id": None,
+                    "artifact_id": node.artifact_id,
+                    "updated_at": node.updated_at,
+                }
+            )
+    results.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
+    return results
+
+
+@app.get("/v1/search")
+async def search_project(
+    q: str,
+    project_id: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Search conversations, artifacts, manuscript structure, and accepted canon."""
+    project = _project_record(project_id)
+    query = q.strip()
+    if not query:
+        return {"project_id": project.id, "query": "", "results": [], "total": 0}
+    bounded_limit = max(1, min(limit, 250))
+    results = await _search_project_records(project.id, query)
+    return {
+        "project_id": project.id,
+        "query": query,
+        "results": results[:bounded_limit],
+        "total": len(results),
+    }
+
+
+@app.get("/v1/entities")
+async def list_project_entities(project_id: str | None = None) -> dict[str, Any]:
+    """Return accepted characters with explicit references back into exploration."""
+    project = _project_record(project_id)
+    characters = (await list_characters(project.id)).get("characters", [])
+    entities = []
+    for character in characters:
+        pattern = re.compile(rf"(?<!\w){re.escape(character['name'])}(?!\w)", re.IGNORECASE)
+        references = [
+            item
+            for item in await _search_project_records(project.id, character["name"])
+            if item["kind"] in {"conversation", "message", "artifact", "manuscript"}
+            and pattern.search(f"{item['title']} {item['snippet']}")
+        ]
+        entities.append(
+            {
+                **character,
+                "reference_count": len(references),
+                "references": references,
+            }
+        )
+    return {"project_id": project.id, "entities": entities}
 
 
 _LENGTH_BANDS = {
@@ -660,20 +1494,24 @@ def _resolve_config_fields(mode: str) -> tuple[list[dict], dict, dict]:
             source = "system"
             if requested != value:
                 clamped = True
-                clamped_fields.append({
-                    "key": key,
-                    "requested": requested,
-                    "effective": value,
-                    "source": "system",
-                })
+                clamped_fields.append(
+                    {
+                        "key": key,
+                        "requested": requested,
+                        "effective": value,
+                        "source": "system",
+                    }
+                )
 
-        fields.append({
-            "key": key,
-            "value": value,
-            "source": source,
-            "default_value": default_value,
-            "clamped": clamped,
-        })
+        fields.append(
+            {
+                "key": key,
+                "value": value,
+                "source": source,
+                "default_value": default_value,
+                "clamped": clamped,
+            }
+        )
 
     diagnostics = {
         "clamped_fields": clamped_fields,
@@ -782,13 +1620,13 @@ async def chat_completions(
     Delegates to the governor daemon for the full governed pipeline:
     pending check → augment → generate → check → receipt.
     """
-    governed_chat = _get_governed_chat_adapter()
+    governed_chat = _get_governed_chat_adapter(request.project_id)
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
     # Persistent creative direction is part of the same message list AG governs;
     # it is not a parallel prompt or an ungoverned provider call.
     try:
-        project_context = _build_project_context_message()
+        project_context = _build_project_context_message(request.project_id)
     except CreativeProjectError as exc:
         raise HTTPException(status_code=500, detail=f"Project state error: {exc}")
     if project_context:
@@ -832,9 +1670,7 @@ async def chat_completions(
 
     # If daemon returned a pending violation, format as violation prompt
     if result.get("pending"):
-        return _format_violation_pending_response(
-            result, result.get("model") or request.model
-        )
+        return _format_violation_pending_response(result, result.get("model") or request.model)
 
     # Build content with optional governor footer
     content = result.get("content", "")
@@ -879,9 +1715,7 @@ async def _stream_via_daemon(
     turn_id = f"turn-{uuid.uuid4().hex[:12]}"
 
     try:
-        async for delta, final in governed_chat.chat_stream(
-            messages=messages, model=model
-        ):
+        async for delta, final in governed_chat.chat_stream(messages=messages, model=model):
             if delta:
                 sse_chunk = {
                     "id": request_id,
@@ -1012,11 +1846,21 @@ def _format_violation_pending_response(
 
 class CreateSessionRequest(BaseModel):
     model: str = ""
-    title: str = "New conversation"
+    title: str = Field(default="New conversation", min_length=1, max_length=200)
+    project_id: str | None = None
 
 
 class UpdateSessionRequest(BaseModel):
-    title: str
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    archived: bool | None = None
+    pinned: bool | None = None
+    project_id: str | None = None
+
+
+class ForkSessionRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    message_id: str | None = None
+    project_id: str | None = None
 
 
 class AppendMessageRequest(BaseModel):
@@ -1026,58 +1870,276 @@ class AppendMessageRequest(BaseModel):
     usage: dict[str, int] | None = None
 
 
+def _conversation_location(
+    session_id: str,
+) -> tuple[ConversationLifecycle, SessionStore, ChatSession]:
+    """Resolve lifecycle and content, lazily enrolling a legacy session."""
+    library = _get_library_store()
+    try:
+        lifecycle = library.get_conversation(session_id)
+    except ConversationLifecycleNotFoundError:
+        legacy = _get_default_session_store().get(session_id)
+        if legacy is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        library.sync_legacy_sessions([session_id])
+        lifecycle = library.get_conversation(session_id)
+    store = _get_session_store(lifecycle.project_id)
+    session = store.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return lifecycle, store, session
+
+
+def _conversation_payload(
+    session: ChatSession,
+    lifecycle: ConversationLifecycle,
+    *,
+    summary: bool = False,
+) -> dict[str, Any]:
+    payload = session.to_summary() if summary else session.to_dict()
+    payload.update(
+        {
+            "project_id": lifecycle.project_id,
+            "archived": lifecycle.archived,
+            "pinned": lifecycle.pinned,
+            "parent_session_id": lifecycle.parent_session_id,
+            "forked_at_message_id": lifecycle.forked_at_message_id,
+            "word_count": sum(
+                _word_count(message.content) for message in session.messages
+            ),
+        }
+    )
+    return payload
+
+
 @app.get("/sessions/")
-async def list_sessions() -> dict[str, Any]:
-    """List all session summaries (no messages), sorted by most recent."""
-    store = _get_session_store()
-    return {"sessions": store.list_summaries()}
+async def list_sessions(
+    project_id: str | None = None,
+    view: str = "active",
+    q: str = "",
+    sort: str = "updated_desc",
+) -> dict[str, Any]:
+    """List/search conversations in one project with lifecycle filtering."""
+    if view not in {"active", "archived", "pinned", "all"}:
+        raise HTTPException(status_code=422, detail="invalid conversation view")
+    if sort not in {"updated_desc", "updated_asc", "title"}:
+        raise HTTPException(status_code=422, detail="invalid conversation sort")
+
+    project = _project_record(project_id)
+    library = _get_library_store()
+    store = _get_session_store(project.id)
+    if project.id == library.snapshot().default_project_id:
+        library.sync_legacy_sessions([item["id"] for item in store.list_summaries()])
+
+    query = q.strip().casefold()
+    items: list[dict[str, Any]] = []
+    for summary in store.list_summaries():
+        try:
+            lifecycle = library.get_conversation(summary["id"])
+        except ConversationLifecycleNotFoundError:
+            continue
+        if lifecycle.project_id != project.id:
+            continue
+        if view == "active" and lifecycle.archived:
+            continue
+        if view == "archived" and not lifecycle.archived:
+            continue
+        if view == "pinned" and (not lifecycle.pinned or lifecycle.archived):
+            continue
+        session = store.get(summary["id"])
+        if session is None:
+            continue
+        if (
+            query
+            and query not in session.title.casefold()
+            and not any(query in message.content.casefold() for message in session.messages)
+        ):
+            continue
+        items.append(_conversation_payload(session, lifecycle, summary=True))
+
+    if sort == "title":
+        items.sort(key=lambda item: (item["title"].casefold(), item["id"]))
+    else:
+        items.sort(
+            key=lambda item: item["updated_at"],
+            reverse=sort == "updated_desc",
+        )
+    if view in {"active", "all"} and sort == "updated_desc":
+        items.sort(key=lambda item: not item["pinned"])
+    return {"project_id": project.id, "view": view, "sessions": items}
+
+
+@app.get("/v1/conversations/tree")
+async def conversation_branch_tree(project_id: str | None = None) -> dict[str, Any]:
+    """Return explicit parent/child metadata for a project's explorations."""
+    project = _project_record(project_id)
+    store = _get_session_store(project.id)
+    library = _get_library_store()
+    summaries = {item["id"]: item for item in store.list_summaries()}
+    if project.id == library.snapshot().default_project_id:
+        library.sync_legacy_sessions(list(summaries))
+    records = [
+        record
+        for record in library.snapshot().conversations.values()
+        if record.project_id == project.id and record.session_id in summaries
+    ]
+    known_ids = {record.session_id for record in records}
+    child_ids: dict[str, list[str]] = {session_id: [] for session_id in known_ids}
+    nodes = []
+    for record in records:
+        summary = summaries[record.session_id]
+        session = store.get(record.session_id)
+        if record.parent_session_id in child_ids:
+            child_ids[record.parent_session_id].append(record.session_id)
+        nodes.append(
+            {
+                "id": record.session_id,
+                "title": summary["title"],
+                "parent_session_id": record.parent_session_id,
+                "parent_in_project": record.parent_session_id in known_ids,
+                "forked_at_message_id": record.forked_at_message_id,
+                "archived": record.archived,
+                "pinned": record.pinned,
+                "message_count": summary["message_count"],
+                "word_count": sum(
+                    _word_count(message.content) for message in (session.messages if session else [])
+                ),
+                "updated_at": summary["updated_at"],
+            }
+        )
+    for children in child_ids.values():
+        children.sort(key=lambda item: summaries[item]["created_at"])
+    for node in nodes:
+        node["child_session_ids"] = child_ids[node["id"]]
+    nodes.sort(key=lambda item: summaries[item["id"]]["created_at"])
+    roots = [
+        node["id"]
+        for node in nodes
+        if node["parent_session_id"] is None or not node["parent_in_project"]
+    ]
+    return {"project_id": project.id, "roots": roots, "nodes": nodes}
 
 
 @app.post("/sessions/")
 async def create_session(request: CreateSessionRequest) -> dict[str, Any]:
     """Create a new chat session."""
-    store = _get_session_store()
+    project = _project_record(request.project_id)
+    store = _get_session_store(project.id)
+    title = request.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="conversation title must not be empty")
     session = store.create(
-        context_id=GOVERNOR_CONTEXT_ID,
+        context_id=project.context_id,
         model=request.model,
-        title=request.title,
+        title=title,
     )
-    return session.to_dict()
+    try:
+        lifecycle = _get_library_store().add_conversation(session.id, project.id)
+    except Exception:
+        store.delete(session.id)
+        raise
+    return _conversation_payload(session, lifecycle)
 
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str) -> dict[str, Any]:
     """Get a session with full message history."""
-    store = _get_session_store()
-    session = store.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return session.to_dict()
+    lifecycle, _, session = _conversation_location(session_id)
+    return _conversation_payload(session, lifecycle)
 
 
 @app.delete("/sessions/{session_id}")
 async def delete_session(session_id: str) -> dict[str, Any]:
     """Delete a session."""
-    store = _get_session_store()
+    _, store, _ = _conversation_location(session_id)
     if not store.delete(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
+    _get_library_store().remove_conversation(session_id)
     return {"success": True}
 
 
 @app.patch("/sessions/{session_id}")
 async def update_session(session_id: str, request: UpdateSessionRequest) -> dict[str, Any]:
-    """Update a session's title."""
-    store = _get_session_store()
-    if not store.update_title(session_id, request.title):
-        raise HTTPException(status_code=404, detail="Session not found")
-    session = store.get(session_id)
-    return session.to_dict() if session else {"success": True}
+    """Rename, archive, pin, or move a conversation."""
+    lifecycle, store, session = _conversation_location(session_id)
+    if request.title is not None:
+        title = request.title.strip()
+        if not title:
+            raise HTTPException(status_code=422, detail="conversation title must not be empty")
+        if not store.update_title(session_id, title):
+            raise HTTPException(status_code=404, detail="Session not found")
+        session = store.get(session_id) or session
+
+    if request.project_id is not None and request.project_id != lifecycle.project_id:
+        target_project = _project_record(request.project_id)
+        target_store = _get_session_store(target_project.id)
+        session.context_id = target_project.context_id
+        target_store._write_session(session)
+        lifecycle = _get_library_store().update_conversation(
+            session_id,
+            project_id=target_project.id,
+            archived=request.archived,
+            pinned=request.pinned,
+        )
+        store.delete(session_id)
+    else:
+        lifecycle = _get_library_store().update_conversation(
+            session_id,
+            archived=request.archived,
+            pinned=request.pinned,
+        )
+    return _conversation_payload(session, lifecycle)
+
+
+@app.post("/sessions/{session_id}/fork", status_code=201)
+async def fork_session(
+    session_id: str,
+    request: ForkSessionRequest,
+) -> dict[str, Any]:
+    """Fork a conversation through an explicit point in its history."""
+    source_lifecycle, _, source = _conversation_location(session_id)
+    target_project = _project_record(request.project_id or source_lifecycle.project_id)
+    target_store = _get_session_store(target_project.id)
+    title = request.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="conversation title must not be empty")
+
+    fork_messages = source.messages
+    fork_point = request.message_id
+    if fork_point is not None:
+        matches = [i for i, message in enumerate(source.messages) if message.id == fork_point]
+        if not matches:
+            raise HTTPException(status_code=422, detail="fork message not found")
+        fork_messages = source.messages[: matches[0] + 1]
+    elif fork_messages:
+        fork_point = fork_messages[-1].id
+
+    fork = target_store.create(
+        context_id=target_project.context_id,
+        model=source.model,
+        title=title,
+    )
+    fork.messages = [SessionMessage.from_dict(item.to_dict()) for item in fork_messages]
+    fork.message_count = len(fork.messages)
+    fork.updated_at = datetime.now(timezone.utc).isoformat()
+    target_store._write_session(fork)
+    try:
+        lifecycle = _get_library_store().add_conversation(
+            fork.id,
+            target_project.id,
+            parent_session_id=source.id,
+            forked_at_message_id=fork_point,
+        )
+    except Exception:
+        target_store.delete(fork.id)
+        raise
+    return _conversation_payload(fork, lifecycle)
 
 
 @app.post("/sessions/{session_id}/messages")
 async def append_message(session_id: str, request: AppendMessageRequest) -> dict[str, Any]:
     """Append a message to a session (write-through target)."""
-    store = _get_session_store()
+    _, store, _ = _conversation_location(session_id)
     msg = SessionMessage.create(
         role=request.role,
         content=request.content,
@@ -1094,14 +2156,15 @@ async def append_message(session_id: str, request: AppendMessageRequest) -> dict
 # ============================================================================
 
 
-def _resolve_context() -> tuple[Any | None, str]:
+def _resolve_context(project_id: str | None = None) -> tuple[Any | None, str]:
     """Resolve the active governor context.
 
     Returns (context_or_None, context_id).
     """
     cm = _get_context_manager()
-    ctx = cm.get(GOVERNOR_CONTEXT_ID)
-    return ctx, GOVERNOR_CONTEXT_ID
+    project = _project_record(project_id)
+    ctx = cm.get(project.context_id)
+    return ctx, project.context_id
 
 
 def _build_vm_for_context(ctx: Any) -> GovernorViewModel:
@@ -1421,16 +2484,29 @@ def _get_research_project_store() -> Any:
 _artifact_store: Any = None
 
 
-def _get_artifact_store() -> Any:
-    """Lazy-init artifact store."""
+def _get_artifact_store(project_id: str | None = None) -> Any:
+    """Lazy-init the artifact store for one writing project."""
     global _artifact_store
-    if _artifact_store is None:
+    project = _project_record(project_id)
+    if project.context_id == GOVERNOR_CONTEXT_ID and _artifact_store is not None:
+        return _artifact_store
+    if project.context_id in _artifact_stores:
+        return _artifact_stores[project.context_id]
+    if _artifact_store is None or project.context_id != GOVERNOR_CONTEXT_ID:
         from gov_webui.artifact_store import ArtifactStore
 
         cm = _get_context_manager()
-        ctx = cm.get_or_create(GOVERNOR_CONTEXT_ID, mode=GOVERNOR_MODE)
-        _artifact_store = ArtifactStore(ctx.governor_dir)
-    return _artifact_store
+        ctx = cm.get_or_create(project.context_id, mode=GOVERNOR_MODE)
+        store = ArtifactStore(ctx.governor_dir)
+        if project.context_id == GOVERNOR_CONTEXT_ID:
+            _artifact_store = store
+        else:
+            _artifact_stores[project.context_id] = store
+    return (
+        _artifact_store
+        if project.context_id == GOVERNOR_CONTEXT_ID
+        else _artifact_stores[project.context_id]
+    )
 
 
 # ---------- Historical receipt V1 export (read-only) ----------
@@ -1454,49 +2530,70 @@ def _load_receipt_v1_dicts() -> list[dict]:
 
 class CaptureRequest(BaseModel):
     """Request to scan text for canon-worthy statements."""
+
     text: str
+    conversation_id: str | None = None
     message_id: str = ""
+    project_id: str | None = None
 
 
 class CaptureAcceptRequest(BaseModel):
     """Request to promote a pending capture to canon."""
-    name: str = ""           # Character/entity name (may override detected)
-    description: str = ""    # Description text
-    capture_type: str = ""   # character, world_rule, relationship, constraint
+
+    name: str = ""  # Character/entity name (may override detected)
+    description: str = ""  # Description text
+    capture_type: str = ""  # character, world_rule, relationship, constraint
+    project_id: str | None = None
+
+
+class CaptureUpdateRequest(BaseModel):
+    subject: str | None = None
+    statement: str | None = None
+    kind: str | None = None
+    project_id: str | None = None
 
 
 class CharacterRequest(BaseModel):
     """Request to add a character."""
+
     name: str
     description: str | None = None
     voice: str | None = None
     wont: str | None = None  # Things they wouldn't do
+    project_id: str | None = None
 
 
 class WorldRuleRequest(BaseModel):
     """Request to add a world rule."""
+
     rule: str
+    project_id: str | None = None
 
 
 class ForbiddenRequest(BaseModel):
     """Request to add a forbidden thing."""
+
     description: str
     patterns: list[str] = Field(default_factory=list)
+    project_id: str | None = None
 
 
 class DecisionRequest(BaseModel):
     """Request to add a decision."""
+
     decision: str
     rationale: str | None = None
 
 
 class ConstraintRequest(BaseModel):
     """Request to add a constraint."""
+
     constraint: str
     patterns: list[str] = Field(default_factory=list)
 
 
 # -- Code Builder request models -------------------------------------------
+
 
 class IntentUpdateRequest(BaseModel):
     text: str
@@ -1549,6 +2646,7 @@ class RunRequest(BaseModel):
 
 # -- Artifact Engine request models ----------------------------------------
 
+
 class ArtifactCreateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     content: str
@@ -1557,6 +2655,12 @@ class ArtifactCreateRequest(BaseModel):
     message_id: str | None = None
     source: str = "promote"
     source_turn_seq: int | None = None
+    project_id: str | None = None
+    artifact_type: str = "draft"
+    conversation_id: str | None = None
+    source_message_ids: list[str] = Field(default_factory=list)
+    status: str = "idea"
+    tags: list[str] = Field(default_factory=list)
 
 
 class ArtifactUpdateRequest(BaseModel):
@@ -1568,10 +2672,25 @@ class ArtifactUpdateRequest(BaseModel):
     source_turn_seq: int | None = None
 
 
+class ArtifactLifecycleRequest(BaseModel):
+    status: str | None = None
+    tags: list[str] | None = None
+    trashed: bool | None = None
+
+
+class ArtifactWorkingCopyRequest(BaseModel):
+    content: str
+    base_version: int = Field(ge=1)
+
+
+class ArtifactRestoreRequest(BaseModel):
+    expected_current_version: int = Field(ge=1)
+
+
 @app.get("/governor/fiction/characters")
-async def list_characters() -> dict[str, Any]:
+async def list_characters(project_id: str | None = None) -> dict[str, Any]:
     """List all characters for fiction mode."""
-    ctx, _ = _resolve_context()
+    ctx, _ = _resolve_context(project_id)
     if ctx is None:
         return {"characters": [], "message": "No governor context initialized."}
 
@@ -1586,12 +2705,14 @@ async def list_characters() -> dict[str, Any]:
             name = a.id.replace("char-", "").replace("-", " ").title()
             # Check for associated "wont" anchor
             wont_anchor = registry.get(f"{a.id}-wont")
-            characters.append({
-                "id": a.id,
-                "name": name,
-                "description": a.description,
-                "wont": wont_anchor.description if wont_anchor else None,
-            })
+            characters.append(
+                {
+                    "id": a.id,
+                    "name": name,
+                    "description": a.description,
+                    "wont": wont_anchor.description if wont_anchor else None,
+                }
+            )
 
     return {"characters": characters}
 
@@ -1599,7 +2720,7 @@ async def list_characters() -> dict[str, Any]:
 @app.post("/governor/fiction/characters")
 async def add_character(request: CharacterRequest) -> dict[str, Any]:
     """Add a character for fiction mode."""
-    ctx, _ = _resolve_context()
+    ctx, _ = _resolve_context(request.project_id)
     if ctx is None:
         raise HTTPException(status_code=400, detail="No governor context initialized.")
 
@@ -1649,9 +2770,12 @@ async def add_character(request: CharacterRequest) -> dict[str, Any]:
 
 
 @app.delete("/governor/fiction/characters/{char_id}")
-async def remove_character(char_id: str) -> dict[str, Any]:
+async def remove_character(
+    char_id: str,
+    project_id: str | None = None,
+) -> dict[str, Any]:
     """Remove a character."""
-    ctx, _ = _resolve_context()
+    ctx, _ = _resolve_context(project_id)
     if ctx is None:
         raise HTTPException(status_code=400, detail="No governor context initialized.")
 
@@ -1669,9 +2793,9 @@ async def remove_character(char_id: str) -> dict[str, Any]:
 
 
 @app.get("/governor/fiction/world-rules")
-async def list_world_rules() -> dict[str, Any]:
+async def list_world_rules(project_id: str | None = None) -> dict[str, Any]:
     """List all world rules for fiction mode."""
-    ctx, _ = _resolve_context()
+    ctx, _ = _resolve_context(project_id)
     if ctx is None:
         return {"rules": [], "message": "No governor context initialized."}
 
@@ -1683,10 +2807,12 @@ async def list_world_rules() -> dict[str, Any]:
     rules = []
     for a in anchors:
         if a.anchor_type == AnchorType.DEFINITION:
-            rules.append({
-                "id": a.id,
-                "rule": a.description,
-            })
+            rules.append(
+                {
+                    "id": a.id,
+                    "rule": a.description,
+                }
+            )
 
     return {"rules": rules}
 
@@ -1694,7 +2820,7 @@ async def list_world_rules() -> dict[str, Any]:
 @app.post("/governor/fiction/world-rules")
 async def add_world_rule(request: WorldRuleRequest) -> dict[str, Any]:
     """Add a world rule for fiction mode."""
-    ctx, _ = _resolve_context()
+    ctx, _ = _resolve_context(request.project_id)
     if ctx is None:
         raise HTTPException(status_code=400, detail="No governor context initialized.")
 
@@ -1721,9 +2847,9 @@ async def add_world_rule(request: WorldRuleRequest) -> dict[str, Any]:
 
 
 @app.get("/governor/fiction/forbidden")
-async def list_forbidden() -> dict[str, Any]:
+async def list_forbidden(project_id: str | None = None) -> dict[str, Any]:
     """List all forbidden things for fiction mode."""
-    ctx, _ = _resolve_context()
+    ctx, _ = _resolve_context(project_id)
     if ctx is None:
         return {"forbidden": [], "message": "No governor context initialized."}
 
@@ -1735,11 +2861,13 @@ async def list_forbidden() -> dict[str, Any]:
     forbidden = []
     for a in anchors:
         if a.anchor_type == AnchorType.PROHIBITION and not a.id.endswith("-wont"):
-            forbidden.append({
-                "id": a.id,
-                "description": a.description,
-                "patterns": a.forbidden_patterns,
-            })
+            forbidden.append(
+                {
+                    "id": a.id,
+                    "description": a.description,
+                    "patterns": a.forbidden_patterns,
+                }
+            )
 
     return {"forbidden": forbidden}
 
@@ -1747,7 +2875,7 @@ async def list_forbidden() -> dict[str, Any]:
 @app.post("/governor/fiction/forbidden")
 async def add_forbidden(request: ForbiddenRequest) -> dict[str, Any]:
     """Add a forbidden thing for fiction mode."""
-    ctx, _ = _resolve_context()
+    ctx, _ = _resolve_context(request.project_id)
     if ctx is None:
         raise HTTPException(status_code=400, detail="No governor context initialized.")
 
@@ -1778,7 +2906,8 @@ async def add_forbidden(request: ForbiddenRequest) -> dict[str, Any]:
 # Canon Capture (fiction mode — pending promotion pipeline)
 # =============================================================================
 
-# In-memory pending captures (per process; cleared on restart)
+# Deprecated compatibility mirrors for retained donor tests. Product capture
+# state is persisted by CanonReviewStore and never sourced from these values.
 _pending_captures: dict[str, dict[str, Any]] = {}
 _capture_counter: int = 0
 
@@ -1786,8 +2915,6 @@ _capture_counter: int = 0
 @app.post("/governor/fiction/capture/scan")
 async def capture_scan(request: CaptureRequest) -> dict[str, Any]:
     """Scan text for canon-worthy statements. Returns capture candidates."""
-    global _capture_counter
-
     try:
         from fiction_governor.canon_capture import CanonCaptureClassifier
     except ImportError:
@@ -1795,26 +2922,23 @@ async def capture_scan(request: CaptureRequest) -> dict[str, Any]:
 
     classifier = CanonCaptureClassifier()
     items, receipt = classifier.scan(request.text)
+    project = _project_record(request.project_id)
+    store = _get_canon_review_store(project.id)
 
     captures = []
     for item in items:
-        _capture_counter += 1
-        cap_id = f"cap-{_capture_counter}"
-        cap = {
-            "id": cap_id,
-            "kind": item.kind if isinstance(item.kind, str) else item.kind.value,
-            "confidence": round(item.confidence, 2),
-            "subject": item.subject_guess or "",
-            "statement": item.statement,
-            "field": item.field_guess or "",
-            "spans": [list(s) for s in item.evidence_spans],
-            "message_id": request.message_id,
-            "status": "pending",
-        }
-        if item.draft_payload:
-            cap["draft"] = item.draft_payload
-        _pending_captures[cap_id] = cap
-        captures.append(cap)
+        candidate = store.add(
+            kind=item.kind if isinstance(item.kind, str) else item.kind.value,
+            confidence=round(item.confidence, 2),
+            subject=item.subject_guess or "",
+            statement=item.statement,
+            field=item.field_guess or "",
+            spans=[list(span) for span in item.evidence_spans],
+            conversation_id=request.conversation_id,
+            message_id=request.message_id,
+            draft=item.draft_payload or None,
+        )
+        captures.append(candidate.model_dump(mode="json"))
 
     return {
         "captures": captures,
@@ -1827,23 +2951,37 @@ async def capture_scan(request: CaptureRequest) -> dict[str, Any]:
 
 
 @app.get("/governor/fiction/captures")
-async def list_pending_captures() -> dict[str, Any]:
-    """List all pending (unresolved) captures."""
-    pending = [c for c in _pending_captures.values() if c["status"] == "pending"]
-    return {"captures": pending, "count": len(pending)}
+async def list_pending_captures(
+    project_id: str | None = None,
+    status: str = "pending",
+) -> dict[str, Any]:
+    """List durable canon review candidates for one project."""
+    if status not in {"pending", "accepted", "dismissed", "all"}:
+        raise HTTPException(status_code=422, detail="invalid canon review status")
+    project = _project_record(project_id)
+    try:
+        items = _get_canon_review_store(project.id).list(status=status)
+        return {
+            "captures": [item.model_dump(mode="json") for item in items],
+            "count": len(items),
+        }
+    except CanonReviewStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/governor/fiction/capture/{capture_id}/accept")
 async def accept_capture(capture_id: str, request: CaptureAcceptRequest) -> dict[str, Any]:
     """Promote a pending capture to canon (creates character or world rule anchor)."""
-    if capture_id not in _pending_captures:
-        raise HTTPException(status_code=404, detail="Capture not found.")
+    project = _project_record(request.project_id)
+    review_store = _get_canon_review_store(project.id)
+    try:
+        cap = review_store.get(capture_id)
+    except CanonReviewNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Capture not found.") from exc
+    if cap.status != "pending":
+        raise HTTPException(status_code=400, detail=f"Capture already {cap.status}.")
 
-    cap = _pending_captures[capture_id]
-    if cap["status"] != "pending":
-        raise HTTPException(status_code=400, detail=f"Capture already {cap['status']}.")
-
-    ctx, _ = _resolve_context()
+    ctx, _ = _resolve_context(project.id)
     if ctx is None:
         raise HTTPException(status_code=400, detail="No governor context initialized.")
 
@@ -1851,9 +2989,9 @@ async def accept_capture(capture_id: str, request: CaptureAcceptRequest) -> dict
 
     registry = create_registry(ctx.governor_dir)
 
-    kind = request.capture_type or cap.get("kind", "character")
-    name = request.name or cap.get("subject", "")
-    desc = request.description or cap.get("statement", "")
+    kind = request.capture_type or cap.kind or "character"
+    name = request.name or cap.subject
+    desc = request.description or cap.statement
 
     if kind in ("character", "relationship"):
         char_id = f"char-{name.lower().replace(' ', '-')}" if name else f"char-cap-{capture_id}"
@@ -1865,8 +3003,7 @@ async def accept_capture(capture_id: str, request: CaptureAcceptRequest) -> dict
         )
         registry.register(anchor)
         registry.save(ctx.governor_dir / "continuity" / "anchors.json")
-        cap["status"] = "accepted"
-        cap["promoted_to"] = char_id
+        review_store.resolve(capture_id, status="accepted", promoted_to=char_id)
         return {"success": True, "message": f"Canon: {name or char_id}", "id": char_id}
 
     elif kind in ("world_rule", "constraint"):
@@ -1891,22 +3028,50 @@ async def accept_capture(capture_id: str, request: CaptureAcceptRequest) -> dict
             )
         registry.register(anchor)
         registry.save(ctx.governor_dir / "continuity" / "anchors.json")
-        cap["status"] = "accepted"
-        cap["promoted_to"] = rule_id
+        review_store.resolve(capture_id, status="accepted", promoted_to=rule_id)
         return {"success": True, "message": f"Canon: {desc[:40]}", "id": rule_id}
 
     raise HTTPException(status_code=400, detail=f"Unknown capture kind: {kind}")
 
 
-@app.post("/governor/fiction/capture/{capture_id}/reject")
-async def reject_capture(capture_id: str) -> dict[str, Any]:
-    """Reject a pending capture."""
-    if capture_id not in _pending_captures:
-        raise HTTPException(status_code=404, detail="Capture not found.")
+@app.patch("/governor/fiction/capture/{capture_id}")
+async def update_capture(
+    capture_id: str,
+    request: CaptureUpdateRequest,
+) -> dict[str, Any]:
+    """Let the writer correct a pending suggestion before accepting it."""
+    project = _project_record(request.project_id)
+    try:
+        item = _get_canon_review_store(project.id).update(
+            capture_id,
+            subject=request.subject,
+            statement=request.statement,
+            kind=request.kind,
+        )
+        return item.model_dump(mode="json")
+    except CanonReviewNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Capture not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    cap = _pending_captures[capture_id]
-    cap["status"] = "rejected"
-    return {"success": True, "message": "Capture dismissed."}
+
+@app.post("/governor/fiction/capture/{capture_id}/reject")
+async def reject_capture(
+    capture_id: str,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """Reject a pending capture."""
+    project = _project_record(project_id)
+    try:
+        _get_canon_review_store(project.id).resolve(
+            capture_id,
+            status="dismissed",
+        )
+        return {"success": True, "message": "Capture dismissed."}
+    except CanonReviewNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Capture not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/governor/code/decisions")
@@ -1988,11 +3153,13 @@ async def list_constraints() -> dict[str, Any]:
     constraints = []
     for a in anchors:
         if a.anchor_type == AnchorType.PROHIBITION and "constraint-" in a.id:
-            constraints.append({
-                "id": a.id,
-                "description": a.description,
-                "patterns": a.forbidden_patterns,
-            })
+            constraints.append(
+                {
+                    "id": a.id,
+                    "description": a.description,
+                    "patterns": a.forbidden_patterns,
+                }
+            )
 
     return {"constraints": constraints}
 
@@ -2119,8 +3286,13 @@ async def code_project_state() -> dict[str, Any]:
         store = _get_project_store()
         return store.get_state()
     except Exception:
-        return {"version": 0, "intent": {"text": "", "locked": False},
-                "contract": {}, "plan": {"phases": []}, "files": {}}
+        return {
+            "version": 0,
+            "intent": {"text": "", "locked": False},
+            "contract": {},
+            "plan": {"phases": []},
+            "files": {},
+        }
 
 
 @app.put("/governor/code/project/intent")
@@ -2130,9 +3302,7 @@ async def code_update_intent(request: IntentUpdateRequest) -> dict[str, Any]:
 
     store = _get_project_store()
     try:
-        intent = store.update_intent(
-            request.text, request.locked, request.expected_version
-        )
+        intent = store.update_intent(request.text, request.locked, request.expected_version)
         return {"success": True, "intent": intent.model_dump()}
     except StaleVersionError:
         raise HTTPException(409, "Stale version")
@@ -2141,7 +3311,12 @@ async def code_update_intent(request: IntentUpdateRequest) -> dict[str, Any]:
 @app.put("/governor/code/project/contract")
 async def code_update_contract(request: ContractUpdateRequest) -> dict[str, Any]:
     """Update contract fields."""
-    from gov_webui.project_store import Contract, ContractField, StaleVersionError, compute_config_hash
+    from gov_webui.project_store import (
+        Contract,
+        ContractField,
+        StaleVersionError,
+        compute_config_hash,
+    )
 
     # Parse input/output dicts into ContractField objects
     inputs = [ContractField(**f) for f in request.inputs]
@@ -2158,7 +3333,9 @@ async def code_update_contract(request: ContractUpdateRequest) -> dict[str, Any]
             raise HTTPException(400, f"Config too large: {config_size} bytes (max 50000)")
         short, full = compute_config_hash(config)
         if request.config_hash and request.config_hash != short:
-            raise HTTPException(400, f"Config hash mismatch: got {request.config_hash}, expected {short}")
+            raise HTTPException(
+                400, f"Config hash mismatch: got {request.config_hash}, expected {short}"
+            )
         config_hash = short
         config_hash_full = full
 
@@ -2192,9 +3369,7 @@ async def code_add_plan_item(request: PlanItemRequest) -> dict[str, Any]:
 
 
 @app.patch("/governor/code/plan/item/{item_id}")
-async def code_update_plan_item(
-    item_id: str, request: PlanItemStatusRequest
-) -> dict[str, Any]:
+async def code_update_plan_item(item_id: str, request: PlanItemStatusRequest) -> dict[str, Any]:
     """Update plan item status with state machine validation."""
     from gov_webui.project_store import PlanItemStatus, StaleVersionError
 
@@ -2205,9 +3380,7 @@ async def code_update_plan_item(
         raise HTTPException(400, f"Invalid status: {request.status}")
 
     try:
-        item = store.update_item_status(
-            item_id, status, request.expected_version
-        )
+        item = store.update_item_status(item_id, status, request.expected_version)
         return {"success": True, "item": item.model_dump()}
     except StaleVersionError:
         raise HTTPException(409, "Stale version")
@@ -2307,10 +3480,7 @@ async def code_run(request: RunRequest) -> dict[str, Any]:
 
             registry = create_registry(ctx.governor_dir)
             anchors = registry.all()
-            prohibitions = [
-                a for a in anchors
-                if a.anchor_type == AnchorType.PROHIBITION
-            ]
+            prohibitions = [a for a in anchors if a.anchor_type == AnchorType.PROHIBITION]
 
             # Check all project files against prohibition patterns
             for fpath in files:
@@ -2321,8 +3491,7 @@ async def code_run(request: RunRequest) -> dict[str, Any]:
                     for pattern in anchor.forbidden_patterns:
                         if pattern.lower() in content.lower():
                             preflight_violations.append(
-                                f"{fpath}: matches '{pattern}' "
-                                f"({anchor.description})"
+                                f"{fpath}: matches '{pattern}' ({anchor.description})"
                             )
     except Exception:
         pass  # Pre-flight is best-effort
@@ -2371,8 +3540,8 @@ async def code_run(request: RunRequest) -> dict[str, Any]:
         if combined_len > max_output:
             # Truncate proportionally
             ratio = max_output / combined_len
-            stdout = stdout[:int(len(stdout) * ratio)] + "\n…(truncated)"
-            stderr = stderr[:int(len(stderr) * ratio)] + "\n…(truncated)"
+            stdout = stdout[: int(len(stdout) * ratio)] + "\n…(truncated)"
+            stderr = stderr[: int(len(stderr) * ratio)] + "\n…(truncated)"
 
         return {
             "success": result.returncode == 0,
@@ -2439,9 +3608,7 @@ async def delete_research_claim(claim_id: str) -> dict[str, Any]:
 
 
 @app.patch("/governor/research/claims/{claim_id}/status")
-async def change_claim_status(
-    claim_id: str, request: StatusChangeRequest
-) -> dict[str, Any]:
+async def change_claim_status(claim_id: str, request: StatusChangeRequest) -> dict[str, Any]:
     """Change a claim's status."""
     from governor.research_store import ClaimStatus as RClaimStatus
 
@@ -2505,9 +3672,7 @@ async def change_assumption_status(
 async def add_research_uncertainty(request: UncertaintyRequest) -> dict[str, Any]:
     """Add a research uncertainty."""
     store = _get_research_store()
-    uncertainty = store.add_uncertainty(
-        content=request.content, attached_to=request.attached_to
-    )
+    uncertainty = store.add_uncertainty(content=request.content, attached_to=request.attached_to)
     return {"success": True, "uncertainty": uncertainty.to_dict()}
 
 
@@ -2712,10 +3877,12 @@ async def research_why_overlay(request: Request) -> dict[str, Any]:
     if ctx is not None:
         try:
             from governor.research_store import ResearchStore
+
             store = ResearchStore(ctx.governor_dir)
             # Mirror the logic from _build_accepted_context
             active_claims = [
-                c for c in store.claims.values()
+                c
+                for c in store.claims.values()
                 if c.status.value not in ("retracted", "superseded")
             ]
             active_claims.sort(key=lambda c: c.created_at, reverse=True)
@@ -2747,8 +3914,13 @@ async def research_project_state() -> dict[str, Any]:
         store = _get_research_project_store()
         return store.get_state()
     except Exception:
-        return {"version": 0, "intent": {"text": "", "locked": False},
-                "contract": {}, "plan": {"phases": []}, "files": {}}
+        return {
+            "version": 0,
+            "intent": {"text": "", "locked": False},
+            "contract": {},
+            "plan": {"phases": []},
+            "files": {},
+        }
 
 
 @app.put("/governor/research/project/intent")
@@ -2758,9 +3930,7 @@ async def research_update_intent(request: IntentUpdateRequest) -> dict[str, Any]
 
     store = _get_research_project_store()
     try:
-        intent = store.update_intent(
-            request.text, request.locked, request.expected_version
-        )
+        intent = store.update_intent(request.text, request.locked, request.expected_version)
         return {"success": True, "intent": intent.model_dump()}
     except StaleVersionError:
         raise HTTPException(409, "Stale version")
@@ -2769,7 +3939,12 @@ async def research_update_intent(request: IntentUpdateRequest) -> dict[str, Any]
 @app.put("/governor/research/project/contract")
 async def research_update_contract(request: ContractUpdateRequest) -> dict[str, Any]:
     """Update research scope / methodology."""
-    from gov_webui.project_store import Contract, ContractField, StaleVersionError, compute_config_hash
+    from gov_webui.project_store import (
+        Contract,
+        ContractField,
+        StaleVersionError,
+        compute_config_hash,
+    )
 
     inputs = [ContractField(**f) for f in request.inputs]
     outputs = [ContractField(**f) for f in request.outputs]
@@ -2785,7 +3960,9 @@ async def research_update_contract(request: ContractUpdateRequest) -> dict[str, 
             raise HTTPException(400, f"Config too large: {config_size} bytes (max 50000)")
         short, full = compute_config_hash(config)
         if request.config_hash and request.config_hash != short:
-            raise HTTPException(400, f"Config hash mismatch: got {request.config_hash}, expected {short}")
+            raise HTTPException(
+                400, f"Config hash mismatch: got {request.config_hash}, expected {short}"
+            )
         config_hash = short
         config_hash_full = full
 
@@ -2819,9 +3996,7 @@ async def research_add_plan_item(request: PlanItemRequest) -> dict[str, Any]:
 
 
 @app.patch("/governor/research/project/plan/item/{item_id}")
-async def research_update_plan_item(
-    item_id: str, request: PlanItemStatusRequest
-) -> dict[str, Any]:
+async def research_update_plan_item(item_id: str, request: PlanItemStatusRequest) -> dict[str, Any]:
     """Update research plan item status."""
     from gov_webui.project_store import PlanItemStatus, StaleVersionError
 
@@ -2832,9 +4007,7 @@ async def research_update_plan_item(
         raise HTTPException(400, f"Invalid status: {request.status}")
 
     try:
-        item = store.update_item_status(
-            item_id, status, request.expected_version
-        )
+        item = store.update_item_status(item_id, status, request.expected_version)
         return {"success": True, "item": item.model_dump()}
     except StaleVersionError:
         raise HTTPException(409, "Stale version")
@@ -2949,7 +4122,7 @@ async def research_validate(request: RunRequest) -> dict[str, Any]:
                 if key not in draft_content.lower():
                     findings.append(
                         f"Floating claim not referenced in draft: "
-                        f"\"{content[:60]}{'...' if len(content) > 60 else ''}\""
+                        f'"{content[:60]}{"..." if len(content) > 60 else ""}"'
                     )
 
         # Check for unresolved assumptions
@@ -2958,8 +4131,7 @@ async def research_validate(request: RunRequest) -> dict[str, Any]:
             content = assumption.get("content", "")
             if status == "proposed" and content:
                 findings.append(
-                    f"Unresolved assumption: "
-                    f"\"{content[:60]}{'...' if len(content) > 60 else ''}\""
+                    f'Unresolved assumption: "{content[:60]}{"..." if len(content) > 60 else ""}"'
                 )
     except Exception:
         pass  # Research store may not be initialized — that's fine
@@ -2997,15 +4169,15 @@ async def research_validate(request: RunRequest) -> dict[str, Any]:
                 # Check if line has a citation marker [N] or (Author, YYYY)
                 if not re.search(r"\[\d+\]|\([A-Z]\w+,?\s*\d{4}\)", line):
                     findings.append(
-                        f"Line {i + 1}: \"{pattern}\" without citation — "
-                        f"\"{line.strip()[:60]}{'...' if len(line.strip()) > 60 else ''}\""
+                        f'Line {i + 1}: "{pattern}" without citation — '
+                        f'"{line.strip()[:60]}{"..." if len(line.strip()) > 60 else ""}"'
                     )
         # Check literal ban matches
         for ban in ban_literals:
             if ban in line_lower:
                 findings.append(
-                    f"Line {i + 1}: banned phrase \"{ban}\" — "
-                    f"\"{line.strip()[:60]}{'...' if len(line.strip()) > 60 else ''}\""
+                    f'Line {i + 1}: banned phrase "{ban}" — '
+                    f'"{line.strip()[:60]}{"..." if len(line.strip()) > 60 else ""}"'
                 )
 
     # 3. Config-aware typed checks
@@ -3039,9 +4211,7 @@ async def research_validate(request: RunRequest) -> dict[str, Any]:
         # Citations-required check (warn only)
         if config.get("citations") == "required":
             if not re.search(r"\[\d+\]|\([A-Z]\w+,?\s*\d{4}\)", draft_content):
-                findings.append(
-                    "Citations required but no citation markers found"
-                )
+                findings.append("Citations required but no citation markers found")
 
     # 4. Check for constraint violations from research scope
     constraints = contract.get("constraints", [])
@@ -3052,20 +4222,23 @@ async def research_validate(request: RunRequest) -> dict[str, Any]:
         if any(neg in c_lower for neg in ["no ", "avoid ", "don't ", "never "]):
             for neg in ["no ", "avoid ", "don't ", "never "]:
                 if c_lower.startswith(neg):
-                    term = c_lower[len(neg):].strip().rstrip(".")
+                    term = c_lower[len(neg) :].strip().rstrip(".")
                     if term and term in draft_lower:
-                        constraint_hits.append(
-                            f"Scope constraint may be violated: \"{constraint}\""
-                        )
+                        constraint_hits.append(f'Scope constraint may be violated: "{constraint}"')
                     break
 
     findings.extend(constraint_hits)
 
     # 5. Strict mode: when strict=true, all findings are hard fails
     strict = config.get("strict", False) if config else False
-    success = len(findings) == 0 if strict else (
-        len([f for f in findings if "banned phrase" in f or "constraint" in f.lower()]) == 0
-        if not strict and findings else len(findings) == 0
+    success = (
+        len(findings) == 0
+        if strict
+        else (
+            len([f for f in findings if "banned phrase" in f or "constraint" in f.lower()]) == 0
+            if not strict and findings
+            else len(findings) == 0
+        )
     )
     # Simplify: strict=true means any finding fails, strict=false means success unless findings
     success = len(findings) == 0
@@ -3074,7 +4247,7 @@ async def research_validate(request: RunRequest) -> dict[str, Any]:
         "success": success,
         "returncode": 0 if success else 1,
         "stdout": f"Validated {request.filepath}: "
-                  + (f"{len(findings)} finding(s)" if findings else "no issues found"),
+        + (f"{len(findings)} finding(s)" if findings else "no issues found"),
         "stderr": "\n".join(findings) if findings else "",
         "filepath": request.filepath,
         "preflight_hit": False,
@@ -3101,13 +4274,15 @@ async def list_corrections(limit: int = 20) -> dict[str, Any]:
 
     corrections = []
     for exc in exceptions[:limit]:
-        corrections.append({
-            "id": exc.id,
-            "action": exc.action.value,
-            "anchor_id": exc.anchor_id,
-            "summary": exc.scope,
-            "created_at": exc.created_at.isoformat() if exc.created_at else None,
-        })
+        corrections.append(
+            {
+                "id": exc.id,
+                "action": exc.action.value,
+                "anchor_id": exc.anchor_id,
+                "summary": exc.scope,
+                "created_at": exc.created_at.isoformat() if exc.created_at else None,
+            }
+        )
 
     return {"corrections": corrections}
 
@@ -3205,7 +4380,9 @@ async def export_governor_state() -> dict[str, Any]:
     for a in anchors:
         entry: dict[str, Any] = {
             "id": a.id,
-            "anchor_type": a.anchor_type.value if hasattr(a.anchor_type, "value") else str(a.anchor_type),
+            "anchor_type": a.anchor_type.value
+            if hasattr(a.anchor_type, "value")
+            else str(a.anchor_type),
             "description": a.description,
             "severity": a.severity.value if hasattr(a.severity, "value") else str(a.severity),
         }
@@ -3226,12 +4403,14 @@ async def export_governor_state() -> dict[str, Any]:
             context_id=ctx.context_id,
         )
         for exc in resolver.list_exceptions():
-            corrections.append({
-                "action": exc.action.value if hasattr(exc.action, "value") else str(exc.action),
-                "anchor_id": exc.anchor_id,
-                "scope": exc.scope,
-                "summary": getattr(exc, "summary", ""),
-            })
+            corrections.append(
+                {
+                    "action": exc.action.value if hasattr(exc.action, "value") else str(exc.action),
+                    "anchor_id": exc.anchor_id,
+                    "scope": exc.scope,
+                    "summary": getattr(exc, "summary", ""),
+                }
+            )
     except Exception:
         pass
 
@@ -3327,9 +4506,7 @@ async def import_governor_state(payload: dict[str, Any]) -> dict[str, Any]:
 async def api_info() -> dict[str, Any]:
     """JSON endpoint with API info and available endpoints."""
     try:
-        backend = (await _get_governed_chat_adapter().provider()).get(
-            "type", "unknown"
-        )
+        backend = (await _get_governed_chat_adapter().provider()).get("type", "unknown")
     except Exception:
         backend = "unavailable"
     endpoints = {
@@ -3341,7 +4518,13 @@ async def api_info() -> dict[str, Any]:
         "governed_chat_pending": "/v1/governed-chat/pending",
         "governed_chat_resolve": "/v1/governed-chat/resolve",
         "project": "/v1/project",
+        "projects": "/v1/projects",
         "project_export": "/v1/project/export",
+        "project_export_zip": "/v1/project/export.zip",
+        "project_snapshots": "/v1/project/snapshots",
+        "project_search": "/v1/search",
+        "project_entities": "/v1/entities",
+        "manuscript": "/v1/manuscript",
         "health": "/health",
         "api_info": "/api/info",
         "sessions_list": "/sessions/",
@@ -3350,6 +4533,8 @@ async def api_info() -> dict[str, Any]:
         "sessions_delete": "/sessions/{id}",
         "sessions_update": "/sessions/{id}",
         "sessions_append_message": "/sessions/{id}/messages",
+        "sessions_fork": "/sessions/{id}/fork",
+        "conversation_tree": "/v1/conversations/tree",
         "fiction_characters": "/governor/fiction/characters",
         "fiction_world_rules": "/governor/fiction/world-rules",
         "fiction_forbidden": "/governor/fiction/forbidden",
@@ -3358,50 +4543,52 @@ async def api_info() -> dict[str, Any]:
         "artifacts": "/governor/artifacts",
     }
     if MARGINALIA_ENABLE_DONOR_ROUTES:
-        endpoints.update({
-            "governor_contexts": "/governor/contexts",
-            "governor_status": "/governor/status",
-            "governor_now": "/governor/now",
-            "governor_why": "/governor/why",
-            "governor_history": "/governor/history",
-            "governor_detail": "/governor/detail/{item_id}",
-            "governor_corrections": "/governor/corrections",
-            "governor_ui": "/governor/ui",
-            "code_decisions": "/governor/code/decisions",
-            "code_constraints": "/governor/code/constraints",
-            "research_state": "/governor/research/state",
-            "research_claims": "/governor/research/claims",
-            "research_assumptions": "/governor/research/assumptions",
-            "research_uncertainties": "/governor/research/uncertainties",
-            "research_links": "/governor/research/links",
-            "governor_export": "/governor/export",
-            "governor_import": "/governor/import",
-            "v2_runs": "/v2/runs",
-            "v2_run_detail": "/v2/runs/{run_id}",
-            "v2_run_events": "/v2/runs/{run_id}/events",
-            "v2_run_claims": "/v2/runs/{run_id}/claims",
-            "v2_run_violations": "/v2/runs/{run_id}/violations",
-            "v2_run_report": "/v2/runs/{run_id}/report",
-            "v2_run_cancel": "/v2/runs/{run_id}/cancel",
-            "v2_runs_compare": "/v2/runs/compare",
-            "v2_artifacts": "/v2/artifacts",
-            "v2_artifact": "/v2/artifacts/{hash}",
-            "v2_controls_schema": "/v2/controls/schema",
-            "v2_controls_templates": "/v2/controls/templates",
-            "v2_profiles": "/v2/profiles",
-            "v2_anchors": "/v2/anchors",
-            "v2_backends": "/v2/backends",
-            "v2_dashboard_summary": "/v2/dashboard/summary",
-            "v2_dashboard_regime": "/v2/dashboard/regime",
-            "v2_demos": "/v2/demos",
-            "v2_demo_playwright": "/v2/demos/{name}/playwright",
-            "dashboard": "/dashboard",
-            "v2_intent_templates": "/v2/intent/templates",
-            "v2_intent_schema": "/v2/intent/schema/{template_name}",
-            "v2_intent_validate": "/v2/intent/validate",
-            "v2_intent_compile": "/v2/intent/compile",
-            "v2_intent_policy": "/v2/intent/policy",
-        })
+        endpoints.update(
+            {
+                "governor_contexts": "/governor/contexts",
+                "governor_status": "/governor/status",
+                "governor_now": "/governor/now",
+                "governor_why": "/governor/why",
+                "governor_history": "/governor/history",
+                "governor_detail": "/governor/detail/{item_id}",
+                "governor_corrections": "/governor/corrections",
+                "governor_ui": "/governor/ui",
+                "code_decisions": "/governor/code/decisions",
+                "code_constraints": "/governor/code/constraints",
+                "research_state": "/governor/research/state",
+                "research_claims": "/governor/research/claims",
+                "research_assumptions": "/governor/research/assumptions",
+                "research_uncertainties": "/governor/research/uncertainties",
+                "research_links": "/governor/research/links",
+                "governor_export": "/governor/export",
+                "governor_import": "/governor/import",
+                "v2_runs": "/v2/runs",
+                "v2_run_detail": "/v2/runs/{run_id}",
+                "v2_run_events": "/v2/runs/{run_id}/events",
+                "v2_run_claims": "/v2/runs/{run_id}/claims",
+                "v2_run_violations": "/v2/runs/{run_id}/violations",
+                "v2_run_report": "/v2/runs/{run_id}/report",
+                "v2_run_cancel": "/v2/runs/{run_id}/cancel",
+                "v2_runs_compare": "/v2/runs/compare",
+                "v2_artifacts": "/v2/artifacts",
+                "v2_artifact": "/v2/artifacts/{hash}",
+                "v2_controls_schema": "/v2/controls/schema",
+                "v2_controls_templates": "/v2/controls/templates",
+                "v2_profiles": "/v2/profiles",
+                "v2_anchors": "/v2/anchors",
+                "v2_backends": "/v2/backends",
+                "v2_dashboard_summary": "/v2/dashboard/summary",
+                "v2_dashboard_regime": "/v2/dashboard/regime",
+                "v2_demos": "/v2/demos",
+                "v2_demo_playwright": "/v2/demos/{name}/playwright",
+                "dashboard": "/dashboard",
+                "v2_intent_templates": "/v2/intent/templates",
+                "v2_intent_schema": "/v2/intent/schema/{template_name}",
+                "v2_intent_validate": "/v2/intent/validate",
+                "v2_intent_compile": "/v2/intent/compile",
+                "v2_intent_policy": "/v2/intent/policy",
+            }
+        )
     return {
         "name": "Marginalia",
         "version": _webui_version(),
@@ -3459,6 +4646,7 @@ def _get_instrument_system() -> InstrumentSystem:
 
 # Pydantic models for v2 API
 
+
 class CreateRunRequest(BaseModel):
     task: str
     profile: str = "established"
@@ -3477,6 +4665,7 @@ _cancel_requests: dict[str, CancelRequest] = {}
 
 
 # ---- Runs ----
+
 
 @app.post("/v2/runs")
 async def v2_create_run(request: CreateRunRequest) -> dict[str, Any]:
@@ -3561,11 +4750,10 @@ async def v2_run_events(run_id: str, stream: bool = False) -> Any:
     if not run_dir.exists():
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
-    writer = EventWriter(
-        run_dir, system.artifact_store, system.config.artifact_size_threshold
-    )
+    writer = EventWriter(run_dir, system.artifact_store, system.config.artifact_size_threshold)
 
     if stream:
+
         async def event_stream():
             events = writer.read_events()
             for ev in events:
@@ -3610,9 +4798,7 @@ async def v2_run_violations(run_id: str) -> dict[str, Any]:
 
     from governor.instrument import EventKind
 
-    writer = EventWriter(
-        run_dir, system.artifact_store, system.config.artifact_size_threshold
-    )
+    writer = EventWriter(run_dir, system.artifact_store, system.config.artifact_size_threshold)
     events = writer.read_events()
 
     violations = []
@@ -3638,9 +4824,7 @@ async def v2_run_report(run_id: str) -> dict[str, Any]:
     from governor.instrument import ClaimExtractor
 
     run_dir = system.instrument_dir / "runs" / run_id
-    writer = EventWriter(
-        run_dir, system.artifact_store, system.config.artifact_size_threshold
-    )
+    writer = EventWriter(run_dir, system.artifact_store, system.config.artifact_size_threshold)
     events = writer.read_events()
 
     extractor = ClaimExtractor(run_dir)
@@ -3678,6 +4862,7 @@ async def v2_compare_runs() -> dict[str, Any]:
 
 # ---- Artifacts ----
 
+
 @app.get("/v2/artifacts/{artifact_hash}")
 async def v2_get_artifact(artifact_hash: str) -> Any:
     """Retrieve a content-addressed artifact blob."""
@@ -3687,6 +4872,7 @@ async def v2_get_artifact(artifact_hash: str) -> Any:
         raise HTTPException(status_code=404, detail=f"Artifact not found: {artifact_hash}")
 
     from fastapi.responses import Response
+
     return Response(content=data, media_type="application/octet-stream")
 
 
@@ -3701,14 +4887,13 @@ async def v2_list_artifacts(run_id: str = "") -> dict[str, Any]:
     if not run_dir.exists():
         return {"artifacts": []}
 
-    writer = EventWriter(
-        run_dir, system.artifact_store, system.config.artifact_size_threshold
-    )
+    writer = EventWriter(run_dir, system.artifact_store, system.config.artifact_size_threshold)
     receipts = writer.read_receipts()
     return {"artifacts": [r.to_dict() for r in receipts]}
 
 
 # ---- Controls ----
+
 
 @app.get("/v2/controls/schema")
 async def v2_controls_schema() -> dict[str, Any]:
@@ -3746,9 +4931,13 @@ async def v2_list_anchors() -> dict[str, Any]:
             "anchors": [
                 {
                     "id": a.id,
-                    "type": a.anchor_type.value if hasattr(a.anchor_type, "value") else str(a.anchor_type),
+                    "type": a.anchor_type.value
+                    if hasattr(a.anchor_type, "value")
+                    else str(a.anchor_type),
                     "description": a.description,
-                    "severity": a.severity.value if hasattr(a.severity, "value") else str(a.severity),
+                    "severity": a.severity.value
+                    if hasattr(a.severity, "value")
+                    else str(a.severity),
                 }
                 for a in anchors
             ]
@@ -3770,6 +4959,7 @@ async def v2_switch_backend(request: BackendSwitchRequest) -> dict[str, Any]:
 
 
 # ---- Dashboard ----
+
 
 @app.get("/v2/dashboard/summary")
 async def v2_dashboard_summary() -> dict[str, Any]:
@@ -3815,6 +5005,7 @@ class IntentCompileRequest(BaseModel):
 async def v2_intent_templates() -> dict[str, Any]:
     """List available intent form templates."""
     from governor.intent_compiler import list_templates
+
     return {"templates": list_templates()}
 
 
@@ -3857,6 +5048,7 @@ async def v2_intent_validate(request: IntentValidateRequest) -> dict[str, Any]:
     # The caller should have gotten schema from /v2/intent/schema/{template}
     # We need the template_name to rebuild — check all templates
     from governor.intent_compiler import BUILTIN_TEMPLATES
+
     schema = None
     for tname in BUILTIN_TEMPLATES:
         try:
@@ -3868,7 +5060,10 @@ async def v2_intent_validate(request: IntentValidateRequest) -> dict[str, Any]:
             continue
 
     if schema is None:
-        return {"valid": False, "errors": [f"Schema ID '{request.schema_id}' not found for mode '{mode}'"]}
+        return {
+            "valid": False,
+            "errors": [f"Schema ID '{request.schema_id}' not found for mode '{mode}'"],
+        }
 
     errors = validate_response(response, schema)
     return {"valid": len(errors) == 0, "errors": errors}
@@ -3917,6 +5112,7 @@ async def v2_intent_policy() -> dict[str, Any]:
 
 # ---- Demos ----
 
+
 @app.get("/v2/demos")
 async def v2_list_demos() -> dict[str, Any]:
     """List demo scenarios with freshness status."""
@@ -3932,15 +5128,17 @@ async def v2_list_demos() -> dict[str, Any]:
     demos = []
     for demo in BUILTIN_DEMOS:
         fr = next((f for f in freshness if f["name"] == demo.name), None)
-        demos.append({
-            "name": demo.name,
-            "description": demo.description,
-            "surface": demo.surface.value,
-            "tags": demo.tags,
-            "step_count": len(demo.steps),
-            "screenshot_count": len(demo.screenshot_paths),
-            "status": fr["status"] if fr else "missing",
-        })
+        demos.append(
+            {
+                "name": demo.name,
+                "description": demo.description,
+                "surface": demo.surface.value,
+                "tags": demo.tags,
+                "step_count": len(demo.steps),
+                "screenshot_count": len(demo.screenshot_paths),
+                "status": fr["status"] if fr else "missing",
+            }
+        )
 
     return {"demos": demos}
 
@@ -3988,12 +5186,25 @@ async def dashboard_ui() -> HTMLResponse:
 # ============================================================================
 
 
-def _artifact_meta_to_dict(meta: Any, *, include_versions: bool = False) -> dict:
+def _artifact_meta_to_dict(
+    meta: Any,
+    *,
+    include_versions: bool = False,
+    project_id: str = "",
+) -> dict:
     """Convert ArtifactMeta to dict, optionally including version history."""
     d: dict[str, Any] = {
         "id": meta.id,
         "title": meta.title,
         "kind": meta.kind,
+        "artifact_type": meta.artifact_type,
+        "project_id": meta.project_id or project_id,
+        "provenance": meta.provenance.model_dump(mode="json"),
+        "status": meta.status,
+        "tags": list(meta.tags),
+        "trashed_at": meta.trashed_at,
+        "working_copy_updated_at": meta.working_copy_updated_at,
+        "working_copy_base_version": meta.working_copy_base_version,
         "language": meta.language,
         "current_version": meta.current_version,
         "created_at": meta.created_at,
@@ -4015,15 +5226,22 @@ def _artifact_meta_to_dict(meta: Any, *, include_versions: bool = False) -> dict
 
 
 def _artifact_detail_response(
-    *, meta: Any, content: str, index_version: int,
+    *,
+    meta: Any,
+    content: str,
+    index_version: int,
     style_corrections: list[dict] | None = None,
     style_status: dict | None = None,
+    project_id: str = "",
 ) -> dict:
     resp: dict = {
         "ok": True,
         "index_version": index_version,
-        "artifact": _artifact_meta_to_dict(meta, include_versions=True),
+        "artifact": _artifact_meta_to_dict(
+            meta, include_versions=True, project_id=project_id
+        ),
         "content": content,
+        "word_count": _word_count(content),
     }
     if style_status is not None:
         resp["style_status"] = style_status
@@ -4052,25 +5270,33 @@ def _apply_style_policy(content: str) -> tuple[str, list[dict], dict | None]:
     action = action_for_mode(GOVERNOR_MODE)
     if action == "fix":
         fixed, corrections = fix(content, profile)
-        return fixed, corrections_to_dicts(corrections), {
-            "profile": profile,
-            "action": action,
-            "corrections_applied": len(corrections) > 0,
-            "correction_count": len(corrections),
-        }
+        return (
+            fixed,
+            corrections_to_dicts(corrections),
+            {
+                "profile": profile,
+                "action": action,
+                "corrections_applied": len(corrections) > 0,
+                "correction_count": len(corrections),
+            },
+        )
     else:
         # warn mode — check only, don't modify
         corrections = check(content, profile)
-        return content, corrections_to_dicts(corrections), {
-            "profile": profile,
-            "action": action,
-            "corrections_applied": False,
-            "correction_count": len(corrections),
-        }
+        return (
+            content,
+            corrections_to_dicts(corrections),
+            {
+                "profile": profile,
+                "action": action,
+                "corrections_applied": False,
+                "correction_count": len(corrections),
+            },
+        )
 
 
 def _artifact_list_response(
-    *, summaries: list, index_version: int
+    *, summaries: list, index_version: int, project_id: str = ""
 ) -> dict:
     return {
         "ok": True,
@@ -4080,6 +5306,14 @@ def _artifact_list_response(
                 "id": s.id,
                 "title": s.title,
                 "kind": s.kind,
+                "artifact_type": s.artifact_type,
+                "project_id": s.project_id or project_id,
+                "provenance": s.provenance.model_dump(mode="json"),
+                "status": s.status,
+                "tags": list(s.tags),
+                "trashed_at": s.trashed_at,
+                "working_copy_updated_at": s.working_copy_updated_at,
+                "working_copy_base_version": s.working_copy_base_version,
                 "language": s.language,
                 "current_version": s.current_version,
                 "created_at": s.created_at,
@@ -4156,20 +5390,59 @@ def _artifact_exception_response(exc: Exception) -> JSONResponse:
             },
         )
     # Fallback for unexpected errors
-    return _artifact_error(
-        status_code=500, code="internal_error", message=str(exc)
-    )
+    return _artifact_error(status_code=500, code="internal_error", message=str(exc))
 
 
 @app.get("/governor/artifacts")
-async def artifacts_list() -> dict:
-    """List all artifacts (metadata only)."""
+async def artifacts_list(
+    project_id: str | None = None,
+    view: str = "all",
+    q: str = "",
+    status: str | None = None,
+    tag: str | None = None,
+) -> dict:
+    """List/filter/search artifacts without mutating their durable records."""
     from gov_webui.artifact_store import ArtifactStoreError
 
     try:
-        store = _get_artifact_store()
+        project = _project_record(project_id)
+        store = _get_artifact_store(project.id)
+        if view not in {"active", "trash", "all"}:
+            raise HTTPException(status_code=422, detail="invalid artifact view")
         summaries, idx_ver = store.list_all()
-        return _artifact_list_response(summaries=summaries, index_version=idx_ver)
+        if view == "active":
+            summaries = [item for item in summaries if item.trashed_at is None]
+        elif view == "trash":
+            summaries = [item for item in summaries if item.trashed_at is not None]
+        if status is not None:
+            summaries = [item for item in summaries if item.status == status]
+        if tag is not None:
+            wanted_tag = tag.casefold()
+            summaries = [
+                item for item in summaries
+                if any(value.casefold() == wanted_tag for value in item.tags)
+            ]
+        query = q.strip().casefold()
+        if query:
+            matching = []
+            for item in summaries:
+                _, content, _ = store.get(item.id)
+                searchable = "\n".join([item.title, content, " ".join(item.tags)]).casefold()
+                if query in searchable:
+                    matching.append(item)
+            summaries = matching
+        response = _artifact_list_response(
+            summaries=summaries,
+            index_version=idx_ver,
+            project_id=project.id,
+        )
+        for item in response["artifacts"]:
+            try:
+                _, content, _ = store.get(item["id"])
+                item["word_count"] = _word_count(content)
+            except ArtifactStoreError:
+                item["word_count"] = 0
+        return response
     except ArtifactStoreError as exc:
         return _artifact_exception_response(exc)
 
@@ -4180,23 +5453,49 @@ async def artifacts_create(request: ArtifactCreateRequest) -> JSONResponse:
     from gov_webui.artifact_store import ArtifactStoreError
 
     try:
-        store = _get_artifact_store()
-        styled_content, style_corr, style_status = _apply_style_policy(
-            request.content
-        )
+        project = _project_record(request.project_id)
+        store = _get_artifact_store(project.id)
+        source_message_ids = list(request.source_message_ids)
+        if request.message_id and request.message_id not in source_message_ids:
+            source_message_ids.append(request.message_id)
+        if request.conversation_id:
+            lifecycle, _, session = _conversation_location(request.conversation_id)
+            if lifecycle.project_id != project.id:
+                raise HTTPException(
+                    status_code=422,
+                    detail="artifact provenance conversation belongs to another project",
+                )
+            known_ids = {message.id for message in session.messages}
+            missing = [item for item in source_message_ids if item not in known_ids]
+            if missing:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"artifact provenance messages not found: {', '.join(missing)}",
+                )
+        styled_content, style_corr, style_status = _apply_style_policy(request.content)
         meta, content, idx_ver = store.create(
             title=request.title,
             content=styled_content,
             kind=request.kind,
+            artifact_type=request.artifact_type,
+            project_id=project.id,
+            status=request.status,
+            tags=request.tags,
             language=request.language,
             message_id=request.message_id,
+            conversation_id=request.conversation_id,
+            source_message_ids=source_message_ids,
             source=request.source,
             source_turn_seq=request.source_turn_seq,
         )
         return JSONResponse(
             content=_artifact_detail_response(
-                meta=meta, content=content, index_version=idx_ver,
-                style_corrections=style_corr, style_status=style_status,
+                meta=meta,
+                content=content,
+                index_version=idx_ver,
+                style_corrections=style_corr,
+                style_status=style_status,
+                project_id=project.id,
             ),
             status_code=201,
         )
@@ -4205,12 +5504,13 @@ async def artifacts_create(request: ArtifactCreateRequest) -> JSONResponse:
 
 
 @app.get("/governor/artifacts/state")
-async def artifacts_state() -> dict:
+async def artifacts_state(project_id: str | None = None) -> dict:
     """Quick poll endpoint for artifact index version."""
     from gov_webui.artifact_store import ArtifactStoreError
 
     try:
-        store = _get_artifact_store()
+        project = _project_record(project_id)
+        store = _get_artifact_store(project.id)
         state = store.get_state()
         return {
             "ok": True,
@@ -4223,37 +5523,47 @@ async def artifacts_state() -> dict:
 
 
 @app.get("/governor/artifacts/{artifact_id}")
-async def artifacts_get(artifact_id: str) -> dict:
+async def artifacts_get(artifact_id: str, project_id: str | None = None) -> dict:
     """Get artifact detail + latest content."""
     from gov_webui.artifact_store import ArtifactStoreError
 
     try:
-        store = _get_artifact_store()
+        project = _project_record(project_id)
+        store = _get_artifact_store(project.id)
         meta, content, idx_ver = store.get(artifact_id)
         # Informational check — never modifies stored content on GET
         _, style_corr, style_status = _apply_style_policy(content)
         if style_status is not None:
             style_status["corrections_applied"] = False
-        return _artifact_detail_response(
-            meta=meta, content=content, index_version=idx_ver,
-            style_corrections=style_corr, style_status=style_status,
+        response = _artifact_detail_response(
+            meta=meta,
+            content=content,
+            index_version=idx_ver,
+            style_corrections=style_corr,
+            style_status=style_status,
+            project_id=project.id,
         )
+        working_copy, base_version = store.get_working_copy(artifact_id)
+        response["working_copy"] = working_copy
+        response["working_copy_base_version"] = base_version
+        return response
     except ArtifactStoreError as exc:
         return _artifact_exception_response(exc)
 
 
 @app.put("/governor/artifacts/{artifact_id}")
 async def artifacts_update(
-    artifact_id: str, request: ArtifactUpdateRequest
+    artifact_id: str,
+    request: ArtifactUpdateRequest,
+    project_id: str | None = None,
 ) -> dict:
     """Update artifact content (creates new version)."""
     from gov_webui.artifact_store import ArtifactStoreError
 
     try:
-        store = _get_artifact_store()
-        styled_content, style_corr, style_status = _apply_style_policy(
-            request.content
-        )
+        project = _project_record(project_id)
+        store = _get_artifact_store(project.id)
+        styled_content, style_corr, style_status = _apply_style_policy(request.content)
         meta, content, idx_ver = store.update(
             artifact_id,
             content=styled_content,
@@ -4264,20 +5574,99 @@ async def artifacts_update(
             source_turn_seq=request.source_turn_seq,
         )
         return _artifact_detail_response(
-            meta=meta, content=content, index_version=idx_ver,
-            style_corrections=style_corr, style_status=style_status,
+            meta=meta,
+            content=content,
+            index_version=idx_ver,
+            style_corrections=style_corr,
+            style_status=style_status,
+            project_id=project.id,
         )
     except ArtifactStoreError as exc:
         return _artifact_exception_response(exc)
 
 
+@app.patch("/governor/artifacts/{artifact_id}")
+async def artifacts_update_lifecycle(
+    artifact_id: str,
+    request: ArtifactLifecycleRequest,
+    project_id: str | None = None,
+) -> dict:
+    """Update artifact status, tags, or trash state without a content revision."""
+    from gov_webui.artifact_store import ArtifactStoreError
+
+    try:
+        project = _project_record(project_id)
+        store = _get_artifact_store(project.id)
+        meta, idx_ver = store.set_lifecycle(
+            artifact_id,
+            status=request.status,
+            tags=request.tags,
+            trashed=request.trashed,
+        )
+        _, content, _ = store.get(artifact_id)
+        return _artifact_detail_response(
+            meta=meta,
+            content=content,
+            index_version=idx_ver,
+            project_id=project.id,
+        )
+    except ArtifactStoreError as exc:
+        return _artifact_exception_response(exc)
+
+
+@app.put("/governor/artifacts/{artifact_id}/working-copy")
+async def artifacts_save_working_copy(
+    artifact_id: str,
+    request: ArtifactWorkingCopyRequest,
+    project_id: str | None = None,
+) -> dict:
+    """Autosave draft text without creating a committed revision."""
+    from gov_webui.artifact_store import ArtifactStoreError
+
+    try:
+        project = _project_record(project_id)
+        store = _get_artifact_store(project.id)
+        meta, idx_ver = store.save_working_copy(
+            artifact_id,
+            content=request.content,
+            base_version=request.base_version,
+        )
+        return {
+            "ok": True,
+            "index_version": idx_ver,
+            "artifact": _artifact_meta_to_dict(meta, project_id=project.id),
+        }
+    except ArtifactStoreError as exc:
+        return _artifact_exception_response(exc)
+
+
+@app.delete("/governor/artifacts/{artifact_id}/working-copy")
+async def artifacts_discard_working_copy(
+    artifact_id: str,
+    project_id: str | None = None,
+) -> dict:
+    """Discard only autosaved text; committed revisions are preserved."""
+    from gov_webui.artifact_store import ArtifactStoreError
+
+    try:
+        project = _project_record(project_id)
+        meta, idx_ver = _get_artifact_store(project.id).discard_working_copy(artifact_id)
+        return {
+            "ok": True,
+            "index_version": idx_ver,
+            "artifact": _artifact_meta_to_dict(meta, project_id=project.id),
+        }
+    except ArtifactStoreError as exc:
+        return _artifact_exception_response(exc)
+
+
 @app.delete("/governor/artifacts/{artifact_id}")
-async def artifacts_delete(artifact_id: str) -> dict:
+async def artifacts_delete(artifact_id: str, project_id: str | None = None) -> dict:
     """Delete artifact from index."""
     from gov_webui.artifact_store import ArtifactStoreError
 
     try:
-        store = _get_artifact_store()
+        store = _get_artifact_store(project_id)
         _, idx_ver = store.delete(artifact_id)
         return {
             "ok": True,
@@ -4289,12 +5678,16 @@ async def artifacts_delete(artifact_id: str) -> dict:
 
 
 @app.get("/governor/artifacts/{artifact_id}/version/{version}")
-async def artifacts_get_version(artifact_id: str, version: int) -> dict:
+async def artifacts_get_version(
+    artifact_id: str,
+    version: int,
+    project_id: str | None = None,
+) -> dict:
     """Get content for a specific artifact version."""
     from gov_webui.artifact_store import ArtifactStoreError
 
     try:
-        store = _get_artifact_store()
+        store = _get_artifact_store(project_id)
         content = store.get_version(artifact_id, version)
         return {
             "ok": True,
@@ -4302,6 +5695,76 @@ async def artifacts_get_version(artifact_id: str, version: int) -> dict:
             "version": version,
             "content": content,
         }
+    except ArtifactStoreError as exc:
+        return _artifact_exception_response(exc)
+
+
+@app.get("/governor/artifacts/{artifact_id}/compare")
+async def artifacts_compare_versions(
+    artifact_id: str,
+    from_version: int,
+    to_version: int,
+    project_id: str | None = None,
+) -> dict:
+    """Return an inert unified diff between two committed revisions."""
+    from gov_webui.artifact_store import ArtifactStoreError
+
+    try:
+        store = _get_artifact_store(project_id)
+        before = store.get_version(artifact_id, from_version)
+        after = store.get_version(artifact_id, to_version)
+        diff_lines = list(
+            difflib.unified_diff(
+                before.splitlines(),
+                after.splitlines(),
+                fromfile=f"v{from_version}",
+                tofile=f"v{to_version}",
+                lineterm="",
+            )
+        )
+        return {
+            "ok": True,
+            "artifact_id": artifact_id,
+            "from_version": from_version,
+            "to_version": to_version,
+            "diff": "\n".join(diff_lines),
+            "added_lines": sum(
+                1 for line in diff_lines if line.startswith("+") and not line.startswith("+++")
+            ),
+            "removed_lines": sum(
+                1 for line in diff_lines if line.startswith("-") and not line.startswith("---")
+            ),
+        }
+    except ArtifactStoreError as exc:
+        return _artifact_exception_response(exc)
+
+
+@app.post("/governor/artifacts/{artifact_id}/version/{version}/restore")
+async def artifacts_restore_version(
+    artifact_id: str,
+    version: int,
+    request: ArtifactRestoreRequest,
+    project_id: str | None = None,
+) -> dict:
+    """Restore old text by creating a new revision; history is never rewritten."""
+    from gov_webui.artifact_store import ArtifactStoreError
+
+    try:
+        project = _project_record(project_id)
+        store = _get_artifact_store(project.id)
+        content = store.get_version(artifact_id, version)
+        meta, restored, idx_ver = store.update(
+            artifact_id,
+            content=content,
+            expected_current_version=request.expected_current_version,
+            source="restore",
+        )
+        return _artifact_detail_response(
+            meta=meta,
+            content=restored,
+            index_version=idx_ver,
+            project_id=project.id,
+        )
     except ArtifactStoreError as exc:
         return _artifact_exception_response(exc)
 
@@ -4316,13 +5779,18 @@ def _build_verify_report(dicts: list[dict]) -> dict:
     from receipt_v1.verify import verify_chain, verify_hash, verify_structure
 
     if not dicts:
-        return {"ok": True, "report": {
-            "scheme": "receipt_v1",
-            "receipt_count": 0, "valid": True,
-            "error_count": 0, "warning_count": 0,
-            "findings": [],
-            "summary": "No receipts to verify.",
-        }}
+        return {
+            "ok": True,
+            "report": {
+                "scheme": "receipt_v1",
+                "receipt_count": 0,
+                "valid": True,
+                "error_count": 0,
+                "warning_count": 0,
+                "findings": [],
+                "summary": "No receipts to verify.",
+            },
+        }
 
     findings: list[dict] = []
     receipt_version = dicts[0].get("receipt_version", "unknown")
@@ -4331,43 +5799,58 @@ def _build_verify_report(dicts: list[dict]) -> dict:
     for i, d in enumerate(dicts):
         sr = verify_structure(d)
         for err in sr.errors:
-            findings.append({
-                "level": "error", "code": "structure",
-                "receipt_index": i,
-                "receipt_id": d.get("receipt_id", "?"),
-                "message": err,
-            })
+            findings.append(
+                {
+                    "level": "error",
+                    "code": "structure",
+                    "receipt_index": i,
+                    "receipt_id": d.get("receipt_id", "?"),
+                    "message": err,
+                }
+            )
         for warn in sr.warnings:
-            findings.append({
-                "level": "warning", "code": "structure",
-                "receipt_index": i,
-                "receipt_id": d.get("receipt_id", "?"),
-                "message": warn,
-            })
+            findings.append(
+                {
+                    "level": "warning",
+                    "code": "structure",
+                    "receipt_index": i,
+                    "receipt_id": d.get("receipt_id", "?"),
+                    "message": warn,
+                }
+            )
 
     # 2. Hash verification each receipt
     for i, d in enumerate(dicts):
         hr = verify_hash(d)
         for err in hr.errors:
-            findings.append({
-                "level": "error", "code": "hash_mismatch",
-                "receipt_index": i,
-                "receipt_id": d.get("receipt_id", "?"),
-                "message": err,
-            })
+            findings.append(
+                {
+                    "level": "error",
+                    "code": "hash_mismatch",
+                    "receipt_index": i,
+                    "receipt_id": d.get("receipt_id", "?"),
+                    "message": err,
+                }
+            )
 
     # 3. Chain integrity
     cr = verify_chain(dicts)
     for err in cr.errors:
-        findings.append({
-            "level": "error", "code": "chain_break",
-            "message": err,
-        })
+        findings.append(
+            {
+                "level": "error",
+                "code": "chain_break",
+                "message": err,
+            }
+        )
     for warn in cr.warnings:
-        findings.append({
-            "level": "warning", "code": "chain_gap",
-            "message": warn,
-        })
+        findings.append(
+            {
+                "level": "warning",
+                "code": "chain_gap",
+                "message": warn,
+            }
+        )
 
     errors = [f for f in findings if f["level"] == "error"]
     warnings = [f for f in findings if f["level"] == "warning"]
@@ -4381,16 +5864,19 @@ def _build_verify_report(dicts: list[dict]) -> dict:
     if warnings:
         summary_parts.append(f"{len(warnings)} warnings")
 
-    return {"ok": True, "report": {
-        "scheme": "receipt_v1",
-        "receipt_version": receipt_version,
-        "receipt_count": len(dicts),
-        "valid": valid,
-        "error_count": len(errors),
-        "warning_count": len(warnings),
-        "findings": findings,
-        "summary": ", ".join(summary_parts),
-    }}
+    return {
+        "ok": True,
+        "report": {
+            "scheme": "receipt_v1",
+            "receipt_version": receipt_version,
+            "receipt_count": len(dicts),
+            "valid": valid,
+            "error_count": len(errors),
+            "warning_count": len(warnings),
+            "findings": findings,
+            "summary": ", ".join(summary_parts),
+        },
+    }
 
 
 @app.get("/governor/receipts/export")
@@ -4398,17 +5884,21 @@ async def export_receipt_chain():
     """Export all receipt_v1 records as canonical JSONL."""
     dicts = _load_receipt_v1_dicts()
     if not dicts:
-        return JSONResponse({"ok": False, "error": {"code": "no_receipts",
-                             "message": "No receipts to export"}}, status_code=404)
+        return JSONResponse(
+            {"ok": False, "error": {"code": "no_receipts", "message": "No receipts to export"}},
+            status_code=404,
+        )
     from receipt_v1.canonical import canonical_json
 
     lines = []
     for d in dicts:
         lines.append(canonical_json(d, check_floats=False).decode("utf-8"))
     content = "\n".join(lines) + "\n"
-    return Response(content=content, media_type="application/x-ndjson",
-                    headers={"Content-Disposition":
-                             'attachment; filename="receipts.jsonl"'})
+    return Response(
+        content=content,
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="receipts.jsonl"'},
+    )
 
 
 @app.post("/governor/receipts/verify")
@@ -4425,10 +5915,16 @@ async def verify_uploaded_receipts(request: Request):
     try:
         text = body.decode("utf-8")
     except UnicodeDecodeError as e:
-        return JSONResponse({"ok": False, "error": {
-            "code": "invalid_jsonl",
-            "message": f"Invalid UTF-8: {e}",
-        }}, status_code=400)
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": {
+                    "code": "invalid_jsonl",
+                    "message": f"Invalid UTF-8: {e}",
+                },
+            },
+            status_code=400,
+        )
 
     dicts = []
     for line_num, line in enumerate(text.splitlines(), 1):
@@ -4438,10 +5934,16 @@ async def verify_uploaded_receipts(request: Request):
         try:
             dicts.append(json.loads(line))
         except json.JSONDecodeError as e:
-            return JSONResponse({"ok": False, "error": {
-                "code": "invalid_jsonl",
-                "message": f"Invalid JSON on line {line_num}: {e}",
-            }}, status_code=400)
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "invalid_jsonl",
+                        "message": f"Invalid JSON on line {line_num}: {e}",
+                    },
+                },
+                status_code=400,
+            )
 
     return _build_verify_report(dicts)
 

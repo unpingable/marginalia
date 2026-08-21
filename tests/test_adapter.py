@@ -36,11 +36,20 @@ def mock_env(tmp_contexts_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def reset_adapter_globals() -> None:
     """Reset module-level globals between tests."""
     import gov_webui.adapter as adapter_mod
+
     adapter_mod._bridge = None
     adapter_mod._context_manager = None
     adapter_mod._session_store = None
     adapter_mod._governed_chat_adapter = None
     adapter_mod._creative_project_store = None
+    adapter_mod._library_store = None
+    adapter_mod._session_stores.clear()
+    adapter_mod._governed_chat_adapters.clear()
+    adapter_mod._creative_project_stores.clear()
+    adapter_mod._artifact_stores.clear()
+    adapter_mod._canon_review_stores.clear()
+    adapter_mod._manuscript_stores.clear()
+    adapter_mod._snapshot_stores.clear()
     adapter_mod._project_store = None
     adapter_mod._research_project_store = None
     adapter_mod._artifact_store = None
@@ -55,6 +64,14 @@ def reset_adapter_globals() -> None:
     adapter_mod._session_store = None
     adapter_mod._governed_chat_adapter = None
     adapter_mod._creative_project_store = None
+    adapter_mod._library_store = None
+    adapter_mod._session_stores.clear()
+    adapter_mod._governed_chat_adapters.clear()
+    adapter_mod._creative_project_stores.clear()
+    adapter_mod._artifact_stores.clear()
+    adapter_mod._canon_review_stores.clear()
+    adapter_mod._manuscript_stores.clear()
+    adapter_mod._snapshot_stores.clear()
     adapter_mod._project_store = None
     adapter_mod._research_project_store = None
     adapter_mod._artifact_store = None
@@ -71,6 +88,7 @@ def app(mock_env, reset_adapter_globals):
     # Re-import to pick up environment changes
     import importlib
     import gov_webui.adapter as adapter_mod
+
     importlib.reload(adapter_mod)
     return adapter_mod.app
 
@@ -80,6 +98,7 @@ def client(app):
     """Create a test client."""
     import gov_webui.adapter as adapter_mod
     from fastapi.testclient import TestClient
+
     adapter_mod._governed_chat_adapter = fake_governed_chat()
     return TestClient(app)
 
@@ -198,8 +217,15 @@ class TestModelsEndpoint:
 class TestChatEndpoint:
     """Tests for POST /v1/chat/completions (delegates to daemon)."""
 
-    def _make_mock_daemon(self, content="Hello from test", model="test-model",
-                          usage=None, violations=None, footer=None, pending=None):
+    def _make_mock_daemon(
+        self,
+        content="Hello from test",
+        model="test-model",
+        usage=None,
+        violations=None,
+        footer=None,
+        pending=None,
+    ):
         """Create an application-facing governed-chat fake."""
         return fake_governed_chat(
             content=content,
@@ -372,6 +398,7 @@ class TestGovernorEndpoints:
 
         # Need to inject this context manager
         import gov_webui.adapter as adapter_mod
+
         adapter_mod._context_manager = cm
 
         response = client.get("/governor/contexts")
@@ -495,6 +522,7 @@ class TestBackendSelection:
 
         import importlib
         import gov_webui.adapter as adapter_mod
+
         adapter_mod._bridge = None
         adapter_mod._context_manager = None
         importlib.reload(adapter_mod)
@@ -509,6 +537,7 @@ class TestBackendSelection:
 
         import importlib
         import gov_webui.adapter as adapter_mod
+
         adapter_mod._bridge = None
         adapter_mod._context_manager = None
         importlib.reload(adapter_mod)
@@ -522,6 +551,7 @@ class TestBackendSelection:
 
         import importlib
         import gov_webui.adapter as adapter_mod
+
         adapter_mod._bridge = None
         adapter_mod._context_manager = None
         importlib.reload(adapter_mod)
@@ -544,15 +574,18 @@ class TestStreamingResponse:
         async def mock_daemon_stream(*args, **kwargs):
             yield ("Hello ", None)
             yield ("world", None)
-            yield (None, {
-                "content": "Hello world",
-                "model": "test-model",
-                "usage": {},
-                "violations": [],
-                "footer": None,
-                "pending": None,
-                "receipt": authority_receipt(),
-            })
+            yield (
+                None,
+                {
+                    "content": "Hello world",
+                    "model": "test-model",
+                    "usage": {},
+                    "violations": [],
+                    "footer": None,
+                    "pending": None,
+                    "receipt": authority_receipt(),
+                },
+            )
 
         mock = AsyncMock()
         mock.chat_stream = MagicMock(return_value=mock_daemon_stream())
@@ -628,7 +661,15 @@ class TestGovernorNow:
         """Response has all expected keys."""
         response = client.get("/governor/now")
         data = response.json()
-        expected_keys = {"context_id", "status", "sentence", "last_event", "suggested_action", "regime", "mode"}
+        expected_keys = {
+            "context_id",
+            "status",
+            "sentence",
+            "last_event",
+            "suggested_action",
+            "regime",
+            "mode",
+        }
         assert expected_keys == set(data.keys())
 
     def test_status_is_valid_pill(self, client) -> None:
@@ -835,9 +876,18 @@ class TestGovernorStatusV2:
 
         response = client.get("/governor/status")
         vm = response.json()["viewmodel"]
-        expected_sections = {"schema_version", "generated_at", "session", "regime",
-                             "decisions", "claims", "evidence", "violations",
-                             "execution", "stability"}
+        expected_sections = {
+            "schema_version",
+            "generated_at",
+            "session",
+            "regime",
+            "decisions",
+            "claims",
+            "evidence",
+            "violations",
+            "execution",
+            "stability",
+        }
         assert expected_sections == set(vm.keys())
 
 
@@ -903,15 +953,17 @@ class TestGovernorFooterIntegration:
         import gov_webui.adapter as adapter_mod
 
         mock = AsyncMock()
-        mock.chat_send = AsyncMock(return_value={
-            "content": "Alice walked peacefully.",
-            "model": "test-model",
-            "usage": {},
-            "violations": [],
-            "footer": "[Governor] OK — 0 anchors checked",
-            "pending": None,
-            "receipt": authority_receipt(),
-        })
+        mock.chat_send = AsyncMock(
+            return_value={
+                "content": "Alice walked peacefully.",
+                "model": "test-model",
+                "usage": {},
+                "violations": [],
+                "footer": "[Governor] OK — 0 anchors checked",
+                "pending": None,
+                "receipt": authority_receipt(),
+            }
+        )
         adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
@@ -933,15 +985,18 @@ class TestGovernorFooterIntegration:
 
         async def mock_stream(*args, **kwargs):
             yield ("She was the chosen one.", None)
-            yield (None, {
-                "content": "She was the chosen one.",
-                "model": "test-model",
-                "usage": {},
-                "violations": [],
-                "footer": "[Governor] OK",
-                "pending": None,
-                "receipt": authority_receipt(),
-            })
+            yield (
+                None,
+                {
+                    "content": "She was the chosen one.",
+                    "model": "test-model",
+                    "usage": {},
+                    "violations": [],
+                    "footer": "[Governor] OK",
+                    "pending": None,
+                    "receipt": authority_receipt(),
+                },
+            )
 
         mock = AsyncMock()
         mock.chat_stream = MagicMock(return_value=mock_stream())
@@ -1103,9 +1158,9 @@ class TestSessionEndpoints:
         create_resp = client.post("/sessions/", json={"title": "Chat"})
         session_id = create_resp.json()["id"]
 
-        response = client.post(f"/sessions/{session_id}/messages", json={
-            "role": "user", "content": "Hello world"
-        })
+        response = client.post(
+            f"/sessions/{session_id}/messages", json={"role": "user", "content": "Hello world"}
+        )
         assert response.status_code == 200
         msg_data = response.json()
         assert msg_data["role"] == "user"
@@ -1130,15 +1185,12 @@ class TestSessionEndpoints:
         session_id = create_resp.json()["id"]
 
         # Add messages
-        client.post(f"/sessions/{session_id}/messages", json={
-            "role": "user", "content": "First"
-        })
-        client.post(f"/sessions/{session_id}/messages", json={
-            "role": "assistant", "content": "Response", "model": "m1"
-        })
-        client.post(f"/sessions/{session_id}/messages", json={
-            "role": "user", "content": "Second"
-        })
+        client.post(f"/sessions/{session_id}/messages", json={"role": "user", "content": "First"})
+        client.post(
+            f"/sessions/{session_id}/messages",
+            json={"role": "assistant", "content": "Response", "model": "m1"},
+        )
+        client.post(f"/sessions/{session_id}/messages", json={"role": "user", "content": "Second"})
 
         # Retrieve
         get_resp = client.get(f"/sessions/{session_id}")
@@ -1190,9 +1242,9 @@ class TestSessionEndpoints:
         adapter_mod._context_manager = cm
         adapter_mod._session_store = SessionStore(tmp_contexts_dir / "test-context" / "sessions")
 
-        response = client.post("/sessions/nonexistent/messages", json={
-            "role": "user", "content": "Hello"
-        })
+        response = client.post(
+            "/sessions/nonexistent/messages", json={"role": "user", "content": "Hello"}
+        )
         assert response.status_code == 404
 
     def test_update_title_missing_session(self, client, tmp_contexts_dir) -> None:
@@ -1255,9 +1307,15 @@ class TestExportImport:
         adapter_mod._context_manager = cm
 
         # Add a character via the POST endpoint
-        client.post("/governor/fiction/characters", json={
-            "name": "Elena", "description": "Tall, green eyes", "voice": "Formal", "wont": "Show weakness"
-        })
+        client.post(
+            "/governor/fiction/characters",
+            json={
+                "name": "Elena",
+                "description": "Tall, green eyes",
+                "voice": "Formal",
+                "wont": "Show weakness",
+            },
+        )
 
         response = client.get("/governor/export")
         data = response.json()
@@ -1370,6 +1428,7 @@ class TestExportImport:
     def test_import_no_context(self, client, tmp_contexts_dir) -> None:
         """POST /governor/import returns 400 when no context exists."""
         import gov_webui.adapter as adapter_mod
+
         adapter_mod._context_manager = GovernorContextManager(base_dir=tmp_contexts_dir)
 
         response = client.post("/governor/import", json={"anchors": []})
@@ -1578,13 +1637,15 @@ class TestResearchEndpoints:
         exported = client.get("/governor/export").json()
 
         # Add a new claim to the exported data
-        exported["research"]["claims"].append({
-            "id": "C-IMPORT1",
-            "content": "Imported",
-            "status": "floating",
-            "scope": "",
-            "created_at": "2024-01-01T00:00:00",
-        })
+        exported["research"]["claims"].append(
+            {
+                "id": "C-IMPORT1",
+                "content": "Imported",
+                "status": "floating",
+                "scope": "",
+                "created_at": "2024-01-01T00:00:00",
+            }
+        )
 
         result = client.post("/governor/import", json=exported).json()
         assert result["imported"] >= 1
@@ -1613,6 +1674,7 @@ class TestAuthMiddleware:
     def auth_app(self, auth_env):
         import importlib
         import gov_webui.adapter as adapter_mod
+
         adapter_mod._bridge = None
         adapter_mod._context_manager = None
         adapter_mod._session_store = None
@@ -1625,6 +1687,7 @@ class TestAuthMiddleware:
     @pytest.fixture
     def auth_client(self, auth_app):
         from fastapi.testclient import TestClient
+
         return TestClient(auth_app)
 
     def test_get_endpoints_open(self, auth_client) -> None:
@@ -1688,9 +1751,10 @@ class TestCaptureEndpoints:
 
     def test_scan_assigns_sequential_ids(self, client) -> None:
         """Each capture gets a unique sequential ID."""
-        resp = client.post("/governor/fiction/capture/scan", json={
-            "text": "Character: Alice is brave. Character: Bob is quiet."
-        })
+        resp = client.post(
+            "/governor/fiction/capture/scan",
+            json={"text": "Character: Alice is brave. Character: Bob is quiet."},
+        )
         data = resp.json()
         if len(data["captures"]) >= 2:
             ids = [c["id"] for c in data["captures"]]
@@ -1700,9 +1764,9 @@ class TestCaptureEndpoints:
 
     def test_scan_captures_start_pending(self, client) -> None:
         """All captures start with status 'pending'."""
-        resp = client.post("/governor/fiction/capture/scan", json={
-            "text": "Character: Elena is a warrior"
-        })
+        resp = client.post(
+            "/governor/fiction/capture/scan", json={"text": "Character: Elena is a warrior"}
+        )
         data = resp.json()
         for cap in data["captures"]:
             assert cap["status"] == "pending"
@@ -1715,10 +1779,13 @@ class TestCaptureEndpoints:
 
     def test_scan_preserves_message_id(self, client) -> None:
         """message_id from request is stored on captures."""
-        resp = client.post("/governor/fiction/capture/scan", json={
-            "text": "Character: Elena",
-            "message_id": "msg-42",
-        })
+        resp = client.post(
+            "/governor/fiction/capture/scan",
+            json={
+                "text": "Character: Elena",
+                "message_id": "msg-42",
+            },
+        )
         data = resp.json()
         for cap in data["captures"]:
             assert cap["message_id"] == "msg-42"
@@ -1733,9 +1800,9 @@ class TestCaptureEndpoints:
 
     def test_list_pending_after_scan(self, client) -> None:
         """Scanned captures appear in pending list."""
-        client.post("/governor/fiction/capture/scan", json={
-            "text": "Character: Elena is a warrior"
-        })
+        client.post(
+            "/governor/fiction/capture/scan", json={"text": "Character: Elena is a warrior"}
+        )
         resp = client.get("/governor/fiction/captures")
         data = resp.json()
         assert data["count"] >= 1
@@ -1750,9 +1817,9 @@ class TestCaptureEndpoints:
         adapter_mod._context_manager = cm
 
         # Scan to create a pending capture
-        scan_resp = client.post("/governor/fiction/capture/scan", json={
-            "text": "Character: Elena is a tall warrior"
-        })
+        scan_resp = client.post(
+            "/governor/fiction/capture/scan", json={"text": "Character: Elena is a tall warrior"}
+        )
         captures = scan_resp.json()["captures"]
         if not captures:
             pytest.skip("No captures detected from test text")
@@ -1760,10 +1827,13 @@ class TestCaptureEndpoints:
         cap_id = captures[0]["id"]
 
         # Accept it
-        resp = client.post(f"/governor/fiction/capture/{cap_id}/accept", json={
-            "name": "Elena",
-            "capture_type": "character",
-        })
+        resp = client.post(
+            f"/governor/fiction/capture/{cap_id}/accept",
+            json={
+                "name": "Elena",
+                "capture_type": "character",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
@@ -1777,19 +1847,18 @@ class TestCaptureEndpoints:
         cm.create("test-context", mode="fiction")
         adapter_mod._context_manager = cm
 
-        # Inject a pending capture directly
-        adapter_mod._pending_captures["cap-99"] = {
-            "id": "cap-99",
-            "kind": "world_rule",
-            "confidence": 0.9,
-            "subject": "",
-            "statement": "Magic requires spoken words",
-            "status": "pending",
-        }
+        candidate = adapter_mod._get_canon_review_store().add(
+            kind="world_rule",
+            confidence=0.9,
+            statement="Magic requires spoken words",
+        )
 
-        resp = client.post("/governor/fiction/capture/cap-99/accept", json={
-            "capture_type": "world_rule",
-        })
+        resp = client.post(
+            f"/governor/fiction/capture/{candidate.id}/accept",
+            json={
+                "capture_type": "world_rule",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
@@ -1803,18 +1872,18 @@ class TestCaptureEndpoints:
         cm.create("test-context", mode="fiction")
         adapter_mod._context_manager = cm
 
-        adapter_mod._pending_captures["cap-100"] = {
-            "id": "cap-100",
-            "kind": "constraint",
-            "confidence": 0.85,
-            "subject": "",
-            "statement": "No time travel allowed",
-            "status": "pending",
-        }
+        candidate = adapter_mod._get_canon_review_store().add(
+            kind="constraint",
+            confidence=0.85,
+            statement="No time travel allowed",
+        )
 
-        resp = client.post("/governor/fiction/capture/cap-100/accept", json={
-            "capture_type": "constraint",
-        })
+        resp = client.post(
+            f"/governor/fiction/capture/{candidate.id}/accept",
+            json={
+                "capture_type": "constraint",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
@@ -1833,19 +1902,21 @@ class TestCaptureEndpoints:
         cm.create("test-context", mode="fiction")
         adapter_mod._context_manager = cm
 
-        adapter_mod._pending_captures["cap-50"] = {
-            "id": "cap-50",
-            "kind": "character",
-            "confidence": 0.9,
-            "subject": "Bob",
-            "statement": "Bob is tall",
-            "status": "accepted",
-            "promoted_to": "char-bob",
-        }
+        store = adapter_mod._get_canon_review_store()
+        candidate = store.add(
+            kind="character",
+            confidence=0.9,
+            subject="Bob",
+            statement="Bob is tall",
+        )
+        store.resolve(candidate.id, status="accepted", promoted_to="char-bob")
 
-        resp = client.post("/governor/fiction/capture/cap-50/accept", json={
-            "name": "Bob",
-        })
+        resp = client.post(
+            f"/governor/fiction/capture/{candidate.id}/accept",
+            json={
+                "name": "Bob",
+            },
+        )
         assert resp.status_code == 400
         assert "already accepted" in resp.json()["detail"]
 
@@ -1853,20 +1924,19 @@ class TestCaptureEndpoints:
         """Rejecting a capture sets status to 'rejected'."""
         import gov_webui.adapter as adapter_mod
 
-        adapter_mod._pending_captures["cap-77"] = {
-            "id": "cap-77",
-            "kind": "character",
-            "confidence": 0.5,
-            "subject": "Nobody",
-            "statement": "Nobody is important",
-            "status": "pending",
-        }
+        store = adapter_mod._get_canon_review_store()
+        candidate = store.add(
+            kind="character",
+            confidence=0.5,
+            subject="Nobody",
+            statement="Nobody is important",
+        )
 
-        resp = client.post("/governor/fiction/capture/cap-77/reject")
+        resp = client.post(f"/governor/fiction/capture/{candidate.id}/reject")
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
-        assert adapter_mod._pending_captures["cap-77"]["status"] == "rejected"
+        assert store.get(candidate.id).status == "dismissed"
 
     def test_reject_nonexistent_capture_404(self, client) -> None:
         """Rejecting a nonexistent capture returns 404."""
@@ -1877,17 +1947,15 @@ class TestCaptureEndpoints:
         """Rejected captures don't appear in pending list."""
         import gov_webui.adapter as adapter_mod
 
-        adapter_mod._pending_captures["cap-88"] = {
-            "id": "cap-88",
-            "kind": "character",
-            "confidence": 0.5,
-            "subject": "Ghost",
-            "statement": "Ghost haunts the manor",
-            "status": "pending",
-        }
+        candidate = adapter_mod._get_canon_review_store().add(
+            kind="character",
+            confidence=0.5,
+            subject="Ghost",
+            statement="Ghost haunts the manor",
+        )
 
         # Reject it
-        client.post("/governor/fiction/capture/cap-88/reject")
+        client.post(f"/governor/fiction/capture/{candidate.id}/reject")
 
         # Should not appear in pending list
         resp = client.get("/governor/fiction/captures")
@@ -1902,28 +1970,30 @@ class TestCaptureEndpoints:
         cm.create("test-context", mode="fiction")
         adapter_mod._context_manager = cm
 
-        adapter_mod._pending_captures["cap-60"] = {
-            "id": "cap-60",
-            "kind": "character",
-            "confidence": 0.9,
-            "subject": "Zara",
-            "statement": "Zara is a thief",
-            "status": "pending",
-        }
+        candidate = adapter_mod._get_canon_review_store().add(
+            kind="character",
+            confidence=0.9,
+            subject="Zara",
+            statement="Zara is a thief",
+        )
 
-        client.post("/governor/fiction/capture/cap-60/accept", json={
-            "name": "Zara",
-            "capture_type": "character",
-        })
+        client.post(
+            f"/governor/fiction/capture/{candidate.id}/accept",
+            json={
+                "name": "Zara",
+                "capture_type": "character",
+            },
+        )
 
         resp = client.get("/governor/fiction/captures")
         assert resp.json()["count"] == 0
 
     def test_scan_with_rule_text(self, client) -> None:
         """Scanning text with rule patterns detects world_rule captures."""
-        resp = client.post("/governor/fiction/capture/scan", json={
-            "text": "Rule: Magic requires spoken words to function"
-        })
+        resp = client.post(
+            "/governor/fiction/capture/scan",
+            json={"text": "Rule: Magic requires spoken words to function"},
+        )
         data = resp.json()
         assert len(data["captures"]) >= 1
         kinds = [c["kind"] for c in data["captures"]]
@@ -1940,9 +2010,10 @@ class TestResearchCaptureEndpoints:
 
     def test_scan_detects_claim(self, client) -> None:
         """POST /governor/research/capture/scan detects claim patterns."""
-        resp = client.post("/governor/research/capture/scan", json={
-            "text": "Claim: Higher temperatures increase reaction rates."
-        })
+        resp = client.post(
+            "/governor/research/capture/scan",
+            json={"text": "Claim: Higher temperatures increase reaction rates."},
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["captures"]) >= 1
@@ -1950,9 +2021,10 @@ class TestResearchCaptureEndpoints:
 
     def test_scan_detects_doi(self, client) -> None:
         """DOI references are extracted as citation captures."""
-        resp = client.post("/governor/research/capture/scan", json={
-            "text": "See doi:10.1038/nature12373 for the original paper."
-        })
+        resp = client.post(
+            "/governor/research/capture/scan",
+            json={"text": "See doi:10.1038/nature12373 for the original paper."},
+        )
         data = resp.json()
         refs = [c for c in data["captures"] if c.get("draft", {}).get("ref_type") == "doi"]
         assert len(refs) >= 1
@@ -1960,27 +2032,27 @@ class TestResearchCaptureEndpoints:
 
     def test_scan_detects_cve(self, client) -> None:
         """CVE references are extracted as citation captures."""
-        resp = client.post("/governor/research/capture/scan", json={
-            "text": "This is related to CVE-2021-44228 (Log4Shell)."
-        })
+        resp = client.post(
+            "/governor/research/capture/scan",
+            json={"text": "This is related to CVE-2021-44228 (Log4Shell)."},
+        )
         data = resp.json()
         refs = [c for c in data["captures"] if c.get("draft", {}).get("ref_type") == "cve"]
         assert len(refs) >= 1
 
     def test_scan_detects_pypi(self, client) -> None:
         """PyPI references are extracted as citation captures."""
-        resp = client.post("/governor/research/capture/scan", json={
-            "text": "Install with pip install requests for HTTP."
-        })
+        resp = client.post(
+            "/governor/research/capture/scan",
+            json={"text": "Install with pip install requests for HTTP."},
+        )
         data = resp.json()
         refs = [c for c in data["captures"] if c.get("draft", {}).get("ref_type") == "pypi"]
         assert len(refs) >= 1
 
     def test_scan_ids_prefixed_rcap(self, client) -> None:
         """Research captures get rcap- prefix (distinguishes from fiction cap-)."""
-        resp = client.post("/governor/research/capture/scan", json={
-            "text": "Claim: X is true."
-        })
+        resp = client.post("/governor/research/capture/scan", json={"text": "Claim: X is true."})
         data = resp.json()
         if data["captures"]:
             assert data["captures"][0]["id"].startswith("rcap-")
@@ -1993,9 +2065,10 @@ class TestResearchCaptureEndpoints:
 
     def test_list_pending_after_scan(self, client) -> None:
         """Scanned captures appear in pending list."""
-        client.post("/governor/research/capture/scan", json={
-            "text": "Claim: The system converges under load."
-        })
+        client.post(
+            "/governor/research/capture/scan",
+            json={"text": "Claim: The system converges under load."},
+        )
         resp = client.get("/governor/research/captures")
         assert resp.json()["count"] >= 1
 
@@ -2155,9 +2228,9 @@ class TestWhyOverlay:
 
     def test_floating_ref_detected(self, client) -> None:
         """Source ref not in accepted list is flagged as floating."""
-        resp = client.post("/governor/research/why", json={
-            "text": "See doi:10.9999/ghost for more."
-        })
+        resp = client.post(
+            "/governor/research/why", json={"text": "See doi:10.9999/ghost for more."}
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["floating"]) == 1
@@ -2165,9 +2238,10 @@ class TestWhyOverlay:
 
     def test_candidate_source_detected(self, client) -> None:
         """CANDIDATE_SOURCE lines are extracted."""
-        resp = client.post("/governor/research/why", json={
-            "text": "I found a new paper.\nCANDIDATE_SOURCE: doi:10.1234/new"
-        })
+        resp = client.post(
+            "/governor/research/why",
+            json={"text": "I found a new paper.\nCANDIDATE_SOURCE: doi:10.1234/new"},
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["referenced"]["candidates"]) == 1
@@ -2182,9 +2256,10 @@ class TestWhyOverlay:
         store = ResearchStore(ctx.governor_dir)
         store.add_claim("Test claim", source_ref="doi:10.1234/accepted")
 
-        resp = client.post("/governor/research/why", json={
-            "text": "Based on doi:10.1234/accepted, the result is clear."
-        })
+        resp = client.post(
+            "/governor/research/why",
+            json={"text": "Based on doi:10.1234/accepted, the result is clear."},
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["injected"]["source_count"] == 1
@@ -2201,9 +2276,10 @@ class TestWhyOverlay:
         store = ResearchStore(ctx.governor_dir)
         store.add_claim("Known source", source_ref="doi:10.1234/known")
 
-        resp = client.post("/governor/research/why", json={
-            "text": "See doi:10.1234/known and also doi:10.9999/ghost."
-        })
+        resp = client.post(
+            "/governor/research/why",
+            json={"text": "See doi:10.1234/known and also doi:10.9999/ghost."},
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["matched"]) == 1
@@ -2239,9 +2315,10 @@ class TestUninitializedContext:
 
     def test_fiction_characters_post_uninitialized(self, client) -> None:
         """POST /governor/fiction/characters returns 400 with detail when no context."""
-        resp = client.post("/governor/fiction/characters", json={
-            "name": "Alice", "description": "Brave", "voice": "Dry", "wont": ""
-        })
+        resp = client.post(
+            "/governor/fiction/characters",
+            json={"name": "Alice", "description": "Brave", "voice": "Dry", "wont": ""},
+        )
         assert resp.status_code == 400
         data = resp.json()
         assert "detail" in data
@@ -2268,9 +2345,10 @@ class TestUninitializedContext:
 
     def test_code_decisions_post_uninitialized(self, client) -> None:
         """POST /governor/code/decisions returns 400 when no context."""
-        resp = client.post("/governor/code/decisions", json={
-            "decision": "framework: react", "rationale": "popular"
-        })
+        resp = client.post(
+            "/governor/code/decisions",
+            json={"decision": "framework: react", "rationale": "popular"},
+        )
         assert resp.status_code == 400
         assert "detail" in resp.json()
 
@@ -2293,9 +2371,15 @@ class TestInitializedFictionCRUD:
         adapter_mod._context_manager = cm
 
         # Add character
-        resp = client.post("/governor/fiction/characters", json={
-            "name": "Elena", "description": "Tall", "voice": "Formal", "wont": "Show weakness"
-        })
+        resp = client.post(
+            "/governor/fiction/characters",
+            json={
+                "name": "Elena",
+                "description": "Tall",
+                "voice": "Formal",
+                "wont": "Show weakness",
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["success"] is True
 
@@ -2352,6 +2436,7 @@ class TestCodeBuilderProject:
     def _init_code_context(self, tmp_contexts_dir):
         """Helper: create a code-mode context and wire up the adapter."""
         import gov_webui.adapter as adapter_mod
+
         cm = GovernorContextManager(base_dir=tmp_contexts_dir)
         cm.create("test-context", mode="code")
         adapter_mod._context_manager = cm
@@ -2368,9 +2453,9 @@ class TestCodeBuilderProject:
 
     def test_put_intent(self, client, tmp_contexts_dir) -> None:
         self._init_code_context(tmp_contexts_dir)
-        resp = client.put("/governor/code/project/intent", json={
-            "text": "Parse CSV files", "locked": False
-        })
+        resp = client.put(
+            "/governor/code/project/intent", json={"text": "Parse CSV files", "locked": False}
+        )
         assert resp.status_code == 200
         assert resp.json()["intent"]["text"] == "Parse CSV files"
 
@@ -2380,20 +2465,23 @@ class TestCodeBuilderProject:
 
     def test_put_intent_lock(self, client, tmp_contexts_dir) -> None:
         self._init_code_context(tmp_contexts_dir)
-        resp = client.put("/governor/code/project/intent", json={
-            "text": "Locked intent", "locked": True
-        })
+        resp = client.put(
+            "/governor/code/project/intent", json={"text": "Locked intent", "locked": True}
+        )
         assert resp.json()["intent"]["locked"] is True
 
     def test_put_contract(self, client, tmp_contexts_dir) -> None:
         self._init_code_context(tmp_contexts_dir)
-        resp = client.put("/governor/code/project/contract", json={
-            "description": "CSV parser",
-            "inputs": [{"name": "filepath", "type": "str"}],
-            "outputs": [{"name": "rows", "type": "list"}],
-            "constraints": ["No pandas"],
-            "transport": "stdio"
-        })
+        resp = client.put(
+            "/governor/code/project/contract",
+            json={
+                "description": "CSV parser",
+                "inputs": [{"name": "filepath", "type": "str"}],
+                "outputs": [{"name": "rows", "type": "list"}],
+                "constraints": ["No pandas"],
+                "transport": "stdio",
+            },
+        )
         assert resp.status_code == 200
         contract = resp.json()["contract"]
         assert contract["description"] == "CSV parser"
@@ -2407,14 +2495,13 @@ class TestCodeBuilderProject:
         v = state["version"]
 
         # Update once (bumps version)
-        client.put("/governor/code/project/intent", json={
-            "text": "first", "locked": False
-        })
+        client.put("/governor/code/project/intent", json={"text": "first", "locked": False})
 
         # Try with stale version
-        resp = client.put("/governor/code/project/intent", json={
-            "text": "second", "locked": False, "expected_version": v
-        })
+        resp = client.put(
+            "/governor/code/project/intent",
+            json={"text": "second", "locked": False, "expected_version": v},
+        )
         assert resp.status_code == 409
 
 
@@ -2423,6 +2510,7 @@ class TestCodeBuilderPlan:
 
     def _init_code_context(self, tmp_contexts_dir):
         import gov_webui.adapter as adapter_mod
+
         cm = GovernorContextManager(base_dir=tmp_contexts_dir)
         cm.create("test-context", mode="code")
         adapter_mod._context_manager = cm
@@ -2433,9 +2521,9 @@ class TestCodeBuilderPlan:
         resp = client.post("/governor/code/plan/phase", json={"name": "Build"})
         assert resp.status_code == 200
 
-        resp = client.post("/governor/code/plan/item", json={
-            "phase_idx": 0, "text": "Write parser"
-        })
+        resp = client.post(
+            "/governor/code/plan/item", json={"phase_idx": 0, "text": "Write parser"}
+        )
         assert resp.status_code == 200
         assert resp.json()["item"]["id"] == "p0-0"
 
@@ -2485,6 +2573,7 @@ class TestCodeBuilderFiles:
 
     def _init_code_context(self, tmp_contexts_dir):
         import gov_webui.adapter as adapter_mod
+
         cm = GovernorContextManager(base_dir=tmp_contexts_dir)
         cm.create("test-context", mode="code")
         adapter_mod._context_manager = cm
@@ -2492,9 +2581,10 @@ class TestCodeBuilderFiles:
 
     def test_put_and_get_file(self, client, tmp_contexts_dir) -> None:
         self._init_code_context(tmp_contexts_dir)
-        resp = client.put("/governor/code/files/tool.py", json={
-            "content": "print('hello')\n", "turn_id": "turn-abc123"
-        })
+        resp = client.put(
+            "/governor/code/files/tool.py",
+            json={"content": "print('hello')\n", "turn_id": "turn-abc123"},
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["version"] == 1
@@ -2535,15 +2625,14 @@ class TestCodeBuilderFiles:
         Test the store directly for completeness."""
         self._init_code_context(tmp_contexts_dir)
         import gov_webui.adapter as adapter_mod
+
         store = adapter_mod._get_project_store()
         with pytest.raises(ValueError, match="traversal"):
             store.put_file("../escape.py", "nope")
 
     def test_path_safety_rejects_bad_extension(self, client, tmp_contexts_dir) -> None:
         self._init_code_context(tmp_contexts_dir)
-        resp = client.put("/governor/code/files/script.sh", json={
-            "content": "#!/bin/bash"
-        })
+        resp = client.put("/governor/code/files/script.sh", json={"content": "#!/bin/bash"})
         assert resp.status_code == 400
 
     def test_file_not_found(self, client, tmp_contexts_dir) -> None:
@@ -2557,6 +2646,7 @@ class TestCodeBuilderRun:
 
     def _init_code_context(self, tmp_contexts_dir):
         import gov_webui.adapter as adapter_mod
+
         cm = GovernorContextManager(base_dir=tmp_contexts_dir)
         cm.create("test-context", mode="code")
         adapter_mod._context_manager = cm
@@ -2564,9 +2654,7 @@ class TestCodeBuilderRun:
 
     def test_run_success(self, client, tmp_contexts_dir) -> None:
         self._init_code_context(tmp_contexts_dir)
-        client.put("/governor/code/files/tool.py", json={
-            "content": "print('hello world')"
-        })
+        client.put("/governor/code/files/tool.py", json={"content": "print('hello world')"})
 
         resp = client.post("/governor/code/run", json={"filepath": "tool.py"})
         assert resp.status_code == 200
@@ -2577,9 +2665,7 @@ class TestCodeBuilderRun:
 
     def test_run_failure(self, client, tmp_contexts_dir) -> None:
         self._init_code_context(tmp_contexts_dir)
-        client.put("/governor/code/files/tool.py", json={
-            "content": "raise ValueError('boom')"
-        })
+        client.put("/governor/code/files/tool.py", json={"content": "raise ValueError('boom')"})
 
         resp = client.post("/governor/code/run", json={"filepath": "tool.py"})
         data = resp.json()
@@ -2589,13 +2675,9 @@ class TestCodeBuilderRun:
 
     def test_run_timeout(self, client, tmp_contexts_dir) -> None:
         self._init_code_context(tmp_contexts_dir)
-        client.put("/governor/code/files/tool.py", json={
-            "content": "import time; time.sleep(10)"
-        })
+        client.put("/governor/code/files/tool.py", json={"content": "import time; time.sleep(10)"})
 
-        resp = client.post("/governor/code/run", json={
-            "filepath": "tool.py", "timeout": 1
-        })
+        resp = client.post("/governor/code/run", json={"filepath": "tool.py", "timeout": 1})
         data = resp.json()
         assert data["success"] is False
         assert "timeout" in data["stderr"].lower()
@@ -2615,12 +2697,14 @@ class TestCodeBuilderRun:
     def test_run_multifile(self, client, tmp_contexts_dir) -> None:
         """File A imports file B — both should be available in tempdir."""
         self._init_code_context(tmp_contexts_dir)
-        client.put("/governor/code/files/helper.py", json={
-            "content": "def greet():\n    return 'hi from helper'"
-        })
-        client.put("/governor/code/files/tool.py", json={
-            "content": "from helper import greet\nprint(greet())"
-        })
+        client.put(
+            "/governor/code/files/helper.py",
+            json={"content": "def greet():\n    return 'hi from helper'"},
+        )
+        client.put(
+            "/governor/code/files/tool.py",
+            json={"content": "from helper import greet\nprint(greet())"},
+        )
 
         resp = client.post("/governor/code/run", json={"filepath": "tool.py"})
         data = resp.json()
@@ -2629,13 +2713,12 @@ class TestCodeBuilderRun:
 
     def test_run_with_stdin(self, client, tmp_contexts_dir) -> None:
         self._init_code_context(tmp_contexts_dir)
-        client.put("/governor/code/files/tool.py", json={
-            "content": "import sys; print(sys.stdin.read().upper())"
-        })
+        client.put(
+            "/governor/code/files/tool.py",
+            json={"content": "import sys; print(sys.stdin.read().upper())"},
+        )
 
-        resp = client.post("/governor/code/run", json={
-            "filepath": "tool.py", "stdin": "hello"
-        })
+        resp = client.post("/governor/code/run", json={"filepath": "tool.py", "stdin": "hello"})
         data = resp.json()
         assert data["success"] is True
         assert "HELLO" in data["stdout"]
@@ -2665,20 +2748,24 @@ class TestConstraintsInjection:
         adapter_mod._context_manager = cm
 
         from fastapi.testclient import TestClient
+
         client = TestClient(adapter_mod.app, raise_server_exceptions=False)
 
         # Set contract with config
-        client.put("/governor/code/project/contract", json={
-            "description": "test",
-            "config": {
-                "artifact_type": "tool",
-                "length": "medium",
-                "voice": ["dry", "wry"],
-                "citations": "none",
-                "bans": ["studies show"],
-                "strict": False,
+        client.put(
+            "/governor/code/project/contract",
+            json={
+                "description": "test",
+                "config": {
+                    "artifact_type": "tool",
+                    "length": "medium",
+                    "voice": ["dry", "wry"],
+                    "citations": "none",
+                    "bans": ["studies show"],
+                    "strict": False,
+                },
             },
-        })
+        )
 
         msg, meta = adapter_mod._build_constraints_message()
         assert msg is not None
@@ -2709,12 +2796,16 @@ class TestConstraintsInjection:
         adapter_mod._context_manager = cm
 
         from fastapi.testclient import TestClient
+
         client = TestClient(adapter_mod.app, raise_server_exceptions=False)
 
-        client.put("/governor/code/project/contract", json={
-            "description": "test",
-            "config": {"artifact_type": "tool", "length": "short"},
-        })
+        client.put(
+            "/governor/code/project/contract",
+            json={
+                "description": "test",
+                "config": {"artifact_type": "tool", "length": "short"},
+            },
+        )
 
         # Simulate message injection
         messages = [
@@ -2753,12 +2844,16 @@ class TestConstraintsInjection:
         adapter_mod._context_manager = cm
 
         from fastapi.testclient import TestClient
+
         client = TestClient(adapter_mod.app, raise_server_exceptions=False)
 
         # Set contract without config
-        client.put("/governor/code/project/contract", json={
-            "description": "test",
-        })
+        client.put(
+            "/governor/code/project/contract",
+            json={
+                "description": "test",
+            },
+        )
 
         msg, meta = adapter_mod._build_constraints_message()
         assert msg is None  # No constraints, no config
@@ -2791,12 +2886,16 @@ class TestConstraintsInjection:
         adapter_mod._context_manager = cm
 
         from fastapi.testclient import TestClient
+
         client = TestClient(adapter_mod.app, raise_server_exceptions=False)
 
-        client.put("/governor/code/project/contract", json={
-            "description": "test",
-            "constraints": ["No pandas", "Handle UTF-8"],
-        })
+        client.put(
+            "/governor/code/project/contract",
+            json={
+                "description": "test",
+                "constraints": ["No pandas", "Handle UTF-8"],
+            },
+        )
 
         msg, meta = adapter_mod._build_constraints_message()
         assert msg is not None
@@ -2818,8 +2917,9 @@ class TestConstraintsInjection:
 class TestReceipt:
     """Tests for per-turn receipt in SSE and non-streaming responses."""
 
-    def _make_mock_daemon(self, content="Hello from test", model="test-model",
-                          usage=None, footer=None, pending=None):
+    def _make_mock_daemon(
+        self, content="Hello from test", model="test-model", usage=None, footer=None, pending=None
+    ):
         return fake_governed_chat(
             content=content,
             model=model,
@@ -2835,15 +2935,18 @@ class TestReceipt:
         async def mock_stream(*args, **kwargs):
             yield ("Hello ", None)
             yield ("world", None)
-            yield (None, {
-                "content": "Hello world",
-                "model": "test-model",
-                "usage": {},
-                "violations": [],
-                "footer": None,
-                "pending": None,
-                "receipt": authority_receipt(),
-            })
+            yield (
+                None,
+                {
+                    "content": "Hello world",
+                    "model": "test-model",
+                    "usage": {},
+                    "violations": [],
+                    "footer": None,
+                    "pending": None,
+                    "receipt": authority_receipt(),
+                },
+            )
 
         mock = AsyncMock()
         mock.chat_stream = MagicMock(return_value=mock_stream())
@@ -2937,6 +3040,7 @@ class FakeArtifactStore:
             ArtifactVersionNotFoundError,
             StaleArtifactVersionError,
         )
+
         self._NotFound = ArtifactNotFoundError
         self._VersionNotFound = ArtifactVersionNotFoundError
         self._Stale = StaleArtifactVersionError
@@ -2945,46 +3049,94 @@ class FakeArtifactStore:
         self._Version = ArtifactVersion
         self._Summary = ArtifactSummary
 
-        self._artifacts = {}   # id -> {meta, versions_content}
+        self._artifacts = {}  # id -> {meta, versions_content}
         self._index_version = 1
 
-    def create(self, *, title, content, kind="text", language="",
-               message_id=None, source="manual", source_turn_seq=None):
+    def create(
+        self,
+        *,
+        title,
+        content,
+        kind="text",
+        artifact_type="draft",
+        project_id="",
+        status="idea",
+        tags=None,
+        language="",
+        message_id=None,
+        conversation_id=None,
+        source_message_ids=None,
+        source="manual",
+        source_turn_seq=None,
+    ):
         if kind not in ("text", "markdown", "code"):
             raise self._Validation(f"Invalid kind '{kind}'")
         aid = f"fake{len(self._artifacts):04d}"
         now = "2026-02-21T00:00:00+00:00"
         ver = self._Version(
-            version=1, created_at=now, content_hash="abcd1234abcd1234",
-            source=source, message_id=message_id,
+            version=1,
+            created_at=now,
+            content_hash="abcd1234abcd1234",
+            source=source,
+            message_id=message_id,
             source_turn_seq=source_turn_seq,
         )
         meta = self._Meta(
-            id=aid, title=title, kind=kind, language=language,
-            current_version=1, versions=[ver], created_at=now, updated_at=now,
+            id=aid,
+            title=title,
+            kind=kind,
+            artifact_type=artifact_type,
+            project_id=project_id,
+            status=status,
+            tags=tags or [],
+            provenance={
+                "conversation_id": conversation_id,
+                "message_ids": source_message_ids or ([message_id] if message_id else []),
+                "captured_at": now,
+            },
+            language=language,
+            current_version=1,
+            versions=[ver],
+            created_at=now,
+            updated_at=now,
         )
         self._artifacts[aid] = {"meta": meta, "content": {1: content}}
         self._index_version += 1
         return meta, content, self._index_version
 
-    def update(self, artifact_id, *, content, title=None,
-               expected_current_version=None, source="manual", message_id=None,
-               source_turn_seq=None):
+    def update(
+        self,
+        artifact_id,
+        *,
+        content,
+        title=None,
+        expected_current_version=None,
+        source="manual",
+        message_id=None,
+        source_turn_seq=None,
+    ):
         if artifact_id not in self._artifacts:
             raise self._NotFound(artifact_id)
         entry = self._artifacts[artifact_id]
         meta = entry["meta"]
-        if (expected_current_version is not None
-                and expected_current_version != meta.current_version):
+        if (
+            expected_current_version is not None
+            and expected_current_version != meta.current_version
+        ):
             raise self._Stale(
-                artifact_id, expected_current_version,
-                meta.current_version, self._index_version,
+                artifact_id,
+                expected_current_version,
+                meta.current_version,
+                self._index_version,
             )
         now = "2026-02-21T00:00:01+00:00"
         new_ver = meta.current_version + 1
         ver = self._Version(
-            version=new_ver, created_at=now, content_hash="efgh5678efgh5678",
-            source=source, message_id=message_id,
+            version=new_ver,
+            created_at=now,
+            content_hash="efgh5678efgh5678",
+            source=source,
+            message_id=message_id,
             source_turn_seq=source_turn_seq,
         )
         meta.current_version = new_ver
@@ -3012,13 +3164,67 @@ class FakeArtifactStore:
             raise self._VersionNotFound(artifact_id, version)
         return entry["content"][version]
 
+    def save_working_copy(self, artifact_id, *, content, base_version):
+        if artifact_id not in self._artifacts:
+            raise self._NotFound(artifact_id)
+        meta = self._artifacts[artifact_id]["meta"]
+        if base_version != meta.current_version:
+            raise self._Stale(
+                artifact_id, base_version, meta.current_version, self._index_version
+            )
+        meta.working_copy_updated_at = "2026-02-21T00:00:02+00:00"
+        meta.working_copy_base_version = base_version
+        self._artifacts[artifact_id]["working_copy"] = content
+        self._index_version += 1
+        return meta, self._index_version
+
+    def get_working_copy(self, artifact_id):
+        if artifact_id not in self._artifacts:
+            raise self._NotFound(artifact_id)
+        meta = self._artifacts[artifact_id]["meta"]
+        return self._artifacts[artifact_id].get("working_copy"), meta.working_copy_base_version
+
+    def discard_working_copy(self, artifact_id):
+        if artifact_id not in self._artifacts:
+            raise self._NotFound(artifact_id)
+        meta = self._artifacts[artifact_id]["meta"]
+        self._artifacts[artifact_id].pop("working_copy", None)
+        meta.working_copy_updated_at = None
+        meta.working_copy_base_version = None
+        self._index_version += 1
+        return meta, self._index_version
+
+    def set_lifecycle(self, artifact_id, *, status=None, tags=None, trashed=None):
+        if artifact_id not in self._artifacts:
+            raise self._NotFound(artifact_id)
+        meta = self._artifacts[artifact_id]["meta"]
+        if status is not None:
+            meta.status = status
+        if tags is not None:
+            meta.tags = tags
+        if trashed is not None:
+            meta.trashed_at = "2026-02-21T00:00:03+00:00" if trashed else None
+        self._index_version += 1
+        return meta, self._index_version
+
     def list_all(self):
         summaries = [
             self._Summary(
-                id=m["meta"].id, title=m["meta"].title, kind=m["meta"].kind,
+                id=m["meta"].id,
+                title=m["meta"].title,
+                kind=m["meta"].kind,
+                artifact_type=m["meta"].artifact_type,
+                project_id=m["meta"].project_id,
+                provenance=m["meta"].provenance,
+                status=m["meta"].status,
+                tags=m["meta"].tags,
+                trashed_at=m["meta"].trashed_at,
+                working_copy_updated_at=m["meta"].working_copy_updated_at,
+                working_copy_base_version=m["meta"].working_copy_base_version,
                 language=m["meta"].language,
                 current_version=m["meta"].current_version,
-                created_at=m["meta"].created_at, updated_at=m["meta"].updated_at,
+                created_at=m["meta"].created_at,
+                updated_at=m["meta"].updated_at,
             )
             for m in self._artifacts.values()
         ]
@@ -3047,6 +3253,7 @@ class FakeArtifactStore:
 def fake_artifact_store(app, monkeypatch):
     """Inject FakeArtifactStore into the adapter module."""
     import gov_webui.adapter as adapter_mod
+
     fake = FakeArtifactStore()
     monkeypatch.setattr(adapter_mod, "_artifact_store", fake)
     return fake
@@ -3071,9 +3278,14 @@ def test_artifacts_list_returns_metadata_only(art_client, fake_artifact_store):
 
 
 def test_artifacts_create_returns_detail_and_content(art_client):
-    resp = art_client.post("/governor/artifacts", json={
-        "title": "My Draft", "content": "Draft body", "kind": "markdown",
-    })
+    resp = art_client.post(
+        "/governor/artifacts",
+        json={
+            "title": "My Draft",
+            "content": "Draft body",
+            "kind": "markdown",
+        },
+    )
     assert resp.status_code == 201
     data = resp.json()
     assert data["ok"] is True
@@ -3085,9 +3297,14 @@ def test_artifacts_create_returns_detail_and_content(art_client):
 
 
 def test_artifacts_create_validation_error_shape(art_client):
-    resp = art_client.post("/governor/artifacts", json={
-        "title": "Bad", "content": "x", "kind": "spreadsheet",
-    })
+    resp = art_client.post(
+        "/governor/artifacts",
+        json={
+            "title": "Bad",
+            "content": "x",
+            "kind": "spreadsheet",
+        },
+    )
     assert resp.status_code == 422
     data = resp.json()
     assert data["ok"] is False
@@ -3114,9 +3331,13 @@ def test_artifacts_get_not_found(art_client):
 
 def test_artifacts_update_bumps_version(art_client, fake_artifact_store):
     meta, _, _ = fake_artifact_store.create(title="Upd", content="v1", kind="text")
-    resp = art_client.put(f"/governor/artifacts/{meta.id}", json={
-        "content": "v2 content", "expected_current_version": 1,
-    })
+    resp = art_client.put(
+        f"/governor/artifacts/{meta.id}",
+        json={
+            "content": "v2 content",
+            "expected_current_version": 1,
+        },
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True
@@ -3128,9 +3349,13 @@ def test_artifacts_update_stale_returns_409(art_client, fake_artifact_store):
     meta, _, _ = fake_artifact_store.create(title="Stale", content="v1", kind="text")
     fake_artifact_store.update(meta.id, content="v2", expected_current_version=1)
 
-    resp = art_client.put(f"/governor/artifacts/{meta.id}", json={
-        "content": "v3", "expected_current_version": 1,
-    })
+    resp = art_client.put(
+        f"/governor/artifacts/{meta.id}",
+        json={
+            "content": "v3",
+            "expected_current_version": 1,
+        },
+    )
     assert resp.status_code == 409
     data = resp.json()
     assert data["ok"] is False
@@ -3190,10 +3415,16 @@ def test_artifacts_state_endpoint(art_client, fake_artifact_store):
 
 def test_artifact_create_with_source_turn_seq(art_client):
     """POST with source_turn_seq → response version includes it."""
-    resp = art_client.post("/governor/artifacts", json={
-        "title": "Turn Test", "content": "body", "kind": "text",
-        "source": "promote", "source_turn_seq": 3,
-    })
+    resp = art_client.post(
+        "/governor/artifacts",
+        json={
+            "title": "Turn Test",
+            "content": "body",
+            "kind": "text",
+            "source": "promote",
+            "source_turn_seq": 3,
+        },
+    )
     assert resp.status_code == 201
     data = resp.json()
     assert data["ok"] is True
@@ -3203,9 +3434,14 @@ def test_artifact_create_with_source_turn_seq(art_client):
 
 def test_artifact_create_without_source_turn_seq(art_client):
     """POST without source_turn_seq → field is null in response."""
-    resp = art_client.post("/governor/artifacts", json={
-        "title": "No Turn", "content": "body", "kind": "text",
-    })
+    resp = art_client.post(
+        "/governor/artifacts",
+        json={
+            "title": "No Turn",
+            "content": "body",
+            "kind": "text",
+        },
+    )
     assert resp.status_code == 201
     data = resp.json()
     v = data["artifact"]["versions"][0]
@@ -3215,10 +3451,15 @@ def test_artifact_create_without_source_turn_seq(art_client):
 def test_artifact_update_with_source_turn_seq(art_client, fake_artifact_store):
     """PUT with source_turn_seq → new version has it."""
     meta, _, _ = fake_artifact_store.create(title="Upd", content="v1", kind="text")
-    resp = art_client.put(f"/governor/artifacts/{meta.id}", json={
-        "content": "v2 content", "expected_current_version": 1,
-        "source": "promote", "source_turn_seq": 7,
-    })
+    resp = art_client.put(
+        f"/governor/artifacts/{meta.id}",
+        json={
+            "content": "v2 content",
+            "expected_current_version": 1,
+            "source": "promote",
+            "source_turn_seq": 7,
+        },
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True
@@ -3232,10 +3473,15 @@ def test_artifact_update_preserves_concurrency_with_turn_seq(art_client, fake_ar
     meta, _, _ = fake_artifact_store.create(title="Conc", content="v1", kind="text")
     fake_artifact_store.update(meta.id, content="v2", expected_current_version=1)
 
-    resp = art_client.put(f"/governor/artifacts/{meta.id}", json={
-        "content": "v3", "expected_current_version": 1,
-        "source": "promote", "source_turn_seq": 5,
-    })
+    resp = art_client.put(
+        f"/governor/artifacts/{meta.id}",
+        json={
+            "content": "v3",
+            "expected_current_version": 1,
+            "source": "promote",
+            "source_turn_seq": 5,
+        },
+    )
     assert resp.status_code == 409
     data = resp.json()
     assert data["ok"] is False
@@ -3245,15 +3491,20 @@ def test_artifact_update_preserves_concurrency_with_turn_seq(art_client, fake_ar
 def test_artifact_promote_as_revision_flow(art_client, fake_artifact_store):
     """Full promote-as-revision: create, then PUT with source=promote + message_id + source_turn_seq."""
     meta, _, _ = fake_artifact_store.create(
-        title="Original", content="v1", kind="markdown",
+        title="Original",
+        content="v1",
+        kind="markdown",
     )
-    resp = art_client.put(f"/governor/artifacts/{meta.id}", json={
-        "content": "revised content",
-        "expected_current_version": 1,
-        "source": "promote",
-        "message_id": "msg-xyz-789",
-        "source_turn_seq": 12,
-    })
+    resp = art_client.put(
+        f"/governor/artifacts/{meta.id}",
+        json={
+            "content": "revised content",
+            "expected_current_version": 1,
+            "source": "promote",
+            "message_id": "msg-xyz-789",
+            "source_turn_seq": 12,
+        },
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True
@@ -3268,11 +3519,17 @@ def test_artifact_promote_as_revision_flow(art_client, fake_artifact_store):
 def test_artifact_version_history_includes_turn_seq(art_client, fake_artifact_store):
     """GET /{id}/version/{v} endpoint — version metadata accessible via parent GET."""
     meta, _, _ = fake_artifact_store.create(
-        title="Hist", content="v1", kind="text", source_turn_seq=1,
+        title="Hist",
+        content="v1",
+        kind="text",
+        source_turn_seq=1,
     )
     fake_artifact_store.update(
-        meta.id, content="v2", expected_current_version=1,
-        source="promote", source_turn_seq=5,
+        meta.id,
+        content="v2",
+        expected_current_version=1,
+        source="promote",
+        source_turn_seq=5,
     )
     # Fetch full artifact to see version list
     resp = art_client.get(f"/governor/artifacts/{meta.id}")
@@ -3322,9 +3579,14 @@ def test_artifact_create_fiction_applies_fix(art_client, fake_artifact_store):
     old_mode = adapter_mod.GOVERNOR_MODE
     adapter_mod.GOVERNOR_MODE = "fiction"
     try:
-        resp = art_client.post("/governor/artifacts", json={
-            "title": "Draft", "content": "Hello -- world...", "kind": "text",
-        })
+        resp = art_client.post(
+            "/governor/artifacts",
+            json={
+                "title": "Draft",
+                "content": "Hello -- world...",
+                "kind": "text",
+            },
+        )
         assert resp.status_code == 201
         data = resp.json()
         assert data["ok"] is True
@@ -3348,9 +3610,14 @@ def test_artifact_create_research_warns_only(art_client, fake_artifact_store):
     old_mode = adapter_mod.GOVERNOR_MODE
     adapter_mod.GOVERNOR_MODE = "research"
     try:
-        resp = art_client.post("/governor/artifacts", json={
-            "title": "Paper", "content": "Hello -- world", "kind": "text",
-        })
+        resp = art_client.post(
+            "/governor/artifacts",
+            json={
+                "title": "Paper",
+                "content": "Hello -- world",
+                "kind": "text",
+            },
+        )
         assert resp.status_code == 201
         data = resp.json()
         assert data["ok"] is True
@@ -3371,9 +3638,14 @@ def test_artifact_create_code_no_style(art_client, fake_artifact_store):
     old_mode = adapter_mod.GOVERNOR_MODE
     adapter_mod.GOVERNOR_MODE = "code"
     try:
-        resp = art_client.post("/governor/artifacts", json={
-            "title": "Script", "content": "x -- y", "kind": "code",
-        })
+        resp = art_client.post(
+            "/governor/artifacts",
+            json={
+                "title": "Script",
+                "content": "x -- y",
+                "kind": "code",
+            },
+        )
         assert resp.status_code == 201
         data = resp.json()
         assert data["ok"] is True
@@ -3435,11 +3707,13 @@ def _build_test_receipt_dicts(count: int) -> list[dict]:
             .tool("gov.chat_completion", {"turn_seq": i + 1})
             .decision(Action.ALLOW, "gov.passthrough", reason_human="test turn")
             .execution(ExecutionStatus.SUCCESS)
-            .provenance(Provenance(
-                deployment_id="test",
-                instance_id="test-inst",
-                governor_version="0.1.0",
-            ))
+            .provenance(
+                Provenance(
+                    deployment_id="test",
+                    instance_id="test-inst",
+                    governor_version="0.1.0",
+                )
+            )
             .build(chain.next())
         )
         chain.append(r)
@@ -3555,12 +3829,14 @@ def _setup_code_mode(adapter_mod, tmp_contexts_dir, context_id="ec-test"):
     adapter_mod._context_manager = cm
 
     from fastapi.testclient import TestClient
+
     return TestClient(adapter_mod.app, raise_server_exceptions=False)
 
 
 def test_effective_config_defaults_only(tmp_contexts_dir):
     """Code mode, no contract config → all sources are 'default'."""
     import gov_webui.adapter as adapter_mod
+
     test_client = _setup_code_mode(adapter_mod, tmp_contexts_dir, "ec-defaults")
 
     # Set contract without config
@@ -3591,12 +3867,16 @@ def test_effective_config_defaults_only(tmp_contexts_dir):
 def test_effective_config_session_override(tmp_contexts_dir):
     """Session override: length='long' → source='session', rest stays 'default'."""
     import gov_webui.adapter as adapter_mod
+
     test_client = _setup_code_mode(adapter_mod, tmp_contexts_dir, "ec-session")
 
-    test_client.put("/governor/code/project/contract", json={
-        "description": "test",
-        "config": {"length": "long"},
-    })
+    test_client.put(
+        "/governor/code/project/contract",
+        json={
+            "description": "test",
+            "config": {"length": "long"},
+        },
+    )
 
     resp = test_client.get("/governor/config/effective")
     assert resp.status_code == 200
@@ -3619,15 +3899,19 @@ def test_effective_config_session_override(tmp_contexts_dir):
 def test_effective_config_system_clamp(tmp_contexts_dir, monkeypatch):
     """System constraint clamps a field: strict forced True despite session False."""
     import gov_webui.adapter as adapter_mod
+
     test_client = _setup_code_mode(adapter_mod, tmp_contexts_dir, "ec-clamp")
 
     # Monkeypatch system constraints to force strict=True
     monkeypatch.setitem(adapter_mod._SYSTEM_CONSTRAINTS["code"], "strict", True)
 
-    test_client.put("/governor/code/project/contract", json={
-        "description": "test",
-        "config": {"strict": False},
-    })
+    test_client.put(
+        "/governor/code/project/contract",
+        json={
+            "description": "test",
+            "config": {"strict": False},
+        },
+    )
 
     resp = test_client.get("/governor/config/effective")
     assert resp.status_code == 200
@@ -3654,12 +3938,16 @@ def test_effective_config_system_clamp(tmp_contexts_dir, monkeypatch):
 def test_effective_config_unknown_key(tmp_contexts_dir):
     """Unknown keys in session config appear in diagnostics, not in fields/effective."""
     import gov_webui.adapter as adapter_mod
+
     test_client = _setup_code_mode(adapter_mod, tmp_contexts_dir, "ec-unknown")
 
-    test_client.put("/governor/code/project/contract", json={
-        "description": "test",
-        "config": {"made_up_key": "x", "length": "short"},
-    })
+    test_client.put(
+        "/governor/code/project/contract",
+        json={
+            "description": "test",
+            "config": {"made_up_key": "x", "length": "short"},
+        },
+    )
 
     resp = test_client.get("/governor/config/effective")
     assert resp.status_code == 200
@@ -3681,12 +3969,16 @@ def test_effective_config_hash_matches_receipt(tmp_contexts_dir):
     """contract_config_hash and constraints_hash match receipt values."""
     import hashlib
     import gov_webui.adapter as adapter_mod
+
     test_client = _setup_code_mode(adapter_mod, tmp_contexts_dir, "ec-hash")
 
-    test_client.put("/governor/code/project/contract", json={
-        "description": "test",
-        "config": {"artifact_type": "tool", "length": "medium", "strict": False},
-    })
+    test_client.put(
+        "/governor/code/project/contract",
+        json={
+            "description": "test",
+            "config": {"artifact_type": "tool", "length": "medium", "strict": False},
+        },
+    )
 
     resp = test_client.get("/governor/config/effective")
     assert resp.status_code == 200
@@ -3712,6 +4004,7 @@ def test_effective_config_hash_matches_receipt(tmp_contexts_dir):
 def test_effective_config_general_mode(client):
     """General mode → has_config=False, fields=[], hashes=None."""
     import gov_webui.adapter as adapter_mod
+
     adapter_mod.GOVERNOR_MODE = "general"
 
     resp = client.get("/governor/config/effective")
@@ -3728,6 +4021,7 @@ def test_effective_config_general_mode(client):
 def test_effective_config_endpoint_status_codes(tmp_contexts_dir):
     """200 on success; store failure → 500."""
     import gov_webui.adapter as adapter_mod
+
     test_client = _setup_code_mode(adapter_mod, tmp_contexts_dir, "ec-status")
 
     # Success case
@@ -3755,12 +4049,16 @@ def test_effective_config_endpoint_status_codes(tmp_contexts_dir):
 def test_effective_config_field_order_stable(tmp_contexts_dir):
     """Field order matches _CONFIG_DEFAULTS key order across multiple calls."""
     import gov_webui.adapter as adapter_mod
+
     test_client = _setup_code_mode(adapter_mod, tmp_contexts_dir, "ec-order")
 
-    test_client.put("/governor/code/project/contract", json={
-        "description": "test",
-        "config": {"strict": True, "length": "long"},
-    })
+    test_client.put(
+        "/governor/code/project/contract",
+        json={
+            "description": "test",
+            "config": {"strict": True, "length": "long"},
+        },
+    )
 
     expected_keys = list(adapter_mod._CONFIG_DEFAULTS["code"].keys())
 

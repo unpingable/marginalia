@@ -56,9 +56,11 @@ M0 established and tested one trustworthy invariant:
 > context, and retain authoritative AG receipt linkage.
 
 M1 replaces the served donor UI with a fiction-only writing room. The ordinary
-product includes conversations, project direction, Characters, World Rules,
-negative constraints, canon suggestions, versioned drafts, project export, and
-actionable governed blocking. It contains no model switcher, raw receipt strip,
+product includes projects, managed and forkable conversations, project
+direction, Characters, World Rules, negative constraints, a durable canon
+review queue, versioned/autosaved artifacts, manuscript organization and
+compilation, unified search, checkpoints, project export, and actionable
+governed blocking. It contains no model switcher, raw receipt strip,
 research dashboard, code builder, intent compiler, or operator console.
 
 Historical donor endpoints and tests remain temporarily in `adapter.py` to
@@ -72,6 +74,37 @@ the complete qualified AG distribution (including `fiction_governor`),
 receipt-kernel, receipt-v1, the Marginalia application, and a pinned Codex CLI.
 The thin launcher handles image retrieval, first-run login, aligned persistence,
 startup health, browser opening, updates, diagnostics, and shutdown.
+
+## Writing library and migration
+
+Marginalia adds projects, conversation lifecycle, explicit forks, and artifact
+provenance without rewriting the original content stores. Existing session
+JSON files are enrolled lazily into a `Default project`; their message payloads
+are not rewritten. Organization is stored atomically at
+`$MARGINALIA_DATA_ROOT/marginalia/library.json`. Each additional project owns
+an isolated fiction context for its direction, canon, conversations, pending
+state, and artifacts.
+
+Conversation metadata in the sidecar includes project, archived/pinned state,
+and optional `parent_session_id` plus `forked_at_message_id`. Artifacts retain
+their originating conversation, source message IDs, and capture timestamp.
+Artifact types are Draft, Scene, Character, World rule, and Note. Artifacts and
+conversations are exploratory; only an explicit Story Bible action changes
+canon.
+
+Each project also has a lightweight manuscript tree of parts, chapters, and
+scenes. Nodes reference artifacts rather than copying their text, so one draft
+remains authoritative while manuscript order and status evolve. Compilation is
+available as Markdown or DOCX. Artifact working copies autosave separately from
+committed revisions; compare and restore operations never rewrite revision
+history. Deleting from the writing UI moves artifacts to a reversible trash.
+
+Named project checkpoints contain the complete portable JSON record and are
+stored outside the project's governor context with a verified SHA-256 digest.
+The ZIP export includes a compiled manuscript, readable conversation/artifact
+Markdown, canon, project direction, and the full machine-readable record.
+Unified search and character backlinks are computed from existing content and
+do not promote, annotate, or otherwise change canon.
 
 ## Creative project direction
 
