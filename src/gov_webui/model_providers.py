@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +19,9 @@ import httpx
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_PROTOCOLS = {"existing-command", "openai-compatible"}
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
+_PROTOCOLS = {"existing-command", "local-command", "openai-compatible"}
+_COMMAND_ADAPTERS = {"kimi-code"}
 
 
 class ProviderConfigurationError(ValueError):
@@ -56,6 +59,15 @@ class ProviderError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class CommandConfiguration:
+    """Typed process configuration for one supported local command adapter."""
+
+    adapter: str
+    executable_env: str
+    working_directory_env: str
+
+
+@dataclass(frozen=True)
 class ConfiguredModel:
     """One explicitly enabled human-selectable model."""
 
@@ -68,6 +80,7 @@ class ConfiguredModel:
     api_key_env: str | None
     timeout_seconds: float
     command_model: str | None = None
+    command: CommandConfiguration | None = None
 
     def availability_error(
         self, environ: Mapping[str, str] | None = None
@@ -75,6 +88,23 @@ class ConfiguredModel:
         env = os.environ if environ is None else environ
         if self.api_key_env and not env.get(self.api_key_env):
             return f"required credential environment variable {self.api_key_env} is not set"
+        if self.command:
+            executable = env.get(self.command.executable_env, "").strip()
+            if not executable:
+                return (
+                    "required command environment variable "
+                    f"{self.command.executable_env} is not set"
+                )
+            if not os.path.isfile(executable) or not os.access(executable, os.X_OK):
+                return "configured command executable is unavailable"
+            working_directory = env.get(self.command.working_directory_env, "").strip()
+            if not working_directory:
+                return (
+                    "required command environment variable "
+                    f"{self.command.working_directory_env} is not set"
+                )
+            if not os.path.isdir(working_directory):
+                return "configured command working directory is unavailable"
         return None
 
     def public_dict(
@@ -128,7 +158,7 @@ class ProviderCatalog:
         unavailable = model.availability_error(environ)
         if unavailable:
             raise ProviderError(
-                "missing_credential",
+                "missing_credential" if model.api_key_env else "unavailable_command",
                 unavailable,
                 provider_id=model.provider_id,
                 model_id=model.model_id,
@@ -159,6 +189,24 @@ def _identifier(value: Any, location: str) -> str:
     if not _ID_RE.fullmatch(result):
         raise ProviderConfigurationError(
             f"{location} must use letters, digits, '.', '_', ':', or '-'"
+        )
+    return result
+
+
+def _model_name(value: Any, location: str) -> str:
+    result = _required_string(value, location)
+    if not _MODEL_RE.fullmatch(result):
+        raise ProviderConfigurationError(
+            f"{location} must use a bounded provider model name"
+        )
+    return result
+
+
+def _environment_name(value: Any, location: str) -> str:
+    result = _required_string(value, location)
+    if not _ENV_RE.fullmatch(result):
+        raise ProviderConfigurationError(
+            f"{location} is not an environment variable name"
         )
     return result
 
@@ -227,6 +275,7 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                 "protocol",
                 "base_url",
                 "api_key_env",
+                "command",
                 "timeout_seconds",
                 "models",
             },
@@ -256,18 +305,48 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
 
         base_url: str | None = None
         api_key_env: str | None = None
+        command: CommandConfiguration | None = None
         if protocol == "openai-compatible":
             base_url = _base_url(provider.get("base_url"), f"{location}.base_url")
             raw_env = provider.get("api_key_env")
             if raw_env is not None:
-                api_key_env = _required_string(raw_env, f"{location}.api_key_env")
-                if not _ENV_RE.fullmatch(api_key_env):
-                    raise ProviderConfigurationError(
-                        f"{location}.api_key_env is not an environment variable name"
-                    )
-        elif provider.get("base_url") is not None or provider.get("api_key_env") is not None:
+                api_key_env = _environment_name(raw_env, f"{location}.api_key_env")
+        elif protocol == "local-command":
+            if provider.get("base_url") is not None or provider.get("api_key_env") is not None:
+                raise ProviderConfigurationError(
+                    f"{location} local command provider cannot define base_url or api_key_env"
+                )
+            command_data = _require_object(provider.get("command"), f"{location}.command")
+            _reject_unknown(
+                command_data,
+                {"adapter", "executable_env", "working_directory_env"},
+                f"{location}.command",
+            )
+            adapter = _required_string(
+                command_data.get("adapter"), f"{location}.command.adapter"
+            )
+            if adapter not in _COMMAND_ADAPTERS:
+                raise ProviderConfigurationError(
+                    f"{location}.command.adapter {adapter!r} is unsupported"
+                )
+            command = CommandConfiguration(
+                adapter=adapter,
+                executable_env=_environment_name(
+                    command_data.get("executable_env"),
+                    f"{location}.command.executable_env",
+                ),
+                working_directory_env=_environment_name(
+                    command_data.get("working_directory_env"),
+                    f"{location}.command.working_directory_env",
+                ),
+            )
+        elif (
+            provider.get("base_url") is not None
+            or provider.get("api_key_env") is not None
+            or provider.get("command") is not None
+        ):
             raise ProviderConfigurationError(
-                f"{location} command provider cannot define base_url or api_key_env"
+                f"{location} existing command provider cannot define transport configuration"
             )
 
         provider_models = _require_list(provider.get("models"), f"{location}.models")
@@ -288,13 +367,15 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
 
             raw_model_id = model.get("model")
             command_model: str | None = None
-            if protocol == "openai-compatible":
-                upstream_model = _identifier(raw_model_id, f"{model_location}.model")
+            if protocol in {"openai-compatible", "local-command"}:
+                upstream_model = _model_name(raw_model_id, f"{model_location}.model")
+                if protocol == "local-command":
+                    command_model = upstream_model
             else:
                 if raw_model_id is None:
                     upstream_model = configured_id
                 else:
-                    command_model = _identifier(raw_model_id, f"{model_location}.model")
+                    command_model = _model_name(raw_model_id, f"{model_location}.model")
                     upstream_model = command_model
 
             models.append(
@@ -308,6 +389,7 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                     api_key_env=api_key_env,
                     timeout_seconds=timeout_seconds,
                     command_model=command_model,
+                    command=command,
                 )
             )
 
@@ -327,6 +409,183 @@ class ProviderChunk:
     content: str = ""
     usage: dict[str, int] | None = None
     finish_reason: str | None = None
+
+
+async def _stop_process(process: asyncio.subprocess.Process) -> None:
+    """Stop one campaign-owned command process and its direct process group."""
+
+    if process.returncode is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except TimeoutError:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        await process.wait()
+
+
+class LocalCommandTransport:
+    """Bounded process transport with typed adapters for supported local CLIs."""
+
+    def __init__(
+        self,
+        model: ConfiguredModel,
+        *,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
+        if model.protocol != "local-command" or model.command is None:
+            raise ValueError("model is not configured for local-command transport")
+        self.model = model
+        self._environ = os.environ if environ is None else environ
+
+    def _resolved_command(self) -> tuple[str, str]:
+        unavailable = self.model.availability_error(self._environ)
+        if unavailable:
+            raise ProviderError(
+                "unavailable_command",
+                unavailable,
+                provider_id=self.model.provider_id,
+                model_id=self.model.model_id,
+            )
+        assert self.model.command is not None
+        return (
+            self._environ[self.model.command.executable_env].strip(),
+            self._environ[self.model.command.working_directory_env].strip(),
+        )
+
+    def _arguments(self, executable: str, prompt: str) -> list[str]:
+        assert self.model.command is not None
+        if self.model.command.adapter == "kimi-code":
+            return [
+                executable,
+                "--model",
+                self.model.model_id,
+                "--prompt",
+                prompt,
+                "--output-format",
+                "stream-json",
+            ]
+        raise ProviderError(
+            "unsupported_command",
+            "configured command adapter is unsupported",
+            provider_id=self.model.provider_id,
+            model_id=self.model.model_id,
+        )
+
+    def _error_from_exit(self, returncode: int, stderr: str) -> ProviderError:
+        normalized = stderr.casefold()
+        if "usage limit" in normalized or "quota" in normalized:
+            code = "usage_limit"
+            message = "Kimi Code usage window is exhausted"
+            status_code = 403
+        elif "auth" in normalized or "403" in normalized:
+            code = "command_refused"
+            message = "Kimi Code authentication or usage authorization was refused"
+            status_code = 403
+        elif returncode == 75:
+            code = "command_retryable"
+            message = "Kimi Code reported a temporary provider failure"
+            status_code = None
+        else:
+            code = "command_error"
+            message = f"Kimi Code command failed with exit code {returncode}"
+            status_code = None
+        return ProviderError(
+            code,
+            message,
+            provider_id=self.model.provider_id,
+            model_id=self.model.model_id,
+            status_code=status_code,
+        )
+
+    def _parse_response(self, stdout: str) -> ProviderResponse:
+        assistant_messages: list[str] = []
+        for line in stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ProviderError(
+                    "malformed_response",
+                    "Kimi Code returned malformed stream-json output",
+                    provider_id=self.model.provider_id,
+                    model_id=self.model.model_id,
+                ) from exc
+            if not isinstance(event, dict) or event.get("role") != "assistant":
+                continue
+            content = event.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = "".join(
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and isinstance(part.get("text"), str)
+                )
+            else:
+                text = ""
+            if text:
+                assistant_messages.append(text)
+        if not assistant_messages:
+            raise ProviderError(
+                "malformed_response",
+                "Kimi Code returned no assistant response",
+                provider_id=self.model.provider_id,
+                model_id=self.model.model_id,
+            )
+        return ProviderResponse(
+            content=assistant_messages[-1],
+            model_id=self.model.model_id,
+            usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            finish_reason="stop",
+        )
+
+    async def complete(self, prompt: str) -> ProviderResponse:
+        executable, working_directory = self._resolved_command()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *self._arguments(executable, prompt),
+                cwd=working_directory,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise ProviderError(
+                "unavailable_command",
+                "configured command could not be started",
+                provider_id=self.model.provider_id,
+                model_id=self.model.model_id,
+            ) from exc
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(), timeout=self.model.timeout_seconds
+            )
+        except TimeoutError as exc:
+            await _stop_process(process)
+            raise ProviderError(
+                "timeout",
+                "Kimi Code command timed out",
+                provider_id=self.model.provider_id,
+                model_id=self.model.model_id,
+            ) from exc
+        except asyncio.CancelledError:
+            await _stop_process(process)
+            raise
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")[-8192:]
+        if process.returncode != 0:
+            raise self._error_from_exit(process.returncode or 1, stderr)
+        return self._parse_response(stdout)
 
 
 class OpenAICompatibleTransport:

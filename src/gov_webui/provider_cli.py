@@ -11,6 +11,7 @@ from collections.abc import Sequence
 
 from gov_webui.model_providers import (
     OpenAICompatibleTransport,
+    LocalCommandTransport,
     ConfiguredModel,
     ProviderConfigurationError,
     ProviderError,
@@ -79,6 +80,26 @@ async def _run_openai_compatible(model: ConfiguredModel, prompt: str) -> None:
     )
 
 
+async def _run_local_command(model: ConfiguredModel, prompt: str) -> None:
+    response = await LocalCommandTransport(model).complete(prompt)
+    _emit(
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": response.content},
+        }
+    )
+    _emit(
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+        }
+    )
+
+
+def _emit_failure(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     try:
@@ -97,13 +118,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         prompt = sys.stdin.read()
-        asyncio.run(_run_openai_compatible(model, prompt))
+        if model.protocol == "local-command":
+            asyncio.run(_run_local_command(model, prompt))
+        else:
+            asyncio.run(_run_openai_compatible(model, prompt))
         return 0
     except ProviderError as exc:
-        _emit({"type": "error", "message": str(exc), "error": exc.to_dict()})
+        _emit_failure(str(exc))
         return 1
     except (ProviderConfigurationError, RuntimeError) as exc:
-        _emit({"type": "error", "message": str(exc)})
+        _emit_failure(str(exc))
         return 1
 
 

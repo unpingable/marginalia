@@ -28,6 +28,23 @@ source repository.
       ]
     },
     {
+      "id": "local-subscription-command",
+      "protocol": "local-command",
+      "command": {
+        "adapter": "kimi-code",
+        "executable_env": "LOCAL_COMMAND_PATH",
+        "working_directory_env": "LOCAL_COMMAND_WORKDIR"
+      },
+      "timeout_seconds": 180,
+      "models": [
+        {
+          "id": "local-command-writing",
+          "model": "provider/model-alias",
+          "label": "Local subscription model"
+        }
+      ]
+    },
+    {
       "id": "local-compatible",
       "protocol": "openai-compatible",
       "base_url": "http://provider.internal:11434/v1",
@@ -69,6 +86,17 @@ strings, or fragments are accepted. `api_key_env` contains an environment
 variable name, never a credential. Unknown fields, protocols, models, duplicate
 IDs, malformed URLs, and missing required credentials fail visibly.
 
+`local-command` is a bounded process transport. Its typed `command.adapter`
+selects a supported argument/output contract; it is not an arbitrary command
+template. `executable_env` and `working_directory_env` name environment
+variables whose values remain deployment-local. The Kimi Code adapter invokes
+one explicit model in noninteractive `stream-json` mode, uses the final
+assistant message, applies the configured timeout, terminates its process group
+on timeout/cancellation, and normalizes command failures without exposing raw
+stderr. Kimi Code currently emits whole assistant messages rather than token
+deltas, so Marginalia receives a bounded completion chunk after each command
+turn finishes.
+
 ## Behavior
 
 The model picker lists only models in this file. Selection is stored on the
@@ -93,7 +121,8 @@ The deployment must mount the JSON file read-only, set
 `MARGINALIA_MODEL_CONFIG` to its container path, and pass only the credential
 environment variables referenced by enabled providers. Linux deployments that
 need a container-to-host endpoint may add a host-gateway mapping in their
-private Compose override.
+private Compose override. Local-command deployments must also mount the chosen
+executable and its provider-owned authentication state outside source control.
 
 Do not place deployment endpoints, credential values, enabled household models,
 or local defaults in source-controlled Compose files.
