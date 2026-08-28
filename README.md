@@ -219,6 +219,13 @@ also the context-manager base used by Marginalia. The launcher rejects
 conflicting `GOVERNOR_DAEMON_DIR` or `GOVERNOR_CONTEXTS_DIR` values and refuses
 any runtime mode other than `fiction`.
 
+## Configured models
+
+An installation may explicitly enumerate existing-command and
+OpenAI-compatible models without changing the governed daemon contract. See
+[docs/MODEL_PROVIDERS.md](docs/MODEL_PROVIDERS.md) for the generic schema,
+selection/provenance semantics, and private deployment boundary.
+
 ## Container development
 
 Local container builds use qualified sibling AG sources rather than silently

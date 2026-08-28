@@ -142,6 +142,7 @@
     .chat-header-actions, .provider-status { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; white-space: nowrap; }
     .provider-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--sage); box-shadow: 0 0 0 3px var(--sage-soft); }
     .provider-dot.offline { background: var(--warning); box-shadow: 0 0 0 3px #f0dfc8; }
+    .provider-status select { max-width: 190px; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: var(--ink); padding: 5px 7px; }
 
     .messages { overflow-y: auto; padding: 34px max(34px, calc((100% - 760px) / 2)); scroll-behavior: smooth; }
     .welcome { max-width: 620px; margin: 12vh auto 0; text-align: center; }
@@ -402,7 +403,8 @@
           <button class="text-button" id="open-branches">Branches</button>
           <button class="text-button" id="focus-mode" aria-pressed="false">Focus</button>
           <div class="provider-status" title="Responses pass through the project's active writing rules">
-            <span class="provider-dot" id="provider-dot"></span><span id="provider-name">Connecting…</span>
+            <span class="provider-dot" id="provider-dot"></span>
+            <select id="model-select" aria-label="Model"><option>Connecting…</option></select>
           </div>
         </div>
       </header>
@@ -625,7 +627,7 @@
     const state = {
       workspaces: [], activeWorkspaceId: null, projects: [], activeProjectId: null, sessions: [], activeSession: null,
       conversationView: "active", conversationSort: "updated_desc", conversationQuery: "",
-      model: "", project: null, artifacts: [], activeArtifact: null, busy: false,
+      model: "", models: [], defaultModel: "", project: null, artifacts: [], activeArtifact: null, busy: false,
       artifactSource: null, manuscript: {nodes: [], version: 1}, snapshots: [],
       selectedMessageIds: new Set(), artifactView: "active", artifactQuery: "", entities: [], canonCounts: null,
       system: null, outlineMessageTargets: new Map(), artifactTargetNodeId: null, pendingOutlineNodeId: null,
@@ -640,7 +642,11 @@
       });
       if (!response.ok) {
         let detail = `${response.status} ${response.statusText}`;
-        try { detail = (await response.json()).detail || detail; } catch (_) {}
+        try {
+          const body = await response.json();
+          detail = body.detail?.message || body.detail || detail;
+          if (typeof detail !== "string") detail = JSON.stringify(detail);
+        } catch (_) {}
         throw new Error(detail);
       }
       return response.json();
@@ -700,16 +706,39 @@
     async function loadProvider() {
       try {
         const [models, backends] = await Promise.all([api("/v1/models"), api("/v1/backends")]);
-        state.model = models.data?.[0]?.id || "";
-        const label = state.model === "codex-default"
-          ? "Codex"
-          : (state.model || backends.active || "Ready");
-        $("#provider-name").textContent = label;
+        state.models = models.data || [];
+        state.defaultModel = models.default_model || state.models[0]?.id || "";
+        syncModelPicker();
         $("#provider-dot").classList.toggle("offline", !backends.connected);
-      } catch (_) {
-        $("#provider-name").textContent = "Writing service unavailable";
+      } catch (error) {
+        const select = $("#model-select");
+        select.replaceChildren(new Option("Writing service unavailable", ""));
+        select.disabled = true;
+        select.title = error.message;
         $("#provider-dot").classList.add("offline");
       }
+    }
+
+    function syncModelPicker() {
+      const select = $("#model-select");
+      const selected = state.activeSession?.model || state.model || state.defaultModel;
+      select.replaceChildren();
+      state.models.forEach((model) => {
+        const option = new Option(model.label || model.id, model.id);
+        option.disabled = model.available === false;
+        if (model.unavailable_reason) option.title = model.unavailable_reason;
+        select.append(option);
+      });
+      if (selected && !state.models.some((model) => model.id === selected)) {
+        const unavailable = new Option(`Unavailable: ${selected}`, selected);
+        unavailable.disabled = true;
+        select.append(unavailable);
+      }
+      state.model = selected || state.defaultModel;
+      select.value = state.model;
+      select.disabled = !state.models.length;
+      const current = state.models.find((model) => model.id === state.model);
+      select.title = current?.unavailable_reason || "Model for future responses in this conversation";
     }
 
     async function loadSystem() {
@@ -1059,6 +1088,8 @@
 
     async function openSession(id) {
       state.activeSession = await api(`/sessions/${encodeURIComponent(id)}`);
+      state.model = state.activeSession.model || state.defaultModel;
+      syncModelPicker();
       state.selectedMessageIds.clear();
       renderConversation();
       await loadSessions();
@@ -1154,7 +1185,7 @@
       if (!session || !session.messages?.length) {
         messages.append(buildWelcome());
       } else {
-        session.messages.forEach((message) => renderMessage(message.role, message.content, message.id));
+        session.messages.forEach((message) => renderMessage(message.role, message.content, message.id, message));
       }
       messages.scrollTop = messages.scrollHeight;
       updateSelectionButton();
@@ -1180,7 +1211,7 @@
       button.textContent = count ? `Keep ${count} selected` : "Keep selection";
     }
 
-    function renderMessage(role, content, id = "") {
+    function renderMessage(role, content, id = "", provenance = null) {
       const welcome = $("#messages #welcome");
       if (welcome) welcome.remove();
       const wrapper = document.createElement("article");
@@ -1188,7 +1219,10 @@
       if (id) wrapper.dataset.messageId = id;
       const label = document.createElement("div");
       label.className = "message-role";
-      label.textContent = role === "assistant" ? "Marginalia" : "You";
+      const identity = provenance?.provider_id && provenance?.model_id
+        ? ` · ${provenance.provider_id} / ${provenance.model_id}`
+        : (role === "assistant" && id ? " · model unrecorded" : "");
+      label.textContent = role === "assistant" ? `Marginalia${identity}` : "You";
       const body = document.createElement("div");
       body.className = "message-body";
       body.textContent = content;
@@ -1239,9 +1273,14 @@
       }
     }
 
-    async function appendSessionMessage(role, content, model = null) {
+    async function appendSessionMessage(role, content, provenance = null) {
       const message = await api(`/sessions/${state.activeSession.id}/messages`, {
-        method: "POST", body: JSON.stringify({role, content, model}),
+        method: "POST", body: JSON.stringify({
+          role, content,
+          model: provenance?.model || null,
+          provider_id: provenance?.provider_id || null,
+          model_id: provenance?.model_id || null,
+        }),
       });
       state.activeSession.messages.push(message);
       state.activeSession.message_count = state.activeSession.messages.length;
@@ -1279,12 +1318,16 @@
         });
         waiting.remove();
         const answer = response.choices?.[0]?.message?.content || "";
-        const assistantMessage = await appendSessionMessage("assistant", answer, response.model || state.model);
+        const assistantMessage = await appendSessionMessage("assistant", answer, {
+          model: response.model || state.model,
+          provider_id: response.provider_id,
+          model_id: response.model_id,
+        });
         if (state.pendingOutlineNodeId) {
           state.outlineMessageTargets.set(assistantMessage.id, state.pendingOutlineNodeId);
           state.pendingOutlineNodeId = null;
         }
-        renderMessage("assistant", answer, assistantMessage.id);
+        renderMessage("assistant", answer, assistantMessage.id, assistantMessage);
         await Promise.all([refreshPending(), scanForCanon(answer, assistantMessage.id)]);
       } catch (error) {
         state.pendingOutlineNodeId = null;
@@ -2152,6 +2195,28 @@
         state.conversationQuery = event.target.value.trim();
         clearTimeout(loadSessions.searchTimer);
         loadSessions.searchTimer = setTimeout(() => void loadSessions(), 180);
+      });
+      $("#model-select").addEventListener("change", async (event) => {
+        const previous = state.model;
+        const selected = state.models.find((model) => model.id === event.target.value);
+        if (!selected || selected.available === false) {
+          syncModelPicker();
+          return;
+        }
+        state.model = selected.id;
+        try {
+          if (state.activeSession) {
+            state.activeSession = await api(
+              `/sessions/${encodeURIComponent(state.activeSession.id)}`,
+              {method: "PATCH", body: JSON.stringify({model: selected.id})},
+            );
+          }
+          syncModelPicker();
+        } catch (error) {
+          state.model = previous;
+          syncModelPicker();
+          toast(error.message);
+        }
       });
       $("#composer").addEventListener("submit", sendMessage);
       $("#prompt").addEventListener("keydown", (event) => {

@@ -124,7 +124,7 @@ class TestRootEndpoint:
         assert "project-settings" in body
         assert "artifact-editor" in body
         assert "governor-panel" not in body
-        assert "model-select" not in body
+        assert "model-select" in body
 
     def test_api_info_returns_json(self, client) -> None:
         response = client.get("/api/info")

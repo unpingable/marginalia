@@ -14,7 +14,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from governor.session_store import ChatSession
+from gov_webui.session_store import ChatSession
 
 from gov_webui.artifact_store import ArtifactIndex
 from gov_webui.backup_store import BackupError, WorkspaceBackupManager

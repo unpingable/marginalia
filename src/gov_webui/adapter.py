@@ -75,6 +75,13 @@ from gov_webui.library_store import (
     WorkspaceNotFoundError,
     WorkspaceRecord,
 )
+from gov_webui.model_providers import (
+    ConfiguredModel,
+    ProviderCatalog,
+    ProviderConfigurationError,
+    ProviderError,
+    load_provider_catalog,
+)
 from gov_webui.markdown import render_writer_markdown
 from gov_webui.manuscript_store import (
     ManuscriptNodeNotFoundError,
@@ -87,8 +94,8 @@ from gov_webui.snapshot_store import (
     SnapshotNotFoundError,
     SnapshotStoreError,
 )
+from gov_webui.session_store import ChatSession, SessionMessage, SessionStore
 from governor.context_manager import GovernorContextManager
-from governor.session_store import ChatSession, SessionMessage, SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +129,9 @@ MARGINALIA_BACKUP_ROOT = os.environ.get("MARGINALIA_BACKUP_ROOT", "/backups")
 MARGINALIA_BACKUP_REQUIRE_REMOTE = os.environ.get(
     "MARGINALIA_BACKUP_REQUIRE_REMOTE", "false"
 ).lower() in {"true", "1", "yes"}
+MARGINALIA_MODEL_CONFIG = os.environ.get(
+    "MARGINALIA_MODEL_CONFIG", ""
+).strip()
 
 if GOVERNOR_MODE != "fiction" and not MARGINALIA_ENABLE_DONOR_ROUTES:
     raise RuntimeError(
@@ -301,6 +311,8 @@ class ChatCompletionResponse(BaseModel):
     object: str = "chat.completion"
     created: int
     model: str
+    provider_id: str | None = None
+    model_id: str | None = None
     choices: list[ChatCompletionChoice]
     usage: Usage | None = None
     receipt: dict
@@ -309,6 +321,11 @@ class ChatCompletionResponse(BaseModel):
 class ModelInfo(BaseModel):
     id: str
     object: str = "model"
+    label: str | None = None
+    provider_id: str | None = None
+    model_id: str | None = None
+    available: bool = True
+    unavailable_reason: str | None = None
     created: int = 0
     owned_by: str = "system"
 
@@ -316,6 +333,7 @@ class ModelInfo(BaseModel):
 class ModelList(BaseModel):
     object: str = "list"
     data: list[ModelInfo]
+    default_model: str | None = None
 
 
 class BackendSwitchRequest(BaseModel):
@@ -418,6 +436,35 @@ _artifact_stores: dict[str, Any] = {}
 _canon_review_stores: dict[str, CanonReviewStore] = {}
 _manuscript_stores: dict[str, ManuscriptStore] = {}
 _snapshot_stores: dict[str, ProjectSnapshotStore] = {}
+
+
+def _configured_provider_catalog() -> ProviderCatalog | None:
+    """Load host-selected providers without caching credentials or private values."""
+    if not MARGINALIA_MODEL_CONFIG:
+        return None
+    return load_provider_catalog(MARGINALIA_MODEL_CONFIG)
+
+
+def _resolve_configured_model(
+    requested_model: str,
+    *,
+    require_available: bool = True,
+) -> tuple[str, ConfiguredModel | None]:
+    """Resolve one exact selection; absence of configuration preserves legacy mode."""
+    catalog = _configured_provider_catalog()
+    if catalog is None:
+        return requested_model, None
+    try:
+        model = (
+            catalog.require_available(requested_model)
+            if require_available
+            else catalog.resolve(requested_model)
+        )
+    except ProviderConfigurationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ProviderError as exc:
+        raise HTTPException(status_code=503, detail=exc.to_dict()) from exc
+    return model.id, model
 
 
 def _get_library_store() -> LibraryStore:
@@ -609,13 +656,32 @@ def _build_project_context_message(project_id: str | None = None) -> dict[str, s
 
 @app.get("/v1/models")
 async def list_models() -> ModelList:
-    """List models from the provider that actually serves governed chat."""
+    """List only explicitly configured models when a catalog is present."""
     try:
+        catalog = _configured_provider_catalog()
+        if catalog is not None:
+            return ModelList(
+                default_model=catalog.default_model,
+                data=[
+                    ModelInfo(
+                        id=model.id,
+                        label=model.label,
+                        owned_by=model.provider_id,
+                        provider_id=model.provider_id,
+                        model_id=model.model_id,
+                        available=model.availability_error() is None,
+                        unavailable_reason=model.availability_error(),
+                    )
+                    for model in catalog.models
+                ],
+            )
         adapter = _get_governed_chat_adapter()
         models = await adapter.models()
         return ModelList(
             data=[ModelInfo(id=m["id"], owned_by=m.get("owned_by", "system")) for m in models]
         )
+    except ProviderConfigurationError as exc:
+        raise HTTPException(status_code=500, detail=f"Provider configuration error: {exc}")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Backend error: {e}")
 
@@ -623,6 +689,21 @@ async def list_models() -> ModelList:
 @app.get("/v1/models/{model_id}")
 async def get_model(model_id: str) -> ModelInfo:
     """Get info about a specific model."""
+    catalog = _configured_provider_catalog()
+    if catalog is not None:
+        try:
+            model = catalog.resolve(model_id)
+        except ProviderConfigurationError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return ModelInfo(
+            id=model.id,
+            label=model.label,
+            owned_by=model.provider_id,
+            provider_id=model.provider_id,
+            model_id=model.model_id,
+            available=model.availability_error() is None,
+            unavailable_reason=model.availability_error(),
+        )
     provider = await _get_governed_chat_adapter().provider()
     return ModelInfo(id=model_id, owned_by=provider.get("type", "daemon"))
 
@@ -1834,6 +1915,7 @@ async def chat_completions(
     Delegates to the governor daemon for the full governed pipeline:
     pending check → augment → generate → check → receipt.
     """
+    selected_model, model_identity = _resolve_configured_model(request.model)
     governed_chat = _get_governed_chat_adapter(request.project_id)
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
@@ -1862,14 +1944,14 @@ async def chat_completions(
 
     if request.stream:
         return StreamingResponse(
-            _stream_via_daemon(governed_chat, messages, request.model),
+            _stream_via_daemon(governed_chat, messages, selected_model, model_identity),
             media_type="text/event-stream",
         )
 
     try:
         result = await governed_chat.chat_send(
             messages=messages,
-            model=request.model,
+            model=selected_model,
         )
     except DaemonAuthError as e:
         raise HTTPException(
@@ -1884,7 +1966,11 @@ async def chat_completions(
 
     # If daemon returned a pending violation, format as violation prompt
     if result.get("pending"):
-        return _format_violation_pending_response(result, result.get("model") or request.model)
+        return _format_violation_pending_response(
+            result,
+            result.get("model") or selected_model,
+            model_identity,
+        )
 
     # Build content with optional governor footer
     content = result.get("content", "")
@@ -1893,7 +1979,12 @@ async def chat_completions(
         content = f"{content}\n\n{footer}"
 
     # AG's final authority receipt is the only governed-execution receipt.
-    resolved_model = result.get("model", request.model)
+    resolved_model = result.get("model", selected_model)
+    if model_identity is not None and resolved_model != selected_model:
+        raise HTTPException(
+            status_code=502,
+            detail="daemon returned a different model than the explicit selection",
+        )
     request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
     receipt = result["receipt"]
 
@@ -1902,6 +1993,8 @@ async def chat_completions(
         id=request_id,
         created=int(time.time()),
         model=resolved_model,
+        provider_id=model_identity.provider_id if model_identity else None,
+        model_id=model_identity.model_id if model_identity else None,
         choices=[
             ChatCompletionChoice(
                 index=0,
@@ -1922,6 +2015,7 @@ async def _stream_via_daemon(
     governed_chat: GovernedChatAdapter,
     messages: list[dict[str, str]],
     model: str,
+    model_identity: ConfiguredModel | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream response via daemon in OpenAI SSE format."""
     request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
@@ -1936,6 +2030,8 @@ async def _stream_via_daemon(
                     "object": "chat.completion.chunk",
                     "created": int(time.time()),
                     "model": model,
+                    "provider_id": model_identity.provider_id if model_identity else None,
+                    "model_id": model_identity.model_id if model_identity else None,
                     "choices": [
                         {
                             "index": 0,
@@ -1952,6 +2048,10 @@ async def _stream_via_daemon(
             raise RuntimeError("AG stream ended without a final governed outcome")
 
         resolved_model = final_result.get("model") or model
+        if model_identity is not None and resolved_model != model:
+            raise RuntimeError(
+                "daemon returned a different model than the explicit selection"
+            )
         receipt = final_result["receipt"]
 
         # If daemon returned a pending violation, emit it as a final chunk
@@ -1963,6 +2063,8 @@ async def _stream_via_daemon(
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": resolved_model,
+                "provider_id": model_identity.provider_id if model_identity else None,
+                "model_id": model_identity.model_id if model_identity else None,
                 "choices": [
                     {
                         "index": 0,
@@ -1980,6 +2082,8 @@ async def _stream_via_daemon(
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": resolved_model,
+                "provider_id": model_identity.provider_id if model_identity else None,
+                "model_id": model_identity.model_id if model_identity else None,
                 "choices": [
                     {
                         "index": 0,
@@ -1996,6 +2100,8 @@ async def _stream_via_daemon(
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": resolved_model,
+            "provider_id": model_identity.provider_id if model_identity else None,
+            "model_id": model_identity.model_id if model_identity else None,
             "choices": [
                 {
                     "index": 0,
@@ -2028,6 +2134,7 @@ async def _stream_via_daemon(
 def _format_violation_pending_response(
     pending: dict[str, Any],
     model: str,
+    model_identity: ConfiguredModel | None = None,
 ) -> ChatCompletionResponse:
     """Format a pending violation as a ChatCompletionResponse.
 
@@ -2041,6 +2148,8 @@ def _format_violation_pending_response(
         id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
         created=int(time.time()),
         model=model,
+        provider_id=model_identity.provider_id if model_identity else None,
+        model_id=model_identity.model_id if model_identity else None,
         choices=[
             ChatCompletionChoice(
                 index=0,
@@ -2069,6 +2178,7 @@ class UpdateSessionRequest(BaseModel):
     archived: bool | None = None
     pinned: bool | None = None
     project_id: str | None = None
+    model: str | None = None
 
 
 class ForkSessionRequest(BaseModel):
@@ -2081,6 +2191,8 @@ class AppendMessageRequest(BaseModel):
     role: str
     content: str
     model: str | None = None
+    provider_id: str | None = None
+    model_id: str | None = None
     usage: dict[str, int] | None = None
 
 
@@ -2242,9 +2354,10 @@ async def create_session(request: CreateSessionRequest) -> dict[str, Any]:
     title = request.title.strip()
     if not title:
         raise HTTPException(status_code=422, detail="conversation title must not be empty")
+    selected_model, _ = _resolve_configured_model(request.model, require_available=False)
     session = store.create(
         context_id=project.context_id,
-        model=request.model,
+        model=selected_model,
         title=title,
     )
     try:
@@ -2281,6 +2394,14 @@ async def update_session(session_id: str, request: UpdateSessionRequest) -> dict
         if not title:
             raise HTTPException(status_code=422, detail="conversation title must not be empty")
         if not store.update_title(session_id, title):
+            raise HTTPException(status_code=404, detail="Session not found")
+        session = store.get(session_id) or session
+
+    if request.model is not None:
+        selected_model, _ = _resolve_configured_model(
+            request.model, require_available=False
+        )
+        if not store.update_model(session_id, selected_model):
             raise HTTPException(status_code=404, detail="Session not found")
         session = store.get(session_id) or session
 
@@ -2354,11 +2475,30 @@ async def fork_session(
 async def append_message(session_id: str, request: AppendMessageRequest) -> dict[str, Any]:
     """Append a message to a session (write-through target)."""
     _, store, _ = _conversation_location(session_id)
+    if (request.provider_id is None) != (request.model_id is None):
+        raise HTTPException(
+            status_code=422,
+            detail="provider_id and model_id must be recorded together",
+        )
+    if request.provider_id is not None:
+        _, configured = _resolve_configured_model(
+            request.model or "", require_available=False
+        )
+        if configured is None or (
+            configured.provider_id != request.provider_id
+            or configured.model_id != request.model_id
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="message provenance does not match the configured model",
+            )
     msg = SessionMessage.create(
         role=request.role,
         content=request.content,
         model=request.model,
         usage=request.usage,
+        provider_id=request.provider_id,
+        model_id=request.model_id,
     )
     if not store.append_message(session_id, msg):
         raise HTTPException(status_code=404, detail="Session not found")

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from governor.session_store import ChatSession
+from gov_webui.session_store import ChatSession
 
 from gov_webui.artifact_store import ArtifactStore
 from gov_webui.canon_review_store import CanonReviewStore

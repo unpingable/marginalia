@@ -15,6 +15,7 @@ services:
       - MARGINALIA_BACKUP_ROOT=/backups
       - MARGINALIA_BACKUP_REQUIRE_REMOTE=${MARGINALIA_BACKUP_REQUIRE_REMOTE:-false}
       - MARGINALIA_DEPLOYMENT_ID=${MARGINALIA_DEPLOYMENT_ID:-compose}
+      - MARGINALIA_MODEL_CONFIG=${MARGINALIA_MODEL_CONFIG:-}
     volumes:
       - marginalia_data:/data
       - ${MARGINALIA_BACKUP_HOST_PATH:-./backups}:/backups

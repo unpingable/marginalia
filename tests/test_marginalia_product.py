@@ -72,6 +72,7 @@ def test_root_is_an_intentional_marginalia_writing_shell(product_client) -> None
     assert 'id="project-settings"' in response.text
     assert 'id="chat-panel"' in response.text
     assert 'id="artifact-editor"' in response.text
+    assert 'id="model-select"' in response.text
     for donor_term in (
         "Phosphor",
         "Desk",
@@ -79,7 +80,6 @@ def test_root_is_an_intentional_marginalia_writing_shell(product_client) -> None
         "Maker",
         "Builder",
         'id="governor-panel"',
-        'id="model-select"',
     ):
         assert donor_term not in response.text
 
