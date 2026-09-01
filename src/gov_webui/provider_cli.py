@@ -10,6 +10,7 @@ import sys
 from collections.abc import Sequence
 
 from gov_webui.model_providers import (
+    AnthropicMessagesTransport,
     OpenAICompatibleTransport,
     LocalCommandTransport,
     ConfiguredModel,
@@ -56,8 +57,15 @@ def _delegate_native(argv: Sequence[str], command_model: str | None) -> None:
     os.execv(native_path, [native_path, *_native_arguments(argv, command_model)])
 
 
-async def _run_openai_compatible(model: ConfiguredModel, prompt: str) -> None:
-    transport = OpenAICompatibleTransport(model)
+async def _run_http_provider(model: ConfiguredModel, prompt: str) -> None:
+    if model.protocol == "anthropic-messages":
+        transport = AnthropicMessagesTransport(model)
+    elif model.protocol == "openai-compatible":
+        transport = OpenAICompatibleTransport(model)
+    else:
+        raise ProviderConfigurationError(
+            f"model {model.id!r} has unsupported HTTP protocol {model.protocol!r}"
+        )
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     async for chunk in transport.stream([{"role": "user", "content": prompt}]):
         if chunk.content:
@@ -121,7 +129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if model.protocol == "local-command":
             asyncio.run(_run_local_command(model, prompt))
         else:
-            asyncio.run(_run_openai_compatible(model, prompt))
+            asyncio.run(_run_http_provider(model, prompt))
         return 0
     except ProviderError as exc:
         _emit_failure(str(exc))

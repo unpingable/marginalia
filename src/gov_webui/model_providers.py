@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Typed model-provider configuration and OpenAI-compatible transport."""
+"""Typed model-provider configuration and bounded HTTP/process transports."""
 
 from __future__ import annotations
 
@@ -20,8 +20,13 @@ import httpx
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
-_PROTOCOLS = {"existing-command", "local-command", "openai-compatible"}
-_COMMAND_ADAPTERS = {"kimi-code"}
+_PROTOCOLS = {
+    "anthropic-messages",
+    "existing-command",
+    "local-command",
+    "openai-compatible",
+}
+_COMMAND_ADAPTERS = {"claude-code", "kimi-code"}
 
 
 class ProviderConfigurationError(ValueError):
@@ -82,9 +87,7 @@ class ConfiguredModel:
     command_model: str | None = None
     command: CommandConfiguration | None = None
 
-    def availability_error(
-        self, environ: Mapping[str, str] | None = None
-    ) -> str | None:
+    def availability_error(self, environ: Mapping[str, str] | None = None) -> str | None:
         env = os.environ if environ is None else environ
         if self.api_key_env and not env.get(self.api_key_env):
             return f"required credential environment variable {self.api_key_env} is not set"
@@ -107,9 +110,7 @@ class ConfiguredModel:
                 return "configured command working directory is unavailable"
         return None
 
-    def public_dict(
-        self, environ: Mapping[str, str] | None = None
-    ) -> dict[str, Any]:
+    def public_dict(self, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
         unavailable = self.availability_error(environ)
         result: dict[str, Any] = {
             "id": self.id,
@@ -145,8 +146,19 @@ class ProviderCatalog:
         for model in self.models:
             if model.id == selected:
                 return model
-        raise ProviderConfigurationError(
-            f"model {selected!r} is not explicitly configured"
+        raise ProviderConfigurationError(f"model {selected!r} is not explicitly configured")
+
+    def available_default(
+        self,
+        environ: Mapping[str, str] | None = None,
+    ) -> ConfiguredModel | None:
+        """Return the configured default when usable, otherwise the first usable model."""
+        configured_default = self.resolve(self.default_model)
+        if configured_default.availability_error(environ) is None:
+            return configured_default
+        return next(
+            (model for model in self.models if model.availability_error(environ) is None),
+            None,
         )
 
     def require_available(
@@ -155,6 +167,8 @@ class ProviderCatalog:
         environ: Mapping[str, str] | None = None,
     ) -> ConfiguredModel:
         model = self.resolve(model_id)
+        if not model_id:
+            model = self.available_default(environ) or model
         unavailable = model.availability_error(environ)
         if unavailable:
             raise ProviderError(
@@ -196,18 +210,14 @@ def _identifier(value: Any, location: str) -> str:
 def _model_name(value: Any, location: str) -> str:
     result = _required_string(value, location)
     if not _MODEL_RE.fullmatch(result):
-        raise ProviderConfigurationError(
-            f"{location} must use a bounded provider model name"
-        )
+        raise ProviderConfigurationError(f"{location} must use a bounded provider model name")
     return result
 
 
 def _environment_name(value: Any, location: str) -> str:
     result = _required_string(value, location)
     if not _ENV_RE.fullmatch(result):
-        raise ProviderConfigurationError(
-            f"{location} is not an environment variable name"
-        )
+        raise ProviderConfigurationError(f"{location} is not an environment variable name")
     return result
 
 
@@ -288,9 +298,7 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
 
         protocol = _required_string(provider.get("protocol"), f"{location}.protocol")
         if protocol not in _PROTOCOLS:
-            raise ProviderConfigurationError(
-                f"{location}.protocol {protocol!r} is unsupported"
-            )
+            raise ProviderConfigurationError(f"{location}.protocol {protocol!r} is unsupported")
 
         raw_timeout = provider.get("timeout_seconds", 120)
         if (
@@ -306,11 +314,15 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
         base_url: str | None = None
         api_key_env: str | None = None
         command: CommandConfiguration | None = None
-        if protocol == "openai-compatible":
+        if protocol in {"anthropic-messages", "openai-compatible"}:
             base_url = _base_url(provider.get("base_url"), f"{location}.base_url")
             raw_env = provider.get("api_key_env")
             if raw_env is not None:
                 api_key_env = _environment_name(raw_env, f"{location}.api_key_env")
+            if protocol == "anthropic-messages" and api_key_env is None:
+                raise ProviderConfigurationError(
+                    f"{location}.api_key_env is required for anthropic-messages"
+                )
         elif protocol == "local-command":
             if provider.get("base_url") is not None or provider.get("api_key_env") is not None:
                 raise ProviderConfigurationError(
@@ -322,9 +334,7 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                 {"adapter", "executable_env", "working_directory_env"},
                 f"{location}.command",
             )
-            adapter = _required_string(
-                command_data.get("adapter"), f"{location}.command.adapter"
-            )
+            adapter = _required_string(command_data.get("adapter"), f"{location}.command.adapter")
             if adapter not in _COMMAND_ADAPTERS:
                 raise ProviderConfigurationError(
                     f"{location}.command.adapter {adapter!r} is unsupported"
@@ -359,15 +369,17 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
             _reject_unknown(model, {"id", "model", "label"}, model_location)
             configured_id = _identifier(model.get("id"), f"{model_location}.id")
             if configured_id in configured_ids:
-                raise ProviderConfigurationError(
-                    f"duplicate configured model id {configured_id!r}"
-                )
+                raise ProviderConfigurationError(f"duplicate configured model id {configured_id!r}")
             configured_ids.add(configured_id)
             label = _required_string(model.get("label"), f"{model_location}.label")
 
             raw_model_id = model.get("model")
             command_model: str | None = None
-            if protocol in {"openai-compatible", "local-command"}:
+            if protocol in {
+                "anthropic-messages",
+                "openai-compatible",
+                "local-command",
+            }:
                 upstream_model = _model_name(raw_model_id, f"{model_location}.model")
                 if protocol == "local-command":
                     command_model = upstream_model
@@ -459,18 +471,34 @@ class LocalCommandTransport:
             self._environ[self.model.command.working_directory_env].strip(),
         )
 
-    def _arguments(self, executable: str, prompt: str) -> list[str]:
+    def _invocation(self, executable: str, prompt: str) -> tuple[list[str], bytes | None]:
         assert self.model.command is not None
         if self.model.command.adapter == "kimi-code":
-            return [
-                executable,
-                "--model",
-                self.model.model_id,
-                "--prompt",
-                prompt,
-                "--output-format",
-                "stream-json",
-            ]
+            return (
+                [
+                    executable,
+                    "--model",
+                    self.model.model_id,
+                    "--prompt",
+                    prompt,
+                    "--output-format",
+                    "stream-json",
+                ],
+                None,
+            )
+        if self.model.command.adapter == "claude-code":
+            return (
+                [
+                    executable,
+                    "--print",
+                    "--output-format",
+                    "json",
+                    "--verbose",
+                    "--model",
+                    self.model.model_id,
+                ],
+                prompt.encode("utf-8"),
+            )
         raise ProviderError(
             "unsupported_command",
             "configured command adapter is unsupported",
@@ -478,23 +506,33 @@ class LocalCommandTransport:
             model_id=self.model.model_id,
         )
 
+    def _command_label(self) -> str:
+        assert self.model.command is not None
+        return "Claude Code" if self.model.command.adapter == "claude-code" else "Kimi Code"
+
     def _error_from_exit(self, returncode: int, stderr: str) -> ProviderError:
+        command_label = self._command_label()
         normalized = stderr.casefold()
         if "usage limit" in normalized or "quota" in normalized:
             code = "usage_limit"
-            message = "Kimi Code usage window is exhausted"
+            message = f"{command_label} usage window is exhausted"
             status_code = 403
-        elif "auth" in normalized or "403" in normalized:
+        elif (
+            "auth" in normalized
+            or "403" in normalized
+            or "login" in normalized
+            or "not logged in" in normalized
+        ):
             code = "command_refused"
-            message = "Kimi Code authentication or usage authorization was refused"
+            message = f"{command_label} authentication or usage authorization was refused"
             status_code = 403
         elif returncode == 75:
             code = "command_retryable"
-            message = "Kimi Code reported a temporary provider failure"
+            message = f"{command_label} reported a temporary provider failure"
             status_code = None
         else:
             code = "command_error"
-            message = f"Kimi Code command failed with exit code {returncode}"
+            message = f"{command_label} command failed with exit code {returncode}"
             status_code = None
         return ProviderError(
             code,
@@ -504,7 +542,7 @@ class LocalCommandTransport:
             status_code=status_code,
         )
 
-    def _parse_response(self, stdout: str) -> ProviderResponse:
+    def _parse_kimi_response(self, stdout: str) -> ProviderResponse:
         assistant_messages: list[str] = []
         for line in stdout.splitlines():
             if not line.strip():
@@ -549,12 +587,73 @@ class LocalCommandTransport:
             finish_reason="stop",
         )
 
+    def _parse_claude_response(self, stdout: str) -> ProviderResponse:
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise ProviderError(
+                "malformed_response",
+                "Claude Code returned malformed JSON output",
+                provider_id=self.model.provider_id,
+                model_id=self.model.model_id,
+            ) from exc
+        if isinstance(data, list):
+            data = next(
+                (item for item in data if isinstance(item, dict) and item.get("type") == "result"),
+                None,
+            )
+        if isinstance(data, dict) and data.get("is_error") is True:
+            detail = data.get("result", "")
+            raise self._error_from_exit(1, detail if isinstance(detail, str) else "")
+        if not isinstance(data, dict) or not isinstance(data.get("result"), str):
+            raise ProviderError(
+                "malformed_response",
+                "Claude Code returned no assistant response",
+                provider_id=self.model.provider_id,
+                model_id=self.model.model_id,
+            )
+        content = data["result"]
+        if not content:
+            raise ProviderError(
+                "malformed_response",
+                "Claude Code returned no assistant response",
+                provider_id=self.model.provider_id,
+                model_id=self.model.model_id,
+            )
+        raw_usage = data.get("usage", {})
+        if not isinstance(raw_usage, dict):
+            raw_usage = {}
+        prompt_tokens = raw_usage.get("input_tokens", 0)
+        completion_tokens = raw_usage.get("output_tokens", 0)
+        if not isinstance(prompt_tokens, int):
+            prompt_tokens = 0
+        if not isinstance(completion_tokens, int):
+            completion_tokens = 0
+        return ProviderResponse(
+            content=content,
+            model_id=self.model.model_id,
+            usage={
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+            finish_reason="stop",
+        )
+
+    def _parse_response(self, stdout: str) -> ProviderResponse:
+        assert self.model.command is not None
+        if self.model.command.adapter == "claude-code":
+            return self._parse_claude_response(stdout)
+        return self._parse_kimi_response(stdout)
+
     async def complete(self, prompt: str) -> ProviderResponse:
         executable, working_directory = self._resolved_command()
+        arguments, stdin = self._invocation(executable, prompt)
         try:
             process = await asyncio.create_subprocess_exec(
-                *self._arguments(executable, prompt),
+                *arguments,
                 cwd=working_directory,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
@@ -568,13 +667,13 @@ class LocalCommandTransport:
             ) from exc
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                process.communicate(), timeout=self.model.timeout_seconds
+                process.communicate(input=stdin), timeout=self.model.timeout_seconds
             )
         except TimeoutError as exc:
             await _stop_process(process)
             raise ProviderError(
                 "timeout",
-                "Kimi Code command timed out",
+                f"{self._command_label()} command timed out",
                 provider_id=self.model.provider_id,
                 model_id=self.model.model_id,
             ) from exc
@@ -588,7 +687,7 @@ class LocalCommandTransport:
         return self._parse_response(stdout)
 
 
-class OpenAICompatibleTransport:
+class _OpenAICompatibleTransportCore:
     """One bounded transport for explicitly configured chat-completions APIs."""
 
     def __init__(
@@ -616,8 +715,7 @@ class OpenAICompatibleTransport:
             if not credential:
                 raise ProviderError(
                     "missing_credential",
-                    f"required credential environment variable "
-                    f"{self.model.api_key_env} is not set",
+                    f"required credential environment variable {self.model.api_key_env} is not set",
                     provider_id=self.model.provider_id,
                     model_id=self.model.model_id,
                 )
@@ -662,9 +760,7 @@ class OpenAICompatibleTransport:
             payload["max_tokens"] = max_tokens
         return payload
 
-    def _error(
-        self, code: str, message: str, *, status_code: int | None = None
-    ) -> ProviderError:
+    def _error(self, code: str, message: str, *, status_code: int | None = None) -> ProviderError:
         return ProviderError(
             code,
             message,
@@ -686,9 +782,7 @@ class OpenAICompatibleTransport:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self.model.timeout_seconds)
         try:
-            response = await client.post(
-                self.endpoint, headers=self._headers(), json=payload
-            )
+            response = await client.post(self.endpoint, headers=self._headers(), json=payload)
             if response.status_code < 200 or response.status_code >= 300:
                 raise self._error(
                     "http_error",
@@ -733,6 +827,257 @@ class OpenAICompatibleTransport:
         finally:
             if owns_client:
                 await client.aclose()
+
+
+class _AnthropicMessagesTransportCore:
+    """Bounded transport for Anthropic's native Messages API."""
+
+    def __init__(
+        self,
+        model: ConfiguredModel,
+        *,
+        environ: Mapping[str, str] | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        if model.protocol != "anthropic-messages" or not model.base_url:
+            raise ValueError("model is not configured for anthropic-messages transport")
+        self.model = model
+        self._environ = os.environ if environ is None else environ
+        self._client = client
+
+    @property
+    def endpoint(self) -> str:
+        assert self.model.base_url is not None
+        return f"{self.model.base_url}/messages"
+
+    def _headers(self) -> dict[str, str]:
+        assert self.model.api_key_env is not None
+        credential = self._environ.get(self.model.api_key_env)
+        if not credential:
+            raise self._error(
+                "missing_credential",
+                f"required credential environment variable {self.model.api_key_env} is not set",
+            )
+        return {
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": credential,
+        }
+
+    def _payload(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        stream: bool,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        system: list[str] = []
+        normalized: list[dict[str, str]] = []
+        for index, message in enumerate(messages):
+            role = message.get("role")
+            content = message.get("content")
+            if role not in {"system", "user", "assistant"} or not isinstance(content, str):
+                raise self._error(
+                    "invalid_request",
+                    f"message {index} must have a supported role and string content",
+                )
+            if role == "system":
+                system.append(content)
+            else:
+                normalized.append({"role": role, "content": content})
+        if not normalized:
+            raise self._error(
+                "invalid_request", "at least one user or assistant message is required"
+            )
+        payload: dict[str, Any] = {
+            "model": self.model.model_id,
+            "messages": normalized,
+            "max_tokens": 4096 if max_tokens is None else max_tokens,
+            "stream": stream,
+        }
+        if system:
+            payload["system"] = "\n\n".join(system)
+        if temperature is not None:
+            payload["temperature"] = temperature
+        return payload
+
+    def _error(self, code: str, message: str, *, status_code: int | None = None) -> ProviderError:
+        return ProviderError(
+            code,
+            message,
+            provider_id=self.model.provider_id,
+            model_id=self.model.model_id,
+            status_code=status_code,
+        )
+
+    @staticmethod
+    def _usage(input_tokens: object, output_tokens: object) -> dict[str, int]:
+        prompt_tokens = int(input_tokens or 0)
+        completion_tokens = int(output_tokens or 0)
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+
+    async def complete(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> ProviderResponse:
+        payload = self._payload(
+            messages, stream=False, temperature=temperature, max_tokens=max_tokens
+        )
+        owns_client = self._client is None
+        client = self._client or httpx.AsyncClient(timeout=self.model.timeout_seconds)
+        try:
+            response = await client.post(self.endpoint, headers=self._headers(), json=payload)
+            if response.status_code < 200 or response.status_code >= 300:
+                raise self._error(
+                    "http_error",
+                    f"provider returned HTTP {response.status_code}",
+                    status_code=response.status_code,
+                )
+            try:
+                data = response.json()
+                response_model = data["model"]
+                if response_model != self.model.model_id:
+                    raise self._error(
+                        "model_mismatch",
+                        "provider returned a different model than requested",
+                    )
+                blocks = data["content"]
+                if not isinstance(blocks, list):
+                    raise TypeError
+                text_parts = [
+                    block["text"]
+                    for block in blocks
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ]
+                if not text_parts or not all(isinstance(part, str) for part in text_parts):
+                    raise TypeError
+                usage_raw = data.get("usage") or {}
+                usage = self._usage(usage_raw.get("input_tokens"), usage_raw.get("output_tokens"))
+                finish_reason = data.get("stop_reason")
+                if finish_reason is not None and not isinstance(finish_reason, str):
+                    raise TypeError
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise self._error(
+                    "malformed_response",
+                    "provider returned a malformed Anthropic Messages response",
+                ) from exc
+            return ProviderResponse("".join(text_parts), response_model, usage, finish_reason)
+        except ProviderError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise self._error("timeout", "provider request timed out") from exc
+        except httpx.HTTPError as exc:
+            raise self._error("transport_error", "provider request failed") from exc
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if owns_client:
+                await client.aclose()
+
+
+class AnthropicMessagesTransport(_AnthropicMessagesTransportCore):
+    """Anthropic Messages transport with native SSE streaming support."""
+
+    async def stream(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[ProviderChunk]:
+        payload = self._payload(
+            messages, stream=True, temperature=temperature, max_tokens=max_tokens
+        )
+        owns_client = self._client is None
+        client = self._client or httpx.AsyncClient(timeout=self.model.timeout_seconds)
+        input_tokens = 0
+        output_tokens = 0
+        finish_reason: str | None = None
+        saw_message_start = False
+        saw_message_stop = False
+        try:
+            async with client.stream(
+                "POST", self.endpoint, headers=self._headers(), json=payload
+            ) as response:
+                if response.status_code < 200 or response.status_code >= 300:
+                    raise self._error(
+                        "http_error",
+                        f"provider returned HTTP {response.status_code}",
+                        status_code=response.status_code,
+                    )
+                async for line in response.aiter_lines():
+                    if not line or line.startswith(":") or not line.startswith("data:"):
+                        continue
+                    try:
+                        data = json.loads(line[5:].strip())
+                        event_type = data.get("type")
+                        if event_type == "message_start":
+                            message = data["message"]
+                            if message["model"] != self.model.model_id:
+                                raise self._error(
+                                    "model_mismatch",
+                                    "provider returned a different model than requested",
+                                )
+                            input_tokens = int((message.get("usage") or {}).get("input_tokens", 0))
+                            saw_message_start = True
+                        elif event_type == "content_block_delta":
+                            delta = data["delta"]
+                            if delta.get("type") == "text_delta":
+                                content = delta["text"]
+                                if not isinstance(content, str):
+                                    raise TypeError
+                                if content:
+                                    yield ProviderChunk(content=content)
+                        elif event_type == "message_delta":
+                            delta = data.get("delta") or {}
+                            if delta.get("stop_reason") is not None:
+                                finish_reason = str(delta["stop_reason"])
+                            output_tokens = int(
+                                (data.get("usage") or {}).get("output_tokens", output_tokens)
+                            )
+                        elif event_type == "message_stop":
+                            saw_message_stop = True
+                        elif event_type == "error":
+                            raise self._error(
+                                "provider_error", "provider reported a streaming error"
+                            )
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                        raise self._error(
+                            "malformed_response",
+                            "provider returned malformed Anthropic streaming data",
+                        ) from exc
+            if not saw_message_start or not saw_message_stop:
+                raise self._error(
+                    "malformed_response",
+                    "provider stream ended without a complete Anthropic message",
+                )
+            yield ProviderChunk(
+                usage=self._usage(input_tokens, output_tokens),
+                finish_reason=finish_reason or "end_turn",
+            )
+        except ProviderError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise self._error("timeout", "provider request timed out") from exc
+        except httpx.HTTPError as exc:
+            raise self._error("transport_error", "provider request failed") from exc
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if owns_client:
+                await client.aclose()
+
+
+class OpenAICompatibleTransport(_OpenAICompatibleTransportCore):
+    """OpenAI-compatible transport with streaming Chat Completions support."""
 
     async def stream(
         self,
@@ -792,9 +1137,7 @@ class OpenAICompatibleTransport:
                         if usage_raw:
                             final_usage = {
                                 "prompt_tokens": int(usage_raw.get("prompt_tokens", 0)),
-                                "completion_tokens": int(
-                                    usage_raw.get("completion_tokens", 0)
-                                ),
+                                "completion_tokens": int(usage_raw.get("completion_tokens", 0)),
                                 "total_tokens": int(usage_raw.get("total_tokens", 0)),
                             }
                     except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -808,7 +1151,8 @@ class OpenAICompatibleTransport:
                     "provider stream ended without completion data",
                 )
             yield ProviderChunk(
-                usage=final_usage or {
+                usage=final_usage
+                or {
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
                     "total_tokens": 0,

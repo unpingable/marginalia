@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from gov_webui.model_providers import (
+    AnthropicMessagesTransport,
     OpenAICompatibleTransport,
     ProviderConfigurationError,
     ProviderError,
@@ -61,6 +62,20 @@ def write_config(path: Path, *, default_model: str = "local-model") -> Path:
                             }
                         ],
                     },
+                    {
+                        "id": "anthropic",
+                        "protocol": "anthropic-messages",
+                        "base_url": "https://api.anthropic.test/v1",
+                        "api_key_env": "ANTHROPIC_TEST_KEY",
+                        "timeout_seconds": 4,
+                        "models": [
+                            {
+                                "id": "anthropic-model",
+                                "model": "claude-test-model",
+                                "label": "Anthropic model",
+                            }
+                        ],
+                    },
                 ],
             }
         ),
@@ -80,6 +95,7 @@ def test_configuration_is_explicit_and_preserves_provider_model_distinction(
         "existing-default",
         "local-model",
         "remote-model",
+        "anthropic-model",
     ]
     assert selected.provider_id == "local"
     assert selected.model_id == "upstream-local"
@@ -97,15 +113,11 @@ def test_configuration_is_explicit_and_preserves_provider_model_distinction(
             "duplicate configured model",
         ),
         (
-            lambda config: config["providers"][1].update(
-                {"base_url": "provider.test/v1"}
-            ),
+            lambda config: config["providers"][1].update({"base_url": "provider.test/v1"}),
             r"http.*URL",
         ),
         (
-            lambda config: config["providers"][1].update(
-                {"protocol": "unknown"}
-            ),
+            lambda config: config["providers"][1].update({"protocol": "unknown"}),
             "unsupported",
         ),
         (
@@ -114,9 +126,7 @@ def test_configuration_is_explicit_and_preserves_provider_model_distinction(
         ),
     ],
 )
-def test_invalid_configuration_fails_clearly(
-    tmp_path: Path, mutation, expected: str
-) -> None:
+def test_invalid_configuration_fails_clearly(tmp_path: Path, mutation, expected: str) -> None:
     path = write_config(tmp_path / "providers.json")
     config = json.loads(path.read_text(encoding="utf-8"))
     mutation(config)
@@ -147,11 +157,32 @@ def test_missing_credential_refused_without_substitution(tmp_path: Path) -> None
     assert catalog.resolve("local-model").provider_id == "local"
 
 
+def test_anthropic_configuration_requires_credential_variable(tmp_path: Path) -> None:
+    path = write_config(tmp_path / "providers.json")
+    config = json.loads(path.read_text(encoding="utf-8"))
+    config["providers"][3].pop("api_key_env")
+    path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(ProviderConfigurationError, match="api_key_env is required"):
+        load_provider_catalog(path)
+
+
+def test_unavailable_configured_default_uses_first_available_model(tmp_path: Path) -> None:
+    catalog = load_provider_catalog(
+        write_config(tmp_path / "providers.json", default_model="remote-model")
+    )
+
+    assert catalog.available_default(environ={}).id == "existing-default"
+    assert catalog.require_available("", environ={}).id == "existing-default"
+
+    with pytest.raises(ProviderError) as explicit:
+        catalog.require_available("remote-model", environ={})
+    assert explicit.value.code == "missing_credential"
+
+
 @pytest.mark.asyncio
 async def test_openai_compatible_request_construction(tmp_path: Path) -> None:
-    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve(
-        "remote-model"
-    )
+    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve("remote-model")
     captured: dict[str, object] = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -211,9 +242,7 @@ async def test_openai_compatible_request_construction(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_http_failure_is_normalized_without_response_body(tmp_path: Path) -> None:
-    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve(
-        "local-model"
-    )
+    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve("local-model")
 
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, text="private provider response body")
@@ -231,9 +260,7 @@ async def test_http_failure_is_normalized_without_response_body(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_malformed_response_is_normalized(tmp_path: Path) -> None:
-    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve(
-        "local-model"
-    )
+    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve("local-model")
 
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": []})
@@ -249,9 +276,7 @@ async def test_malformed_response_is_normalized(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_timeout_is_normalized(tmp_path: Path) -> None:
-    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve(
-        "local-model"
-    )
+    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve("local-model")
 
     async def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("late", request=request)
@@ -267,9 +292,7 @@ async def test_timeout_is_normalized(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_cancellation_propagates(tmp_path: Path) -> None:
-    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve(
-        "local-model"
-    )
+    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve("local-model")
     started = asyncio.Event()
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -291,9 +314,7 @@ async def test_cancellation_propagates(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_deltas_and_usage(tmp_path: Path) -> None:
-    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve(
-        "local-model"
-    )
+    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve("local-model")
     events = (
         'data: {"choices":[{"delta":{"content":"one "},"finish_reason":null}]}\n\n'
         'data: {"choices":[{"delta":{"content":"two"},"finish_reason":"stop"}]}\n\n'
@@ -321,3 +342,117 @@ async def test_streaming_deltas_and_usage(tmp_path: Path) -> None:
         "completion_tokens": 2,
         "total_tokens": 5,
     }
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_request_construction(tmp_path: Path) -> None:
+    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve(
+        "anthropic-model"
+    )
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["api_key"] = request.headers.get("x-api-key")
+        captured["version"] = request.headers.get("anthropic-version")
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_fixture",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-test-model",
+                "content": [
+                    {"type": "text", "text": "bounded "},
+                    {"type": "text", "text": "reply"},
+                ],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 5, "output_tokens": 2},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await AnthropicMessagesTransport(
+            model,
+            environ={"ANTHROPIC_TEST_KEY": "fixture-secret"},
+            client=client,
+        ).complete(
+            [
+                {"role": "system", "content": "Keep the voice spare."},
+                {"role": "user", "content": "Continue."},
+                {"role": "assistant", "content": "Previously."},
+            ],
+            temperature=0.2,
+            max_tokens=64,
+        )
+
+    assert captured == {
+        "url": "https://api.anthropic.test/v1/messages",
+        "api_key": "fixture-secret",
+        "version": "2023-06-01",
+        "payload": {
+            "model": "claude-test-model",
+            "messages": [
+                {"role": "user", "content": "Continue."},
+                {"role": "assistant", "content": "Previously."},
+            ],
+            "max_tokens": 64,
+            "stream": False,
+            "system": "Keep the voice spare.",
+            "temperature": 0.2,
+        },
+    }
+    assert response.content == "bounded reply"
+    assert response.model_id == "claude-test-model"
+    assert response.usage == {
+        "prompt_tokens": 5,
+        "completion_tokens": 2,
+        "total_tokens": 7,
+    }
+    assert response.finish_reason == "end_turn"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_stream_is_normalized(tmp_path: Path) -> None:
+    model = load_provider_catalog(write_config(tmp_path / "providers.json")).resolve(
+        "anthropic-model"
+    )
+    body = "\n".join(
+        [
+            "event: message_start",
+            'data: {"type":"message_start","message":{"model":"claude-test-model","usage":{"input_tokens":8}}}',
+            "",
+            "event: content_block_delta",
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}',
+            "",
+            "event: message_delta",
+            'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}',
+            "",
+            "event: message_stop",
+            'data: {"type":"message_stop"}',
+            "",
+        ]
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["stream"] is True
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        chunks = [
+            chunk
+            async for chunk in AnthropicMessagesTransport(
+                model,
+                environ={"ANTHROPIC_TEST_KEY": "fixture-secret"},
+                client=client,
+            ).stream([{"role": "user", "content": "Hello"}])
+        ]
+
+    assert [chunk.content for chunk in chunks] == ["hello", ""]
+    assert chunks[-1].usage == {
+        "prompt_tokens": 8,
+        "completion_tokens": 3,
+        "total_tokens": 11,
+    }
+    assert chunks[-1].finish_reason == "end_turn"

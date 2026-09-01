@@ -111,6 +111,31 @@ def test_configured_model_list_is_explicit(provider_client) -> None:
     ]
 
 
+def test_model_api_and_new_session_use_an_available_default(provider_client) -> None:
+    client, adapter = provider_client
+    config_path = Path(adapter.MARGINALIA_MODEL_CONFIG)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["providers"][0]["api_key_env"] = "UNSET_PROVIDER_TEST_KEY"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    response = client.get("/v1/models")
+
+    assert response.status_code == 200
+    assert response.json()["default_model"] == "fiction-model-b"
+    assert response.json()["data"][0]["available"] is False
+    assert response.json()["data"][1]["available"] is True
+
+    created = client.post("/sessions/", json={"title": "Available default"})
+    assert created.status_code == 200
+    assert created.json()["model"] == "fiction-model-b"
+
+    refused = client.post(
+        "/sessions/",
+        json={"title": "Explicit unavailable", "model": "fiction-model"},
+    )
+    assert refused.status_code == 503
+
+
 def test_chat_response_records_exact_configured_identity(provider_client) -> None:
     client, adapter = provider_client
 

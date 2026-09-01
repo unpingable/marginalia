@@ -707,7 +707,9 @@
       try {
         const [models, backends] = await Promise.all([api("/v1/models"), api("/v1/backends")]);
         state.models = models.data || [];
-        state.defaultModel = models.default_model || state.models[0]?.id || "";
+        const availableModels = state.models.filter((model) => model.available !== false);
+        state.defaultModel = availableModels.some((model) => model.id === models.default_model)
+          ? models.default_model : availableModels[0]?.id || "";
         syncModelPicker();
         $("#provider-dot").classList.toggle("offline", !backends.connected);
       } catch (error) {
@@ -721,7 +723,10 @@
 
     function syncModelPicker() {
       const select = $("#model-select");
-      const selected = state.activeSession?.model || state.model || state.defaultModel;
+      const requested = state.activeSession?.model || state.model || state.defaultModel;
+      const availableModels = state.models.filter((model) => model.available !== false);
+      const selected = availableModels.some((model) => model.id === requested)
+        ? requested : state.defaultModel || availableModels[0]?.id || "";
       select.replaceChildren();
       state.models.forEach((model) => {
         const option = new Option(model.label || model.id, model.id);
@@ -729,14 +734,14 @@
         if (model.unavailable_reason) option.title = model.unavailable_reason;
         select.append(option);
       });
-      if (selected && !state.models.some((model) => model.id === selected)) {
-        const unavailable = new Option(`Unavailable: ${selected}`, selected);
+      if (requested && !state.models.some((model) => model.id === requested)) {
+        const unavailable = new Option(`Unavailable: ${requested}`, requested);
         unavailable.disabled = true;
         select.append(unavailable);
       }
       state.model = selected || state.defaultModel;
       select.value = state.model;
-      select.disabled = !state.models.length;
+      select.disabled = !availableModels.length;
       const current = state.models.find((model) => model.id === state.model);
       select.title = current?.unavailable_reason || "Model for future responses in this conversation";
     }

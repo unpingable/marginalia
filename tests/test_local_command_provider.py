@@ -12,9 +12,11 @@ import pytest
 
 from gov_webui import provider_cli
 from gov_webui.model_providers import (
+    AnthropicMessagesTransport,
     LocalCommandTransport,
     ProviderConfigurationError,
     ProviderError,
+    ProviderChunk,
     ProviderResponse,
     load_provider_catalog,
 )
@@ -66,6 +68,44 @@ def _catalog(
     environ = {
         "TEST_COMMAND_PATH": str(executable),
         "TEST_COMMAND_WORKDIR": str(workdir),
+    }
+    return load_provider_catalog(config), environ
+
+
+def _claude_catalog(tmp_path: Path, executable: Path):
+    workdir = tmp_path / "claude-work"
+    workdir.mkdir(exist_ok=True)
+    config = tmp_path / "claude-providers.json"
+    config.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "default_model": "claude-writing",
+                "providers": [
+                    {
+                        "id": "claude-local",
+                        "protocol": "local-command",
+                        "command": {
+                            "adapter": "claude-code",
+                            "executable_env": "TEST_CLAUDE_PATH",
+                            "working_directory_env": "TEST_CLAUDE_WORKDIR",
+                        },
+                        "models": [
+                            {
+                                "id": "claude-writing",
+                                "model": "sonnet",
+                                "label": "Claude Sonnet",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    environ = {
+        "TEST_CLAUDE_PATH": str(executable),
+        "TEST_CLAUDE_WORKDIR": str(workdir),
     }
     return load_provider_catalog(config), environ
 
@@ -157,6 +197,92 @@ print(json.dumps({"role": "assistant", "content": [{"type": "text", "text": json
 
 
 @pytest.mark.asyncio
+async def test_claude_adapter_uses_stdin_and_parses_json_result(tmp_path: Path) -> None:
+    executable = _executable(
+        tmp_path / "claude",
+        """import json
+import sys
+prompt = sys.stdin.read()
+print(json.dumps({
+    "result": json.dumps({"arguments": sys.argv[1:], "prompt": prompt}),
+    "usage": {"input_tokens": 11, "output_tokens": 7},
+}))
+""",
+    )
+    catalog, environ = _claude_catalog(tmp_path, executable)
+
+    response = await LocalCommandTransport(
+        catalog.resolve("claude-writing"), environ=environ
+    ).complete("Keep the voice spare.")
+
+    result = json.loads(response.content)
+    assert result["arguments"] == [
+        "--print",
+        "--output-format",
+        "json",
+        "--verbose",
+        "--model",
+        "sonnet",
+    ]
+    assert result["prompt"] == "Keep the voice spare."
+    assert response.model_id == "sonnet"
+    assert response.usage == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+    }
+
+
+@pytest.mark.asyncio
+async def test_claude_auth_refusal_is_normalized_without_stderr_leak(
+    tmp_path: Path,
+) -> None:
+    executable = _executable(
+        tmp_path / "claude",
+        """import sys
+print("not logged in; private authentication detail", file=sys.stderr)
+raise SystemExit(1)
+""",
+    )
+    catalog, environ = _claude_catalog(tmp_path, executable)
+
+    with pytest.raises(ProviderError) as caught:
+        await LocalCommandTransport(catalog.resolve("claude-writing"), environ=environ).complete(
+            "Hello"
+        )
+
+    assert caught.value.code == "command_refused"
+    assert caught.value.status_code == 403
+    assert str(caught.value) == ("Claude Code authentication or usage authorization was refused")
+    assert "private" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_claude_structured_auth_error_fails_closed(tmp_path: Path) -> None:
+    executable = _executable(
+        tmp_path / "claude",
+        """import json
+print(json.dumps([{
+    "type": "result",
+    "subtype": "success",
+    "is_error": True,
+    "result": "API Error: 401 OAuth access token has expired",
+}]))
+""",
+    )
+    catalog, environ = _claude_catalog(tmp_path, executable)
+
+    with pytest.raises(ProviderError) as caught:
+        await LocalCommandTransport(catalog.resolve("claude-writing"), environ=environ).complete(
+            "Hello"
+        )
+
+    assert caught.value.code == "command_refused"
+    assert caught.value.status_code == 403
+    assert str(caught.value) == ("Claude Code authentication or usage authorization was refused")
+
+
+@pytest.mark.asyncio
 async def test_usage_window_refusal_is_normalized_without_stderr_leak(
     tmp_path: Path,
 ) -> None:
@@ -170,9 +296,9 @@ raise SystemExit(1)
     catalog, environ = _catalog(tmp_path, executable)
 
     with pytest.raises(ProviderError) as caught:
-        await LocalCommandTransport(
-            catalog.resolve("command-writing"), environ=environ
-        ).complete("Hello")
+        await LocalCommandTransport(catalog.resolve("command-writing"), environ=environ).complete(
+            "Hello"
+        )
 
     assert caught.value.code == "usage_limit"
     assert caught.value.status_code == 403
@@ -182,13 +308,13 @@ raise SystemExit(1)
 
 @pytest.mark.asyncio
 async def test_malformed_command_response_is_normalized(tmp_path: Path) -> None:
-    executable = _executable(tmp_path / "command", "print(\"not-json\")\n")
+    executable = _executable(tmp_path / "command", 'print("not-json")\n')
     catalog, environ = _catalog(tmp_path, executable)
 
     with pytest.raises(ProviderError) as caught:
-        await LocalCommandTransport(
-            catalog.resolve("command-writing"), environ=environ
-        ).complete("Hello")
+        await LocalCommandTransport(catalog.resolve("command-writing"), environ=environ).complete(
+            "Hello"
+        )
 
     assert caught.value.code == "malformed_response"
 
@@ -204,9 +330,9 @@ time.sleep(60)
     catalog, environ = _catalog(tmp_path, executable, timeout_seconds=0.1)
 
     with pytest.raises(ProviderError) as caught:
-        await LocalCommandTransport(
-            catalog.resolve("command-writing"), environ=environ
-        ).complete("Hello")
+        await LocalCommandTransport(catalog.resolve("command-writing"), environ=environ).complete(
+            "Hello"
+        )
 
     assert caught.value.code == "timeout"
 
@@ -221,9 +347,7 @@ time.sleep(60)
     )
     catalog, environ = _catalog(tmp_path, executable)
     task = asyncio.create_task(
-        LocalCommandTransport(
-            catalog.resolve("command-writing"), environ=environ
-        ).complete("Hello")
+        LocalCommandTransport(catalog.resolve("command-writing"), environ=environ).complete("Hello")
     )
     await asyncio.sleep(0.1)
     task.cancel()
@@ -303,3 +427,64 @@ def test_dispatcher_reports_normalized_command_failure_on_stderr(
     assert result == 1
     assert captured.out == ""
     assert captured.err == "Kimi Code usage window is exhausted\n"
+
+
+def test_dispatcher_routes_anthropic_to_native_messages_transport(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = tmp_path / "providers.json"
+    config.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "default_model": "anthropic-writing",
+                "providers": [
+                    {
+                        "id": "anthropic-api",
+                        "protocol": "anthropic-messages",
+                        "base_url": "https://api.anthropic.test/v1",
+                        "api_key_env": "ANTHROPIC_TEST_KEY",
+                        "models": [
+                            {
+                                "id": "anthropic-writing",
+                                "model": "claude-test-model",
+                                "label": "Anthropic model",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MARGINALIA_MODEL_CONFIG", str(config))
+    monkeypatch.setenv("ANTHROPIC_TEST_KEY", "fixture-secret")
+    monkeypatch.setattr(provider_cli.sys, "stdin", io.StringIO("governed prompt"))
+
+    async def fake_stream(self, messages, **kwargs):
+        assert self.model.provider_id == "anthropic-api"
+        assert messages == [{"role": "user", "content": "governed prompt"}]
+        yield ProviderChunk(content="native reply")
+        yield ProviderChunk(
+            usage={"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8},
+            finish_reason="end_turn",
+        )
+
+    monkeypatch.setattr(AnthropicMessagesTransport, "stream", fake_stream)
+
+    result = provider_cli.main(["exec", "--json", "-m", "anthropic-writing", "-"])
+
+    assert result == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert events == [
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "native reply"},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 6, "output_tokens": 2},
+        },
+    ]

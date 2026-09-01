@@ -660,8 +660,9 @@ async def list_models() -> ModelList:
     try:
         catalog = _configured_provider_catalog()
         if catalog is not None:
+            available_default = catalog.available_default()
             return ModelList(
-                default_model=catalog.default_model,
+                default_model=available_default.id if available_default else None,
                 data=[
                     ModelInfo(
                         id=model.id,
@@ -2354,7 +2355,7 @@ async def create_session(request: CreateSessionRequest) -> dict[str, Any]:
     title = request.title.strip()
     if not title:
         raise HTTPException(status_code=422, detail="conversation title must not be empty")
-    selected_model, _ = _resolve_configured_model(request.model, require_available=False)
+    selected_model, _ = _resolve_configured_model(request.model)
     session = store.create(
         context_id=project.context_id,
         model=selected_model,
@@ -2398,9 +2399,7 @@ async def update_session(session_id: str, request: UpdateSessionRequest) -> dict
         session = store.get(session_id) or session
 
     if request.model is not None:
-        selected_model, _ = _resolve_configured_model(
-            request.model, require_available=False
-        )
+        selected_model, _ = _resolve_configured_model(request.model)
         if not store.update_model(session_id, selected_model):
             raise HTTPException(status_code=404, detail="Session not found")
         session = store.get(session_id) or session
