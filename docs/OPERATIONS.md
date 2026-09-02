@@ -153,3 +153,17 @@ to `/data`.
 
 See [RELIABILITY.md](RELIABILITY.md) for exact timeout layers, what each health
 signal proves, synthetic cadence, and PASS semantics.
+
+## Non-urgent operational TODOs
+
+- [ ] Enable a `main` branch ruleset that requires the `quality`, `test`, and
+  `container` GitHub Actions checks while retaining an explicit, bounded
+  administrator/emergency bypass.
+- [ ] Route recurring synthetic failures to an external notification. Start
+  with the conservative policy “two consecutive synthetic failures notify
+  James,” consuming the existing JSONL or container-log interface without
+  changing the probe's isolation or cadence.
+- [ ] Perform and document a blank-host restore drill from Marginalia backups.
+  Rebuild the service on a clean host, verify the restored writing and service
+  readiness, retain the original data throughout the drill, and record the
+  backup identifier, image identifier, duration, and outcome.
