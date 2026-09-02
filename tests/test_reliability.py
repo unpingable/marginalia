@@ -287,6 +287,9 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_toke
     )
     healthy.chmod(0o755)
     env["CODEX_NATIVE_PATH"] = str(healthy)
+    # Keep A's deliberately tiny deadline focused on the hang.  A cold hosted
+    # runner can require more than 200 ms merely to start the recovery fixture.
+    env["MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS"] = "2"
     recovered = subprocess.run(
         [sys.executable, "-m", "gov_webui.provider_supervisor", "exec", "-"],
         input=b"B",
@@ -402,7 +405,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_toke
         if socket_path.exists():
             break
         await asyncio.sleep(0.01)
-    client = DaemonChatClient(socket_path, rpc_timeout_seconds=1, chat_timeout_seconds=2)
+    client = DaemonChatClient(socket_path, rpc_timeout_seconds=1, chat_timeout_seconds=5)
     try:
         with pytest.raises(RuntimeError, match="timed out after 0.2 seconds"):
             await client.chat_send(
@@ -410,6 +413,9 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_toke
                 model="codex-default",
                 context_id="synthetic",
             )
+        # Preserve the 200 ms negative control for A while allowing ordinary
+        # interpreter startup variance for the immediate recovery request B.
+        monkeypatch.setenv("MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS", "2")
         result = await client.chat_send(
             [{"role": "user", "content": "B"}],
             model="codex-default",
