@@ -135,6 +135,13 @@ failures without exposing raw stderr. Local commands currently emit whole
 assistant messages rather than token deltas, so Marginalia receives a bounded
 completion chunk after each command turn finishes.
 
+For HTTP providers, `timeout_seconds` is a total execution deadline, not merely
+a socket timeout. Optional `connect_timeout_seconds` and
+`read_timeout_seconds` separately bound connection establishment and response
+idle time; each must be no greater than `timeout_seconds`. Continuous SSE data
+therefore cannot extend one invocation indefinitely. See
+[RELIABILITY.md](RELIABILITY.md) for the outer provider/RPC envelopes.
+
 ## Behavior
 
 The model picker lists only models in this file. Selection is stored on the
@@ -145,6 +152,13 @@ identity as unrecorded.
 
 Marginalia does not discover provider models, route requests automatically,
 silently fail over, or substitute another configured model after a failure.
+
+The existing native Codex command is supervised by Marginalia rather than
+replacing the dispatcher process. `MARGINALIA_CODEX_TIMEOUT_SECONDS` controls
+its response deadline, defaults to 240 seconds, and accepts values from 0.1 to
+1800 seconds. On timeout Marginalia terminates the Codex process group and
+returns a visible provider failure so one stalled command cannot block later
+governed requests indefinitely.
 
 The `openai-compatible` transport uses `/chat/completions` and supports system,
 user, and assistant messages, non-streaming completions, streaming SSE, bounded

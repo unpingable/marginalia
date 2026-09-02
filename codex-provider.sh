@@ -4,4 +4,4 @@
 
 set -euo pipefail
 
-exec python3 -m gov_webui.provider_cli "$@"
+exec python3 -m gov_webui.provider_supervisor "$@"

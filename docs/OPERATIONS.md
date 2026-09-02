@@ -1,9 +1,10 @@
 # Marginalia household operations
 
-Marginalia's Compose deployment has two processes built from the same image:
+Marginalia's Compose deployment has three processes built from the same image:
 
 - `marginalia` runs the Agent Governor daemon and writing-room API.
 - `marginalia-backup` reads `/data` and performs enabled workspace schedules.
+- `marginalia-synthetic` performs bounded isolated governor/provider probes.
 
 Both use the existing `marginalia_data` volume. The worker mounts that volume
 read-only. A Docker-managed NFS volume (recommended) or host bind is mounted at
@@ -73,8 +74,8 @@ docker compose exec -T marginalia \
 ## Health and operational provenance
 
 - `/health/live` proves the web process is alive.
-- `/health/ready` requires the AG contract/provider and durable records to be
-  ready; it returns HTTP 503 otherwise.
+- `/health/ready` requires the AG contract/provider, governor progress, and
+  durable records to be ready; it returns HTTP 503 otherwise.
 - `/health` retains the concise runtime/provider report.
 - `/v1/system` reports application version, image/build/deployment identity,
   supported schemas, preflight results, and backup destination state.
@@ -142,8 +143,13 @@ curl -fsS http://127.0.0.1:8000/health/live
 curl -fsS http://127.0.0.1:8000/health/ready
 curl -fsS http://127.0.0.1:8000/v1/system
 docker compose logs --tail=100 marginalia-backup
+docker compose logs --tail=100 marginalia-synthetic
+tail -n 20 /backups/marginalia-synthetics.jsonl
 ```
 
 An enabled schedule that cannot write logs a failed `backup_attempt` and keeps
 polling. It never disables retention, changes application behavior, or writes
 to `/data`.
+
+See [RELIABILITY.md](RELIABILITY.md) for exact timeout layers, what each health
+signal proves, synthetic cadence, and PASS semantics.

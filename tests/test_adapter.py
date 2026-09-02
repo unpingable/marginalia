@@ -41,6 +41,7 @@ def reset_adapter_globals() -> None:
     adapter_mod._context_manager = None
     adapter_mod._session_store = None
     adapter_mod._governed_chat_adapter = None
+    adapter_mod._synthetic_governed_chat_adapter = None
     adapter_mod._creative_project_store = None
     adapter_mod._library_store = None
     adapter_mod._session_stores.clear()
@@ -63,6 +64,7 @@ def reset_adapter_globals() -> None:
     adapter_mod._context_manager = None
     adapter_mod._session_store = None
     adapter_mod._governed_chat_adapter = None
+    adapter_mod._synthetic_governed_chat_adapter = None
     adapter_mod._creative_project_store = None
     adapter_mod._library_store = None
     adapter_mod._session_stores.clear()
@@ -184,6 +186,40 @@ class TestHealthEndpoint:
         data = response.json()
         assert data["status"] == "degraded"
         assert data["backend"]["connected"] is False
+
+    def test_liveness_does_not_claim_governor_readiness(self, client) -> None:
+        response = client.get("/health/live")
+        assert response.status_code == 200
+        assert response.json()["status"] == "alive"
+        assert "backend" not in response.json()
+
+
+def test_synthetic_governor_uses_isolated_context_and_preserves_sessions(
+    client, tmp_contexts_dir
+) -> None:
+    import gov_webui.adapter as adapter_mod
+    from governor.session_store import SessionStore
+
+    adapter_mod._session_store = SessionStore(tmp_contexts_dir / "test-context" / "sessions")
+    created = client.post("/sessions/", json={"title": "User conversation"}).json()
+    client.post(
+        f"/sessions/{created['id']}/messages",
+        json={"role": "user", "content": "User-owned message"},
+    )
+    before = client.get(f"/sessions/{created['id']}").json()
+    synthetic = fake_governed_chat(content="synthetic reply", model="test-model")
+    adapter_mod._synthetic_governed_chat_adapter = synthetic
+
+    response = client.post(
+        "/v1/internal/synthetic-governor",
+        json={"model": "test-model", "marker": "qualification"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PASS"
+    assert response.json()["context_id"] == adapter_mod.MARGINALIA_SYNTHETIC_CONTEXT_ID
+    assert client.get(f"/sessions/{created['id']}").json() == before
+    synthetic.chat_send.assert_awaited_once()
 
 
 # ============================================================================
@@ -3169,9 +3205,7 @@ class FakeArtifactStore:
             raise self._NotFound(artifact_id)
         meta = self._artifacts[artifact_id]["meta"]
         if base_version != meta.current_version:
-            raise self._Stale(
-                artifact_id, base_version, meta.current_version, self._index_version
-            )
+            raise self._Stale(artifact_id, base_version, meta.current_version, self._index_version)
         meta.working_copy_updated_at = "2026-02-21T00:00:02+00:00"
         meta.working_copy_base_version = base_version
         self._artifacts[artifact_id]["working_copy"] = content

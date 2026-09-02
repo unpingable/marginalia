@@ -27,6 +27,7 @@ not part of the served Marginalia product.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import difflib
 import io
@@ -50,7 +51,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, Field
 
 from gov_webui.backup_store import BackupError, WorkspaceBackupManager
-from gov_webui.daemon_client import DaemonAuthError, DaemonChatClient, default_socket_path
+from gov_webui.daemon_client import (
+    DaemonAuthError,
+    DaemonChatClient,
+    DaemonTimeoutError,
+    default_socket_path,
+)
 from gov_webui.creative_project import (
     CreativeProjectConfig,
     CreativeProjectContextMismatch,
@@ -82,6 +88,7 @@ from gov_webui.model_providers import (
     ProviderError,
     load_provider_catalog,
 )
+from gov_webui.reliability import governor_progress
 from gov_webui.markdown import render_writer_markdown
 from gov_webui.manuscript_store import (
     ManuscriptNodeNotFoundError,
@@ -113,6 +120,9 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 CLAUDE_PATH = os.environ.get("CLAUDE_PATH", "claude")  # Path to claude CLI for claude-code backend
 CODEX_PATH = os.environ.get("CODEX_PATH", "codex")  # Path to codex CLI for codex backend
 GOVERNOR_CONTEXT_ID = os.environ.get("GOVERNOR_CONTEXT_ID", "default")
+MARGINALIA_SYNTHETIC_CONTEXT_ID = os.environ.get(
+    "MARGINALIA_SYNTHETIC_CONTEXT_ID", f"{GOVERNOR_CONTEXT_ID}-synthetic"
+)
 GOVERNOR_MODE = os.environ.get("GOVERNOR_MODE", "fiction")
 GOVERNOR_CONTEXTS_DIR = os.environ.get("GOVERNOR_CONTEXTS_DIR", GOVERNOR_DAEMON_DIR)
 GOVERNOR_SHOW_OK_FOOTER = os.environ.get("GOVERNOR_SHOW_OK_FOOTER", "true").lower() in (
@@ -129,9 +139,7 @@ MARGINALIA_BACKUP_ROOT = os.environ.get("MARGINALIA_BACKUP_ROOT", "/backups")
 MARGINALIA_BACKUP_REQUIRE_REMOTE = os.environ.get(
     "MARGINALIA_BACKUP_REQUIRE_REMOTE", "false"
 ).lower() in {"true", "1", "yes"}
-MARGINALIA_MODEL_CONFIG = os.environ.get(
-    "MARGINALIA_MODEL_CONFIG", ""
-).strip()
+MARGINALIA_MODEL_CONFIG = os.environ.get("MARGINALIA_MODEL_CONFIG", "").strip()
 
 if GOVERNOR_MODE != "fiction" and not MARGINALIA_ENABLE_DONOR_ROUTES:
     raise RuntimeError(
@@ -217,6 +225,7 @@ _PRODUCT_EXACT_PATHS = {
     "/v1/backends",
     "/v1/backends/switch",
     "/v1/chat/completions",
+    "/v1/internal/synthetic-governor",
     "/v1/governed-chat/pending",
     "/v1/governed-chat/resolve",
     "/v1/project",
@@ -316,6 +325,11 @@ class ChatCompletionResponse(BaseModel):
     choices: list[ChatCompletionChoice]
     usage: Usage | None = None
     receipt: dict
+
+
+class SyntheticGovernorRequest(BaseModel):
+    model: str = ""
+    marker: str = Field(default="scheduled", min_length=1, max_length=80)
 
 
 class ModelInfo(BaseModel):
@@ -427,6 +441,7 @@ _bridge: Any = None
 _context_manager: GovernorContextManager | None = None
 _session_store: SessionStore | None = None
 _governed_chat_adapter: GovernedChatAdapter | None = None
+_synthetic_governed_chat_adapter: GovernedChatAdapter | None = None
 _creative_project_store: CreativeProjectStore | None = None
 _library_store: LibraryStore | None = None
 _session_stores: dict[str, SessionStore] = {}
@@ -533,6 +548,21 @@ def _get_governed_chat_adapter(
         if project.id == _get_library_store().snapshot().default_project_id
         else _governed_chat_adapters[project.context_id]
     )
+
+
+def _get_synthetic_governed_chat_adapter() -> GovernedChatAdapter:
+    """Bind synthetics to an AG context absent from the user conversation library."""
+    global _synthetic_governed_chat_adapter
+    if _synthetic_governed_chat_adapter is None:
+        socket_path = os.environ.get("GOVERNOR_SOCKET", "")
+        if not socket_path:
+            socket_path = str(default_socket_path(Path(GOVERNOR_DAEMON_DIR)))
+        _synthetic_governed_chat_adapter = GovernedChatAdapter(
+            DaemonChatClient(socket_path),
+            context_id=MARGINALIA_SYNTHETIC_CONTEXT_ID,
+            expected_governor_dir=GOVERNOR_DAEMON_DIR,
+        )
+    return _synthetic_governed_chat_adapter
 
 
 def _get_context_manager() -> GovernorContextManager:
@@ -803,8 +833,7 @@ def _library_project_payload(
     payload = project.model_dump(mode="json")
     payload["conversation_count"] = conversation_count
     payload["is_default"] = (
-        project.id
-        == _get_library_store().get_workspace(project.workspace_id).default_project_id
+        project.id == _get_library_store().get_workspace(project.workspace_id).default_project_id
     )
     return payload
 
@@ -820,8 +849,7 @@ def _library_workspace_payload(
         {
             "project_count": project_count,
             "conversation_count": conversation_count,
-            "is_default": workspace.id
-            == _get_library_store().snapshot().default_workspace_id,
+            "is_default": workspace.id == _get_library_store().snapshot().default_workspace_id,
         }
     )
     return payload
@@ -839,9 +867,7 @@ async def list_library_workspaces() -> dict[str, Any]:
             "workspaces": [
                 _library_workspace_payload(
                     workspace,
-                    project_count=len(
-                        library.list_projects(workspace_id=workspace.id)
-                    ),
+                    project_count=len(library.list_projects(workspace_id=workspace.id)),
                     conversation_count=sum(
                         conversation_counts.get(project.id, 0)
                         for project in library.list_projects(workspace_id=workspace.id)
@@ -1110,8 +1136,7 @@ def _docx_from_manuscript(payload: dict[str, Any]) -> bytes:
         if not text:
             return f"<w:p>{style_xml}</w:p>"
         return (
-            f"<w:p>{style_xml}<w:r><w:t xml:space=\"preserve\">"
-            f"{xml_escape(text)}</w:t></w:r></w:p>"
+            f'<w:p>{style_xml}<w:r><w:t xml:space="preserve">{xml_escape(text)}</w:t></w:r></w:p>'
         )
 
     for section in payload["sections"]:
@@ -1179,13 +1204,8 @@ async def compile_manuscript(
     if format == "docx":
         return Response(
             content=_docx_from_manuscript(payload),
-            media_type=(
-                "application/vnd.openxmlformats-officedocument."
-                "wordprocessingml.document"
-            ),
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}.docx"'
-            },
+            media_type=("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            headers={"Content-Disposition": f'attachment; filename="{filename}.docx"'},
         )
     payload["filename"] = f"{filename}.md"
     return payload
@@ -1456,9 +1476,7 @@ def _project_export_zip(payload: dict[str, Any]) -> bytes:
 
         def render_manuscript(parent_id: str | None, depth: int) -> None:
             for node in children.get(parent_id, []):
-                manuscript_lines.extend(
-                    [f"{'#' * min(depth + 1, 6)} {node['title']}", ""]
-                )
+                manuscript_lines.extend([f"{'#' * min(depth + 1, 6)} {node['title']}", ""])
                 artifact = artifact_lookup.get(node.get("artifact_id"))
                 if artifact and artifact["revisions"]:
                     manuscript_lines.extend([artifact["revisions"][-1]["content"], ""])
@@ -1471,7 +1489,12 @@ def _project_export_zip(payload: dict[str, Any]) -> bytes:
             lines = [f"# {conversation['title']}", ""]
             for message in conversation.get("messages", []):
                 lines.extend(
-                    [f"## {message['role'].title()} · {message['timestamp']}", "", message["content"], ""]
+                    [
+                        f"## {message['role'].title()} · {message['timestamp']}",
+                        "",
+                        message["content"],
+                        "",
+                    ]
                 )
             filename = _safe_export_name(conversation["title"], fallback=conversation["id"])
             archive.writestr(f"conversations/{filename}.md", "\n".join(lines).rstrip() + "\n")
@@ -1949,12 +1972,15 @@ async def chat_completions(
             media_type="text/event-stream",
         )
 
+    execution = governor_progress.begin(model_identity.provider_id if model_identity else "codex")
     try:
         result = await governed_chat.chat_send(
             messages=messages,
             model=selected_model,
         )
+        governor_progress.succeeded(execution)
     except DaemonAuthError as e:
+        governor_progress.failed(execution, "authentication")
         raise HTTPException(
             status_code=401,
             detail=(
@@ -1962,7 +1988,14 @@ async def chat_completions(
                 "Run `claude /login` in a terminal to re-authenticate."
             ),
         )
+    except DaemonTimeoutError as e:
+        governor_progress.failed(execution, "governor_timeout", capacity_uncertain=True)
+        raise HTTPException(status_code=504, detail=str(e))
+    except asyncio.CancelledError:
+        governor_progress.failed(execution, "cancelled")
+        raise
     except Exception as e:
+        governor_progress.failed(execution, type(e).__name__)
         raise HTTPException(status_code=502, detail=f"Daemon error: {e}")
 
     # If daemon returned a pending violation, format as violation prompt
@@ -2012,6 +2045,47 @@ async def chat_completions(
     )
 
 
+@app.post("/v1/internal/synthetic-governor")
+async def synthetic_governor(request: SyntheticGovernorRequest) -> dict[str, Any]:
+    """Exercise governed execution without creating a user-visible conversation."""
+    selected_model, identity = _resolve_configured_model(request.model)
+    backend = identity.provider_id if identity else "codex"
+    execution = governor_progress.begin(backend)
+    prompt = (
+        f"[MARGINALIA_SYNTHETIC_V1:{request.marker}] "
+        "Reply briefly to confirm the governed reply path is functioning."
+    )
+    try:
+        result = await _get_synthetic_governed_chat_adapter().chat_send(
+            messages=[{"role": "user", "content": prompt}],
+            model=selected_model,
+        )
+        content = result.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("synthetic governed reply was empty")
+        receipt = result.get("receipt")
+        if not isinstance(receipt, dict) or not receipt.get("receipt_id"):
+            raise RuntimeError("synthetic governed reply omitted its authority receipt")
+        governor_progress.succeeded(execution)
+        return {
+            "status": "PASS",
+            "backend": backend,
+            "model": selected_model,
+            "reply_nonempty": True,
+            "receipt_id": receipt["receipt_id"],
+            "context_id": MARGINALIA_SYNTHETIC_CONTEXT_ID,
+        }
+    except DaemonTimeoutError as exc:
+        governor_progress.failed(execution, "governor_timeout", capacity_uncertain=True)
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except asyncio.CancelledError:
+        governor_progress.failed(execution, "cancelled")
+        raise
+    except Exception as exc:
+        governor_progress.failed(execution, type(exc).__name__)
+        raise HTTPException(status_code=502, detail=f"Synthetic governor error: {exc}") from exc
+
+
 async def _stream_via_daemon(
     governed_chat: GovernedChatAdapter,
     messages: list[dict[str, str]],
@@ -2022,6 +2096,7 @@ async def _stream_via_daemon(
     request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
     final_result: dict | None = None
     turn_id = f"turn-{uuid.uuid4().hex[:12]}"
+    execution = governor_progress.begin(model_identity.provider_id if model_identity else "codex")
 
     try:
         async for delta, final in governed_chat.chat_stream(messages=messages, model=model):
@@ -2047,12 +2122,11 @@ async def _stream_via_daemon(
 
         if final_result is None:
             raise RuntimeError("AG stream ended without a final governed outcome")
+        governor_progress.succeeded(execution)
 
         resolved_model = final_result.get("model") or model
         if model_identity is not None and resolved_model != model:
-            raise RuntimeError(
-                "daemon returned a different model than the explicit selection"
-            )
+            raise RuntimeError("daemon returned a different model than the explicit selection")
         receipt = final_result["receipt"]
 
         # If daemon returned a pending violation, emit it as a final chunk
@@ -2117,6 +2191,7 @@ async def _stream_via_daemon(
         yield "data: [DONE]\n\n"
 
     except DaemonAuthError:
+        governor_progress.failed(execution, "authentication")
         error_chunk = {
             "error": {
                 "message": (
@@ -2127,7 +2202,15 @@ async def _stream_via_daemon(
             }
         }
         yield f"data: {json.dumps(error_chunk)}\n\n"
+    except DaemonTimeoutError as e:
+        governor_progress.failed(execution, "governor_timeout", capacity_uncertain=True)
+        error_chunk = {"error": {"message": str(e), "type": "timeout"}}
+        yield f"data: {json.dumps(error_chunk)}\n\n"
+    except asyncio.CancelledError:
+        governor_progress.failed(execution, "cancelled")
+        raise
     except Exception as e:
+        governor_progress.failed(execution, type(e).__name__)
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
 
@@ -2231,9 +2314,7 @@ def _conversation_payload(
             "pinned": lifecycle.pinned,
             "parent_session_id": lifecycle.parent_session_id,
             "forked_at_message_id": lifecycle.forked_at_message_id,
-            "word_count": sum(
-                _word_count(message.content) for message in session.messages
-            ),
+            "word_count": sum(_word_count(message.content) for message in session.messages),
         }
     )
     return payload
@@ -2329,7 +2410,8 @@ async def conversation_branch_tree(project_id: str | None = None) -> dict[str, A
                 "pinned": record.pinned,
                 "message_count": summary["message_count"],
                 "word_count": sum(
-                    _word_count(message.content) for message in (session.messages if session else [])
+                    _word_count(message.content)
+                    for message in (session.messages if session else [])
                 ),
                 "updated_at": summary["updated_at"],
             }
@@ -2480,12 +2562,9 @@ async def append_message(session_id: str, request: AppendMessageRequest) -> dict
             detail="provider_id and model_id must be recorded together",
         )
     if request.provider_id is not None:
-        _, configured = _resolve_configured_model(
-            request.model or "", require_available=False
-        )
+        _, configured = _resolve_configured_model(request.model or "", require_available=False)
         if configured is None or (
-            configured.provider_id != request.provider_id
-            or configured.model_id != request.model_id
+            configured.provider_id != request.provider_id or configured.model_id != request.model_id
         ):
             raise HTTPException(
                 status_code=422,
@@ -4681,7 +4760,7 @@ async def health_live() -> dict[str, Any]:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    """Health check endpoint."""
+    """Bounded dependency status plus cheap governor progress state."""
     backend: dict[str, Any] = {"type": "unknown", "connected": False}
     contract_ok = False
     provider_reachable = False
@@ -4697,10 +4776,16 @@ async def health() -> dict[str, Any]:
     cm = _get_context_manager()
     ctx = cm.get(GOVERNOR_CONTEXT_ID)
 
+    execution = governor_progress.snapshot()
     return {
         "status": (
             "healthy"
-            if contract_ok and backend.get("connected") and provider_reachable
+            if (
+                contract_ok
+                and backend.get("connected")
+                and provider_reachable
+                and execution["ready"]
+            )
             else "degraded"
         ),
         "backend": {
@@ -4714,13 +4799,14 @@ async def health() -> dict[str, Any]:
             "initialized": ctx is not None,
             "contract_ok": contract_ok,
             "daemon_dir": GOVERNOR_DAEMON_DIR,
+            "execution": execution,
         },
     }
 
 
 @app.get("/health/ready", response_model=None)
 async def health_ready() -> JSONResponse:
-    """Readiness includes daemon connectivity and durable-schema validation."""
+    """Readiness includes bounded daemon checks, schemas, and governor progress."""
     runtime = await health()
     preflight = migration_preflight(
         data_root=Path(MARGINALIA_DATA_ROOT),
@@ -5651,9 +5737,7 @@ def _artifact_detail_response(
     resp: dict = {
         "ok": True,
         "index_version": index_version,
-        "artifact": _artifact_meta_to_dict(
-            meta, include_versions=True, project_id=project_id
-        ),
+        "artifact": _artifact_meta_to_dict(meta, include_versions=True, project_id=project_id),
         "content": content,
         "word_count": _word_count(content),
     }
@@ -5709,9 +5793,7 @@ def _apply_style_policy(content: str) -> tuple[str, list[dict], dict | None]:
         )
 
 
-def _artifact_list_response(
-    *, summaries: list, index_version: int, project_id: str = ""
-) -> dict:
+def _artifact_list_response(*, summaries: list, index_version: int, project_id: str = "") -> dict:
     return {
         "ok": True,
         "index_version": index_version,
@@ -5833,7 +5915,8 @@ async def artifacts_list(
         if tag is not None:
             wanted_tag = tag.casefold()
             summaries = [
-                item for item in summaries
+                item
+                for item in summaries
                 if any(value.casefold() == wanted_tag for value in item.tags)
             ]
         query = q.strip().casefold()
@@ -5937,9 +6020,8 @@ async def artifacts_propose_canon(
         candidate = _get_canon_review_store(project.id).add(
             kind=request.kind,
             confidence=1.0,
-            subject=request.subject.strip() or (
-                artifact.title if request.kind in {"character", "relationship"} else ""
-            ),
+            subject=request.subject.strip()
+            or (artifact.title if request.kind in {"character", "relationship"} else ""),
             statement=statement,
             conversation_id=artifact.provenance.conversation_id,
             message_id=source_messages[0] if source_messages else "",
@@ -5997,9 +6079,7 @@ async def artifacts_compare_canon(
                     "type": anchor.anchor_type.value,
                     "description": anchor.description,
                     "severity": anchor.severity.value,
-                    "mentioned": any(
-                        term.strip() and term.casefold() in lowered for term in terms
-                    ),
+                    "mentioned": any(term.strip() and term.casefold() in lowered for term in terms),
                 }
             )
         return {

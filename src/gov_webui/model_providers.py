@@ -83,6 +83,8 @@ class ConfiguredModel:
     protocol: str
     base_url: str | None
     api_key_env: str | None
+    connect_timeout_seconds: float
+    read_timeout_seconds: float
     timeout_seconds: float
     command_model: str | None = None
     command: CommandConfiguration | None = None
@@ -286,6 +288,8 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                 "base_url",
                 "api_key_env",
                 "command",
+                "connect_timeout_seconds",
+                "read_timeout_seconds",
                 "timeout_seconds",
                 "models",
             },
@@ -310,6 +314,23 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                 f"{location}.timeout_seconds must be between 0.1 and 1800"
             )
         timeout_seconds = float(raw_timeout)
+
+        def timeout_field(name: str, default: float) -> float:
+            raw_value = provider.get(name, default)
+            if (
+                isinstance(raw_value, bool)
+                or not isinstance(raw_value, (int, float))
+                or not 0.1 <= float(raw_value) <= timeout_seconds
+            ):
+                raise ProviderConfigurationError(
+                    f"{location}.{name} must be between 0.1 and timeout_seconds"
+                )
+            return float(raw_value)
+
+        connect_timeout_seconds = timeout_field(
+            "connect_timeout_seconds", min(10.0, timeout_seconds)
+        )
+        read_timeout_seconds = timeout_field("read_timeout_seconds", min(30.0, timeout_seconds))
 
         base_url: str | None = None
         api_key_env: str | None = None
@@ -399,6 +420,8 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                     protocol=protocol,
                     base_url=base_url,
                     api_key_env=api_key_env,
+                    connect_timeout_seconds=connect_timeout_seconds,
+                    read_timeout_seconds=read_timeout_seconds,
                     timeout_seconds=timeout_seconds,
                     command_model=command_model,
                     command=command,
@@ -421,6 +444,46 @@ class ProviderChunk:
     content: str = ""
     usage: dict[str, int] | None = None
     finish_reason: str | None = None
+
+
+def _http_timeout(model: ConfiguredModel) -> httpx.Timeout:
+    """Use distinct connection and read-idle bounds inside the total deadline."""
+    return httpx.Timeout(
+        model.read_timeout_seconds,
+        connect=model.connect_timeout_seconds,
+    )
+
+
+def _deadline_error(model: ConfiguredModel) -> ProviderError:
+    return ProviderError(
+        "deadline_exceeded",
+        f"provider execution exceeded its {model.timeout_seconds:g}-second deadline",
+        provider_id=model.provider_id,
+        model_id=model.model_id,
+    )
+
+
+async def _bounded_http_call(awaitable: Any, model: ConfiguredModel) -> Any:
+    try:
+        async with asyncio.timeout(model.timeout_seconds):
+            return await awaitable
+    except TimeoutError as exc:
+        raise _deadline_error(model) from exc
+
+
+async def _bounded_http_stream(
+    stream: AsyncIterator[ProviderChunk], model: ConfiguredModel
+) -> AsyncIterator[ProviderChunk]:
+    try:
+        async with asyncio.timeout(model.timeout_seconds):
+            async for chunk in stream:
+                yield chunk
+    except TimeoutError as exc:
+        raise _deadline_error(model) from exc
+    finally:
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            await close()
 
 
 async def _stop_process(process: asyncio.subprocess.Process) -> None:
@@ -776,11 +839,23 @@ class _OpenAICompatibleTransportCore:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> ProviderResponse:
+        return await _bounded_http_call(
+            self._complete(messages, temperature=temperature, max_tokens=max_tokens),
+            self.model,
+        )
+
+    async def _complete(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> ProviderResponse:
         payload = self._payload(
             messages, stream=False, temperature=temperature, max_tokens=max_tokens
         )
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=self.model.timeout_seconds)
+        client = self._client or httpx.AsyncClient(timeout=_http_timeout(self.model))
         try:
             response = await client.post(self.endpoint, headers=self._headers(), json=payload)
             if response.status_code < 200 or response.status_code >= 300:
@@ -818,8 +893,12 @@ class _OpenAICompatibleTransportCore:
             return ProviderResponse(content, response_model, usage, finish_reason)
         except ProviderError:
             raise
+        except httpx.ConnectTimeout as exc:
+            raise self._error("connect_timeout", "provider connection timed out") from exc
+        except httpx.ReadTimeout as exc:
+            raise self._error("read_timeout", "provider response became idle") from exc
         except httpx.TimeoutException as exc:
-            raise self._error("timeout", "provider request timed out") from exc
+            raise self._error("transport_timeout", "provider transport timed out") from exc
         except httpx.HTTPError as exc:
             raise self._error("transport_error", "provider request failed") from exc
         except asyncio.CancelledError:
@@ -928,11 +1007,23 @@ class _AnthropicMessagesTransportCore:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> ProviderResponse:
+        return await _bounded_http_call(
+            self._complete(messages, temperature=temperature, max_tokens=max_tokens),
+            self.model,
+        )
+
+    async def _complete(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> ProviderResponse:
         payload = self._payload(
             messages, stream=False, temperature=temperature, max_tokens=max_tokens
         )
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=self.model.timeout_seconds)
+        client = self._client or httpx.AsyncClient(timeout=_http_timeout(self.model))
         try:
             response = await client.post(self.endpoint, headers=self._headers(), json=payload)
             if response.status_code < 200 or response.status_code >= 300:
@@ -972,8 +1063,12 @@ class _AnthropicMessagesTransportCore:
             return ProviderResponse("".join(text_parts), response_model, usage, finish_reason)
         except ProviderError:
             raise
+        except httpx.ConnectTimeout as exc:
+            raise self._error("connect_timeout", "provider connection timed out") from exc
+        except httpx.ReadTimeout as exc:
+            raise self._error("read_timeout", "provider response became idle") from exc
         except httpx.TimeoutException as exc:
-            raise self._error("timeout", "provider request timed out") from exc
+            raise self._error("transport_timeout", "provider transport timed out") from exc
         except httpx.HTTPError as exc:
             raise self._error("transport_error", "provider request failed") from exc
         except asyncio.CancelledError:
@@ -993,11 +1088,24 @@ class AnthropicMessagesTransport(_AnthropicMessagesTransportCore):
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> AsyncIterator[ProviderChunk]:
+        async for chunk in _bounded_http_stream(
+            self._stream(messages, temperature=temperature, max_tokens=max_tokens),
+            self.model,
+        ):
+            yield chunk
+
+    async def _stream(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[ProviderChunk]:
         payload = self._payload(
             messages, stream=True, temperature=temperature, max_tokens=max_tokens
         )
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=self.model.timeout_seconds)
+        client = self._client or httpx.AsyncClient(timeout=_http_timeout(self.model))
         input_tokens = 0
         output_tokens = 0
         finish_reason: str | None = None
@@ -1065,8 +1173,12 @@ class AnthropicMessagesTransport(_AnthropicMessagesTransportCore):
             )
         except ProviderError:
             raise
+        except httpx.ConnectTimeout as exc:
+            raise self._error("connect_timeout", "provider connection timed out") from exc
+        except httpx.ReadTimeout as exc:
+            raise self._error("read_timeout", "provider response became idle") from exc
         except httpx.TimeoutException as exc:
-            raise self._error("timeout", "provider request timed out") from exc
+            raise self._error("transport_timeout", "provider transport timed out") from exc
         except httpx.HTTPError as exc:
             raise self._error("transport_error", "provider request failed") from exc
         except asyncio.CancelledError:
@@ -1086,11 +1198,24 @@ class OpenAICompatibleTransport(_OpenAICompatibleTransportCore):
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> AsyncIterator[ProviderChunk]:
+        async for chunk in _bounded_http_stream(
+            self._stream(messages, temperature=temperature, max_tokens=max_tokens),
+            self.model,
+        ):
+            yield chunk
+
+    async def _stream(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[ProviderChunk]:
         payload = self._payload(
             messages, stream=True, temperature=temperature, max_tokens=max_tokens
         )
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=self.model.timeout_seconds)
+        client = self._client or httpx.AsyncClient(timeout=_http_timeout(self.model))
         saw_event = False
         final_usage: dict[str, int] | None = None
         finish_reason: str | None = None
@@ -1161,8 +1286,12 @@ class OpenAICompatibleTransport(_OpenAICompatibleTransportCore):
             )
         except ProviderError:
             raise
+        except httpx.ConnectTimeout as exc:
+            raise self._error("connect_timeout", "provider connection timed out") from exc
+        except httpx.ReadTimeout as exc:
+            raise self._error("read_timeout", "provider response became idle") from exc
         except httpx.TimeoutException as exc:
-            raise self._error("timeout", "provider request timed out") from exc
+            raise self._error("transport_timeout", "provider transport timed out") from exc
         except httpx.HTTPError as exc:
             raise self._error("transport_error", "provider request failed") from exc
         except asyncio.CancelledError:

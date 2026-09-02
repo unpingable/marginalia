@@ -7,7 +7,9 @@ services:
     ports:
       - "${MARGINALIA_BIND_HOST:-127.0.0.1}:${MARGINALIA_PORT:-8000}:8000"
     environment:
-      - BACKEND_TYPE=${BACKEND_TYPE:-anthropic}
+      - BACKEND_TYPE=codex
+      - CODEX_PATH=/app/codex-provider.sh
+      - CODEX_NATIVE_PATH=/opt/codex/codex
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GOVERNOR_CONTEXT_ID=${GOVERNOR_CONTEXT_ID:-erin-writing}
       - GOVERNOR_MODE=fiction
@@ -16,6 +18,10 @@ services:
       - MARGINALIA_BACKUP_REQUIRE_REMOTE=${MARGINALIA_BACKUP_REQUIRE_REMOTE:-false}
       - MARGINALIA_DEPLOYMENT_ID=${MARGINALIA_DEPLOYMENT_ID:-compose}
       - MARGINALIA_MODEL_CONFIG=${MARGINALIA_MODEL_CONFIG:-}
+      - MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS=${MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS:-1810}
+      - MARGINALIA_GOVERNOR_CHAT_TIMEOUT_SECONDS=${MARGINALIA_GOVERNOR_CHAT_TIMEOUT_SECONDS:-1830}
+      - MARGINALIA_GOVERNOR_RPC_TIMEOUT_SECONDS=${MARGINALIA_GOVERNOR_RPC_TIMEOUT_SECONDS:-5}
+      - MARGINALIA_GOVERNOR_WEDGE_SECONDS=${MARGINALIA_GOVERNOR_WEDGE_SECONDS:-1820}
     volumes:
       - marginalia_data:/data
       - ${MARGINALIA_BACKUP_HOST_PATH:-./backups}:/backups
@@ -35,6 +41,26 @@ services:
     volumes:
       - marginalia_data:/data:ro
       - ${MARGINALIA_BACKUP_HOST_PATH:-./backups}:/backups
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+  marginalia-synthetic:
+    image: ${MARGINALIA_IMAGE:-ghcr.io/unpingable/marginalia:0.1.0}
+    container_name: marginalia-synthetic
+    command: ["python3", "-m", "gov_webui.synthetic_worker"]
+    environment:
+      - GOVERNOR_AUTH_TOKEN=${GOVERNOR_AUTH_TOKEN:-}
+      - MARGINALIA_SYNTHETIC_BASE_URL=http://marginalia:8000
+      - MARGINALIA_SYNTHETIC_MODELS=${MARGINALIA_SYNTHETIC_MODELS:-default@3600}
+      - MARGINALIA_SYNTHETIC_TIMEOUT_SECONDS=${MARGINALIA_SYNTHETIC_TIMEOUT_SECONDS:-1840}
+      - MARGINALIA_SYNTHETIC_POLL_SECONDS=${MARGINALIA_SYNTHETIC_POLL_SECONDS:-60}
+      - MARGINALIA_SYNTHETIC_RECORD_PATH=/backups/marginalia-synthetics.jsonl
+    volumes:
+      - ${MARGINALIA_BACKUP_HOST_PATH:-./backups}:/backups
+    depends_on:
+      marginalia:
+        condition: service_healthy
     healthcheck:
       disable: true
     restart: unless-stopped

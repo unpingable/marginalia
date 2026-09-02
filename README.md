@@ -202,8 +202,8 @@ root. This direct form is intended for development and diagnostics:
 export MARGINALIA_DATA_ROOT="$PWD/.local-data"
 export GOVERNOR_CONTEXT_ID="erin-writing"
 export GOVERNOR_MODE="fiction"
-export BACKEND_TYPE="anthropic"       # read by AG, not by the web UI
-export ANTHROPIC_API_KEY="..."        # or configure another AG backend
+export BACKEND_TYPE="codex"           # required supervised AG boundary
+export CODEX_PATH="/app/codex-provider.sh"
 ./entrypoint.sh
 ```
 
@@ -216,8 +216,9 @@ uvicorn gov_webui.adapter:app --host 0.0.0.0 --port 8000
 
 AG's state directory is `$MARGINALIA_DATA_ROOT/.governor`. That exact path is
 also the context-manager base used by Marginalia. The launcher rejects
-conflicting `GOVERNOR_DAEMON_DIR` or `GOVERNOR_CONTEXTS_DIR` values and refuses
-any runtime mode other than `fiction`.
+conflicting `GOVERNOR_DAEMON_DIR` or `GOVERNOR_CONTEXTS_DIR` values, refuses
+any runtime mode other than `fiction`, and refuses direct AG provider backends
+that bypass Marginalia's supervised provider catalog.
 
 ## Configured models
 
@@ -240,9 +241,10 @@ distribution plus receipt-kernel and receipt-v1. The Dockerfile installs the
 same exact third-party lock used locally and pins Codex CLI `0.146.1`.
 `./start-codex.sh`
 builds the local image, performs container-owned device login when necessary,
-and launches the development stack. Optional Ollama, Claude Code, and direct
-API-provider overrides remain development surfaces; AG remains authoritative
-in every case.
+and launches the development stack. Ollama, Claude Code, Kimi Code, OpenAI API,
+and Anthropic API selections route through the supervised typed provider
+catalog; AG remains authoritative in every case. See
+[docs/RELIABILITY.md](docs/RELIABILITY.md) for execution and readiness semantics.
 
 ## Verification
 

@@ -5,11 +5,26 @@ DATA_ROOT="${MARGINALIA_DATA_ROOT:-/data}"
 DAEMON_DIR="$DATA_ROOT/.governor"
 CONTEXT_ID="${GOVERNOR_CONTEXT_ID:-marginalia}"
 MODE="${GOVERNOR_MODE:-fiction}"
+SUPERVISED_PROVIDER=/app/codex-provider.sh
 
 if [ "$MODE" != "fiction" ]; then
     echo "Marginalia is fiction-only; GOVERNOR_MODE must be fiction" >&2
     exit 1
 fi
+
+# Marginalia owns provider selection and containment. Agent Governor must see
+# only the Codex-compatible supervised wrapper, never one of its direct legacy
+# backends whose execution lifecycle is outside Marginalia's control.
+if [ "${BACKEND_TYPE:-codex}" != "codex" ]; then
+    echo "Marginalia requires BACKEND_TYPE=codex for supervised provider dispatch" >&2
+    exit 1
+fi
+if [ "${CODEX_PATH:-$SUPERVISED_PROVIDER}" != "$SUPERVISED_PROVIDER" ]; then
+    echo "Marginalia requires CODEX_PATH=$SUPERVISED_PROVIDER" >&2
+    exit 1
+fi
+export BACKEND_TYPE=codex
+export CODEX_PATH="$SUPERVISED_PROVIDER"
 
 # GovernorContextManager must use the daemon's governor directory as its base.
 # Refuse an ambiguous split-brain configuration instead of silently starting.

@@ -287,7 +287,7 @@ async def test_timeout_is_normalized(tmp_path: Path) -> None:
                 [{"role": "user", "content": "Hello"}]
             )
 
-    assert caught.value.code == "timeout"
+    assert caught.value.code == "read_timeout"
 
 
 @pytest.mark.asyncio

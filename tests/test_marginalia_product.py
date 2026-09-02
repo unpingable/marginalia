@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,20 @@ from support import fake_governed_chat
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _wrapper_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["PATH"] = os.pathsep.join(
+        [str(Path(sys.executable).parent), environment.get("PATH", "")]
+    )
+    environment["PYTHONPATH"] = os.pathsep.join(
+        filter(
+            None,
+            [str(REPO_ROOT / "src"), environment.get("PYTHONPATH", "")],
+        )
+    )
+    return environment
 
 
 @pytest.fixture()
@@ -88,7 +103,7 @@ def test_codex_provider_wrapper_delegates_default_model_to_cli(tmp_path: Path) -
     native = tmp_path / "codex-native"
     native.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
     native.chmod(0o755)
-    environment = os.environ.copy()
+    environment = _wrapper_environment()
     environment["CODEX_NATIVE_PATH"] = str(native)
 
     result = subprocess.run(
@@ -113,6 +128,79 @@ def test_codex_provider_wrapper_delegates_default_model_to_cli(tmp_path: Path) -
         "--skip-git-repo-check",
         "-",
     ]
+
+
+def test_codex_provider_wrapper_times_out_and_reaps_stalled_cli(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "native.pid"
+    native = tmp_path / "codex-native"
+    native.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['NATIVE_PID_FILE']).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    native.chmod(0o755)
+    environment = _wrapper_environment()
+    environment.update(
+        {
+            "CODEX_NATIVE_PATH": str(native),
+            "MARGINALIA_CODEX_TIMEOUT_SECONDS": "0.1",
+            "NATIVE_PID_FILE": str(pid_file),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            str(REPO_ROOT / "codex-provider.sh"),
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "-m",
+            "codex-default",
+            "-",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "Codex response timed out after 0.1 seconds\n"
+    native_pid = int(pid_file.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(native_pid, 0)
+
+
+@pytest.mark.parametrize("value", ["0", "1801", "nan", "not-a-number"])
+def test_codex_provider_wrapper_refuses_invalid_timeout(tmp_path: Path, value: str) -> None:
+    native = tmp_path / "codex-native"
+    native.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    native.chmod(0o755)
+    environment = _wrapper_environment()
+    environment.update(
+        {
+            "CODEX_NATIVE_PATH": str(native),
+            "MARGINALIA_CODEX_TIMEOUT_SECONDS": value,
+        }
+    )
+
+    result = subprocess.run(
+        [str(REPO_ROOT / "codex-provider.sh"), "exec", "--json", "-"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 1
+    assert "MARGINALIA_CODEX_TIMEOUT_SECONDS must be" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -251,18 +339,12 @@ def test_project_b_cannot_receive_project_a_prompt_context(product_client) -> No
         },
     )
 
-    project_b_record = client.post(
-        "/v1/projects", json={"name": "Second novel"}
-    ).json()
+    project_b_record = client.post("/v1/projects", json={"name": "Second novel"}).json()
     # Use a fresh complete fake for the second project's governed context.
-    project_b_chat = fake_governed_chat(
-        content="Project B response", model="fiction-model"
-    )
+    project_b_chat = fake_governed_chat(content="Project B response", model="fiction-model")
     adapter._governed_chat_adapters[project_b_record["context_id"]] = project_b_chat
 
-    project_b = client.get(
-        "/v1/project", params={"project_id": project_b_record["id"]}
-    ).json()
+    project_b = client.get("/v1/project", params={"project_id": project_b_record["id"]}).json()
     assert project_b["context_id"] == project_b_record["context_id"]
     assert project_b["has_guidance"] is False
     response = client.post(

@@ -24,6 +24,21 @@ class DaemonAuthError(RuntimeError):
     """
 
 
+class DaemonTimeoutError(TimeoutError):
+    """A bounded governor RPC could not acquire capacity or finish in time."""
+
+
+def _timeout_setting(name: str, default: float) -> float:
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a number between 0.1 and 3600") from exc
+    if not 0.1 <= value <= 3600:
+        raise RuntimeError(f"{name} must be between 0.1 and 3600")
+    return value
+
+
 # =============================================================================
 # Content-Length framing used by the AG daemon RPC transport
 # =============================================================================
@@ -87,13 +102,25 @@ class DaemonChatClient:
     provider discovery, chat, pending resolution, and receipt lookup.
     """
 
-    def __init__(self, socket_path: str | Path) -> None:
+    def __init__(
+        self,
+        socket_path: str | Path,
+        *,
+        rpc_timeout_seconds: float | None = None,
+        chat_timeout_seconds: float | None = None,
+    ) -> None:
         self._socket_path = Path(socket_path)
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._request_id: int = 0
         # One framed socket cannot safely multiplex concurrent request loops.
         self._request_lock = asyncio.Lock()
+        self._rpc_timeout_seconds = rpc_timeout_seconds or _timeout_setting(
+            "MARGINALIA_GOVERNOR_RPC_TIMEOUT_SECONDS", 5.0
+        )
+        self._chat_timeout_seconds = chat_timeout_seconds or _timeout_setting(
+            "MARGINALIA_GOVERNOR_CHAT_TIMEOUT_SECONDS", 270.0
+        )
 
     @property
     def socket_path(self) -> Path:
@@ -103,61 +130,95 @@ class DaemonChatClient:
         """Open the Unix socket connection."""
         if self._writer is not None and not self._writer.is_closing():
             return  # Already connected
-        self._reader, self._writer = await asyncio.open_unix_connection(
-            str(self._socket_path)
-        )
+        self._reader, self._writer = await asyncio.open_unix_connection(str(self._socket_path))
 
     async def close(self) -> None:
         """Close the connection."""
-        if self._writer is not None:
-            self._writer.close()
+        writer = self._writer
+        self._writer = None
+        self._reader = None
+        if writer is not None:
+            writer.close()
             try:
-                await self._writer.wait_closed()
+                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
             except Exception:
                 pass
-            self._writer = None
-            self._reader = None
 
     def _next_id(self) -> int:
         self._request_id += 1
         return self._request_id
 
-    async def _call(self, method: str, params: dict | None = None) -> Any:
+    async def _acquire(self, method: str, timeout: float) -> float:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        try:
+            await asyncio.wait_for(self._request_lock.acquire(), timeout=timeout)
+        except TimeoutError as exc:
+            raise DaemonTimeoutError(
+                f"governor RPC {method} could not acquire serialized capacity "
+                f"within {timeout:g} seconds"
+            ) from exc
+        return deadline
+
+    @staticmethod
+    def _remaining(deadline: float) -> float:
+        return max(0.001, deadline - asyncio.get_running_loop().time())
+
+    async def _call(
+        self,
+        method: str,
+        params: dict | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> Any:
         """Send a JSON-RPC request and return the result."""
-        async with self._request_lock:
-            await self.connect()
-            assert self._reader is not None and self._writer is not None
+        bound = self._rpc_timeout_seconds if timeout is None else timeout
+        deadline = await self._acquire(method, bound)
+        try:
+            try:
+                async with asyncio.timeout(self._remaining(deadline)):
+                    await self.connect()
+                    assert self._reader is not None and self._writer is not None
 
-            request_id = self._next_id()
-            msg = {
-                "jsonrpc": "2.0",
-                "method": method,
-                "id": request_id,
-                "params": params or {},
-            }
-            await _write_message(self._writer, msg)
+                    request_id = self._next_id()
+                    msg = {
+                        "jsonrpc": "2.0",
+                        "method": method,
+                        "id": request_id,
+                        "params": params or {},
+                    }
+                    await _write_message(self._writer, msg)
 
-            # Read responses, skipping notifications until we get our response
-            while True:
-                resp = await _read_message(self._reader)
-                if resp is None:
-                    raise ConnectionError("Connection closed by daemon")
+                    # Read responses, skipping notifications until our response.
+                    while True:
+                        resp = await _read_message(self._reader)
+                        if resp is None:
+                            raise ConnectionError("Connection closed by daemon")
 
-                # Skip notifications (no id)
-                if "id" not in resp:
-                    continue
+                        if "id" not in resp or resp.get("id") != request_id:
+                            continue
 
-                if resp.get("id") != request_id:
-                    continue
-
-                if "error" in resp:
-                    err = resp["error"]
-                    code = err.get("code", 0)
-                    message = err.get("message", "unknown error")
-                    if code == AUTH_ERROR_CODE:
-                        raise DaemonAuthError(message)
-                    raise RuntimeError(f"RPC error {code}: {message}")
-                return resp.get("result")
+                        if "error" in resp:
+                            err = resp["error"]
+                            code = err.get("code", 0)
+                            message = err.get("message", "unknown error")
+                            if code == AUTH_ERROR_CODE:
+                                raise DaemonAuthError(message)
+                            raise RuntimeError(f"RPC error {code}: {message}")
+                        return resp.get("result")
+            except TimeoutError as exc:
+                await self.close()
+                raise DaemonTimeoutError(
+                    f"governor RPC {method} exceeded its {bound:g}-second deadline"
+                ) from exc
+            except (asyncio.CancelledError, ConnectionError, OSError):
+                await self.close()
+                raise
+            except GeneratorExit:
+                await self.close()
+                raise
+        finally:
+            self._request_lock.release()
 
     # ========================================================================
     # Chat methods
@@ -176,6 +237,7 @@ class DaemonChatClient:
         return await self._call(
             "chat.send",
             {"messages": messages, "model": model, "context_id": context_id},
+            timeout=self._chat_timeout_seconds,
         )
 
     async def chat_stream(
@@ -191,47 +253,63 @@ class DaemonChatClient:
 
         The final_result has the same shape as chat_send's return value.
         """
-        async with self._request_lock:
-            await self.connect()
-            assert self._reader is not None and self._writer is not None
+        method = "chat.stream"
+        bound = self._chat_timeout_seconds
+        deadline = await self._acquire(method, bound)
+        try:
+            try:
+                async with asyncio.timeout(self._remaining(deadline)):
+                    await self.connect()
+                    assert self._reader is not None and self._writer is not None
 
-            request_id = self._next_id()
-            msg = {
-                "jsonrpc": "2.0",
-                "method": "chat.stream",
-                "id": request_id,
-                "params": {
-                    "messages": messages,
-                    "model": model,
-                    "context_id": context_id,
-                },
-            }
-            await _write_message(self._writer, msg)
+                    request_id = self._next_id()
+                    msg = {
+                        "jsonrpc": "2.0",
+                        "method": method,
+                        "id": request_id,
+                        "params": {
+                            "messages": messages,
+                            "model": model,
+                            "context_id": context_id,
+                        },
+                    }
+                    await _write_message(self._writer, msg)
 
-            while True:
-                resp = await _read_message(self._reader)
-                if resp is None:
-                    raise ConnectionError("Connection closed by daemon")
+                    while True:
+                        resp = await _read_message(self._reader)
+                        if resp is None:
+                            raise ConnectionError("Connection closed by daemon")
 
-                # Notification — yield delta content
-                if "id" not in resp:
-                    if resp.get("method") == "chat.delta":
-                        content = resp.get("params", {}).get("content", "")
-                        if content:
-                            yield (content, None)
-                    continue
+                        if "id" not in resp:
+                            if resp.get("method") == "chat.delta":
+                                content = resp.get("params", {}).get("content", "")
+                                if content:
+                                    yield (content, None)
+                            continue
 
-                # Final response
-                if resp.get("id") == request_id:
-                    if "error" in resp:
-                        err = resp["error"]
-                        code = err.get("code", 0)
-                        message = err.get("message", "unknown error")
-                        if code == AUTH_ERROR_CODE:
-                            raise DaemonAuthError(message)
-                        raise RuntimeError(f"RPC error {code}: {message}")
-                    yield (None, resp.get("result"))
-                    return
+                        if resp.get("id") == request_id:
+                            if "error" in resp:
+                                err = resp["error"]
+                                code = err.get("code", 0)
+                                message = err.get("message", "unknown error")
+                                if code == AUTH_ERROR_CODE:
+                                    raise DaemonAuthError(message)
+                                raise RuntimeError(f"RPC error {code}: {message}")
+                            yield (None, resp.get("result"))
+                            return
+            except TimeoutError as exc:
+                await self.close()
+                raise DaemonTimeoutError(
+                    f"governor RPC {method} exceeded its {bound:g}-second deadline"
+                ) from exc
+            except (asyncio.CancelledError, ConnectionError, OSError):
+                await self.close()
+                raise
+            except GeneratorExit:
+                await self.close()
+                raise
+        finally:
+            self._request_lock.release()
 
     async def hello(self) -> dict:
         """Return daemon identity, capabilities, and authoritative state root."""
@@ -247,9 +325,7 @@ class DaemonChatClient:
             {"context_id": context_id, "corrected_text": corrected_text},
         )
 
-    async def commit_revise(
-        self, context_id: str, new_anchor_text: str | None = None
-    ) -> dict:
+    async def commit_revise(self, context_id: str, new_anchor_text: str | None = None) -> dict:
         params: dict[str, Any] = {"context_id": context_id}
         if new_anchor_text is not None:
             params["new_anchor_text"] = new_anchor_text

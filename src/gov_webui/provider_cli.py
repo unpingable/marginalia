@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
+import subprocess
 import sys
 from collections.abc import Sequence
 
@@ -50,11 +52,65 @@ def _emit(event: dict[str, object]) -> None:
     print(json.dumps(event, separators=(",", ":")), flush=True)
 
 
-def _delegate_native(argv: Sequence[str], command_model: str | None) -> None:
+def _native_timeout_seconds() -> float:
+    raw = os.environ.get("MARGINALIA_CODEX_TIMEOUT_SECONDS", "240").strip()
+    try:
+        timeout = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            "MARGINALIA_CODEX_TIMEOUT_SECONDS must be a number between 0.1 and 1800"
+        ) from exc
+    if not 0.1 <= timeout <= 1800:
+        raise RuntimeError("MARGINALIA_CODEX_TIMEOUT_SECONDS must be between 0.1 and 1800")
+    return timeout
+
+
+def _signal_process_group(process: subprocess.Popen[bytes], signum: int) -> None:
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        pass
+
+
+def _stop_native_process(process: subprocess.Popen[bytes]) -> None:
+    _signal_process_group(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        _signal_process_group(process, signal.SIGKILL)
+        process.wait()
+
+
+def _delegate_native(argv: Sequence[str], command_model: str | None) -> int:
     native_path = os.environ.get("CODEX_NATIVE_PATH", "/opt/codex/codex")
     if not os.path.isfile(native_path) or not os.access(native_path, os.X_OK):
         raise RuntimeError(f"Codex executable is unavailable at {native_path}")
-    os.execv(native_path, [native_path, *_native_arguments(argv, command_model)])
+    timeout = _native_timeout_seconds()
+    try:
+        process = subprocess.Popen(
+            [native_path, *_native_arguments(argv, command_model)],
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise RuntimeError("Codex executable could not be started") from exc
+
+    def forward_signal(signum: int, _frame: object) -> None:
+        _signal_process_group(process, signum)
+
+    previous_handlers = {
+        signum: signal.signal(signum, forward_signal) for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            _stop_native_process(process)
+            raise RuntimeError(f"Codex response timed out after {timeout:g} seconds") from exc
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+    return returncode if returncode >= 0 else 128 - returncode
 
 
 async def _run_http_provider(model: ConfiguredModel, prompt: str) -> None:
@@ -115,15 +171,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         config_path = os.environ.get("MARGINALIA_MODEL_CONFIG", "").strip()
         if not config_path:
             if selected_id not in {"", "codex-default"}:
-                _delegate_native(args, selected_id)
-            _delegate_native(args, None)
-            return 0
+                return _delegate_native(args, selected_id)
+            return _delegate_native(args, None)
 
         catalog = load_provider_catalog(config_path)
         model = catalog.require_available(selected_id)
         if model.protocol == "existing-command":
-            _delegate_native(args, model.command_model)
-            return 0
+            return _delegate_native(args, model.command_model)
 
         prompt = sys.stdin.read()
         if model.protocol == "local-command":
