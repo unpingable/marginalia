@@ -39,9 +39,8 @@ stop/update operations.
 
 Publication is deliberately external to an ordinary source commit:
 
-1. Push the reviewed `marginalia-m1` history.
-2. Change the GitHub default branch from `marginalia-m0` to the reviewed product
-   branch without rewriting either branch.
+1. Push the reviewed `main` history.
+2. Verify that GitHub's default branch and a fresh clone both resolve to `main`.
 3. Tag the reviewed release commit `v0.1.0` and push the tag.
 4. Confirm the `Publish Marginalia appliance` workflow passes and publishes
    `linux/amd64` and `linux/arm64` manifests.
