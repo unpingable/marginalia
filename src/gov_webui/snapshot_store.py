@@ -84,9 +84,7 @@ class ProjectSnapshotStore:
             self._write_index(index)
             return index
         try:
-            return SnapshotIndex.model_validate_json(
-                self.index_path.read_text(encoding="utf-8")
-            )
+            return SnapshotIndex.model_validate_json(self.index_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, ValidationError) as exc:
             raise SnapshotStoreError(
                 f"cannot load snapshot index at {self.index_path}: {exc}"
@@ -115,9 +113,7 @@ class ProjectSnapshotStore:
     def create(self, *, name: str, payload: dict[str, Any]) -> ProjectSnapshot:
         """Write content before publishing immutable metadata in the index."""
         cleaned = self._clean_name(name)
-        encoded = json.dumps(
-            payload, ensure_ascii=False, indent=2, sort_keys=True
-        ) + "\n"
+        encoded = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
         snapshot = ProjectSnapshot(
             id=uuid4().hex[:12],
@@ -157,12 +153,8 @@ class ProjectSnapshotStore:
                 encoded = path.read_text(encoding="utf-8")
                 payload = json.loads(encoded)
             except (OSError, json.JSONDecodeError) as exc:
-                raise SnapshotStoreError(
-                    f"cannot read snapshot content at {path}: {exc}"
-                ) from exc
+                raise SnapshotStoreError(f"cannot read snapshot content at {path}: {exc}") from exc
             digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
             if digest != snapshot.content_hash:
-                raise SnapshotStoreError(
-                    f"snapshot integrity check failed: {snapshot.id}"
-                )
+                raise SnapshotStoreError(f"snapshot integrity check failed: {snapshot.id}")
             return snapshot.model_copy(deep=True), payload

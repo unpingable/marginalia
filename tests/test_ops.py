@@ -126,9 +126,7 @@ def test_preflight_checks_artifact_content_hashes(tmp_path):
         tmp_path / "marginalia" / "library.json",
         default_context_id="erin-writing",
     )
-    artifacts = ArtifactStore(
-        tmp_path / ".governor" / "erin-writing" / ".governor"
-    )
+    artifacts = ArtifactStore(tmp_path / ".governor" / "erin-writing" / ".governor")
     artifact, _, _ = artifacts.create(
         title="Exact draft",
         content="This content is hash-bound.",

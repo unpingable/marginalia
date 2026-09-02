@@ -47,13 +47,10 @@ class GovernedChatAdapter:
         capability = hello.get("capabilities", {}).get("governed_chat", {})
         if capability.get("contract_version") != self.CONTRACT_VERSION:
             raise GovernedChatContractError(
-                "AG does not expose governed_chat contract version "
-                f"{self.CONTRACT_VERSION}"
+                f"AG does not expose governed_chat contract version {self.CONTRACT_VERSION}"
             )
         if capability.get("context_scoped_pending") is not True:
-            raise GovernedChatContractError(
-                "AG does not guarantee context-scoped pending state"
-            )
+            raise GovernedChatContractError("AG does not guarantee context-scoped pending state")
         if capability.get("authoritative_receipts") is not True:
             raise GovernedChatContractError(
                 "AG does not return authoritative governed-chat receipts"
@@ -61,9 +58,7 @@ class GovernedChatAdapter:
 
         raw_dir = hello.get("governor", {}).get("governor_dir")
         if not raw_dir:
-            raise GovernedChatContractError(
-                "AG handshake omitted its authoritative governor_dir"
-            )
+            raise GovernedChatContractError("AG handshake omitted its authoritative governor_dir")
         actual_dir = Path(raw_dir).resolve()
         if actual_dir != self.expected_governor_dir:
             raise GovernedChatContractError(
@@ -151,9 +146,7 @@ class GovernedChatAdapter:
                 saw_final = True
             yield delta, final
         if not saw_final:
-            raise GovernedChatContractError(
-                "AG stream ended without a final governed outcome"
-            )
+            raise GovernedChatContractError("AG stream ended without a final governed outcome")
 
     async def resolve_pending(
         self,
@@ -179,9 +172,7 @@ class GovernedChatAdapter:
                 raise ValueError("corrected_text is required for fix")
             result = await self._client.commit_fix(self.context_id, corrected_text)
         elif action == "revise":
-            result = await self._client.commit_revise(
-                self.context_id, new_anchor_text
-            )
+            result = await self._client.commit_revise(self.context_id, new_anchor_text)
         elif action == "proceed":
             result = await self._client.commit_proceed(
                 self.context_id,
@@ -220,9 +211,7 @@ class GovernedChatAdapter:
 
     def _validate_pending_context(self, pending: dict[str, Any]) -> None:
         if pending.get("context_id") != self.context_id:
-            raise GovernedChatContractError(
-                "AG returned pending state from another chat context"
-            )
+            raise GovernedChatContractError("AG returned pending state from another chat context")
 
     async def _authoritative_receipt(self, receipt_id: str) -> dict[str, Any]:
         detail = await self._client.receipt_detail(receipt_id)
@@ -237,9 +226,7 @@ class GovernedChatAdapter:
             )
         return detail
 
-    async def _validate_chat_result(
-        self, result: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _validate_chat_result(self, result: dict[str, Any]) -> dict[str, Any]:
         receipt = result.get("receipt") or {}
         receipt_id = receipt.get("receipt_id")
         if not receipt_id:
@@ -268,9 +255,7 @@ class GovernedChatAdapter:
                     "pending outcome is not linked to a blocking chat receipt"
                 )
         elif stored.get("gate") not in {"chat_bridge", "violation_resolution"}:
-            raise GovernedChatContractError(
-                "unexpected receipt gate for governed chat outcome"
-            )
+            raise GovernedChatContractError("unexpected receipt gate for governed chat outcome")
         return detail
 
     async def _validate_chat_resolution_transition(
@@ -282,9 +267,7 @@ class GovernedChatAdapter:
         if detail["receipt"].get("gate") != "violation_resolution":
             return
         if before is None:
-            raise GovernedChatContractError(
-                "AG returned a resolution without prior pending state"
-            )
+            raise GovernedChatContractError("AG returned a resolution without prior pending state")
         evidence = detail.get("evidence") or {}
         if evidence.get("pending_id") != before.get("id"):
             raise GovernedChatContractError(
@@ -295,13 +278,9 @@ class GovernedChatAdapter:
                 "chat resolution receipt is not linked to the blocking receipt"
             )
         if await self._client.commit_pending(self.context_id) is not None:
-            raise GovernedChatContractError(
-                "AG chat resolution left pending state uncleared"
-            )
+            raise GovernedChatContractError("AG chat resolution left pending state uncleared")
 
-    async def _validate_resolution_result(
-        self, result: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _validate_resolution_result(self, result: dict[str, Any]) -> dict[str, Any]:
         receipt_id = (result.get("receipt") or {}).get("receipt_id")
         if not receipt_id:
             raise GovernedChatContractError(
@@ -315,7 +294,5 @@ class GovernedChatAdapter:
                 "resolution result is not backed by a resolution receipt"
             )
         if evidence.get("context_id") != self.context_id:
-            raise GovernedChatContractError(
-                "resolution receipt belongs to another chat context"
-            )
+            raise GovernedChatContractError("resolution receipt belongs to another chat context")
         return detail

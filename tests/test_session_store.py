@@ -57,10 +57,7 @@ def test_model_switch_changes_future_selection_not_history(tmp_path: Path) -> No
     loaded = store.get(session.id)
     assert loaded is not None
     assert loaded.model == "selection-b"
-    assert [
-        (message.provider_id, message.model_id)
-        for message in loaded.messages
-    ] == [
+    assert [(message.provider_id, message.model_id) for message in loaded.messages] == [
         ("provider-a", "upstream-a"),
         ("provider-b", "upstream-b"),
     ]

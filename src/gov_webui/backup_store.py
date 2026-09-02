@@ -184,7 +184,9 @@ class WorkspaceBackupManager:
         try:
             destination_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise BackupError(f"backup destination is not writable: {destination_dir}: {exc}") from exc
+            raise BackupError(
+                f"backup destination is not writable: {destination_dir}: {exc}"
+            ) from exc
         destination = destination_dir / filename
         manifest = {
             "schema": self.SCHEMA,
@@ -227,9 +229,7 @@ class WorkspaceBackupManager:
         except (OSError, zipfile.BadZipFile, BackupError) as exc:
             temporary.unlink(missing_ok=True)
             destination.unlink(missing_ok=True)
-            destination.with_suffix(destination.suffix + ".sha256").unlink(
-                missing_ok=True
-            )
+            destination.with_suffix(destination.suffix + ".sha256").unlink(missing_ok=True)
             raise BackupError(f"cannot create verified backup: {exc}") from exc
         self._enforce_retention(workspace.id, workspace.backup_retention_count)
         return {
@@ -322,9 +322,7 @@ class WorkspaceBackupManager:
                     content = archive.read(name)
                     if len(content) != record["size"] or _digest(content) != record["sha256"]:
                         raise BackupError(f"backup checksum mismatch: {name}")
-                library = LibraryState.model_validate_json(
-                    archive.read("payload/library.json")
-                )
+                library = LibraryState.model_validate_json(archive.read("payload/library.json"))
         except (OSError, zipfile.BadZipFile, json.JSONDecodeError, ValueError) as exc:
             raise BackupError(f"backup verification failed: {exc}") from exc
         return {
@@ -439,16 +437,12 @@ class WorkspaceBackupManager:
                 review_path = context_root / "marginalia" / "canon-review.json"
                 if review_path.exists():
                     canon_reviews += len(
-                        CanonReviewStore(review_path, project_id=project.id).list(
-                            status="all"
-                        )
+                        CanonReviewStore(review_path, project_id=project.id).list(status="all")
                     )
                 project_path = context_root / "marginalia" / "project.json"
                 if project_path.exists():
                     CreativeProjectStore(context_root, project.context_id).get()
-                snapshot_index = (
-                    target / "marginalia" / "snapshots" / project.id / "index.json"
-                )
+                snapshot_index = target / "marginalia" / "snapshots" / project.id / "index.json"
                 if snapshot_index.exists():
                     snapshot_store = ProjectSnapshotStore(
                         target / "marginalia" / "snapshots",
@@ -461,8 +455,7 @@ class WorkspaceBackupManager:
             missing_sessions = set(state.conversations) - loaded_session_ids
             if missing_sessions:
                 raise BackupError(
-                    "restore is missing conversation files: "
-                    + ", ".join(sorted(missing_sessions))
+                    "restore is missing conversation files: " + ", ".join(sorted(missing_sessions))
                 )
             for json_path in target.rglob("*.json"):
                 json.loads(json_path.read_text(encoding="utf-8"))
@@ -476,9 +469,7 @@ class WorkspaceBackupManager:
                 "manuscript_nodes_loaded": manuscript_nodes,
                 "canon_reviews_loaded": canon_reviews,
                 "snapshots_loaded": snapshots,
-                "untracked_session_files": len(
-                    loaded_session_ids - set(state.conversations)
-                ),
+                "untracked_session_files": len(loaded_session_ids - set(state.conversations)),
             }
 
     def backup_root_status(self) -> dict[str, Any]:

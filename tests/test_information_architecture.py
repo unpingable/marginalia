@@ -215,9 +215,9 @@ async def test_lightweight_workspaces_and_artifact_canon_control_plane(
     james = (await client.post("/v1/workspaces", json={"name": "James"})).json()
     assert james["name"] == "James"
     assert james["default_project"]["workspace_id"] == james["id"]
-    assert (await client.get("/v1/projects", params={"workspace_id": "erin"})).json()[
-        "projects"
-    ][0]["id"] == "default"
+    assert (await client.get("/v1/projects", params={"workspace_id": "erin"})).json()["projects"][
+        0
+    ]["id"] == "default"
     james_projects = (
         await client.get("/v1/projects", params={"workspace_id": james["id"]})
     ).json()["projects"]
@@ -255,9 +255,7 @@ async def test_lightweight_workspaces_and_artifact_canon_control_plane(
     assert comparison["continuity"]["violations"][0]["anchor_type"] == "prohibition"
 
     rules_before = (
-        await client.get(
-            "/governor/fiction/world-rules", params={"project_id": "default"}
-        )
+        await client.get("/governor/fiction/world-rules", params={"project_id": "default"})
     ).json()["rules"]
     proposal_response = await client.post(
         f"/governor/artifacts/{artifact['id']}/canon-proposal",
@@ -273,9 +271,7 @@ async def test_lightweight_workspaces_and_artifact_canon_control_plane(
     assert proposal["candidate"]["draft"]["artifact_id"] == artifact["id"]
     assert proposal["candidate"]["draft"]["artifact_version"] == 1
     assert (
-        await client.get(
-            "/governor/fiction/world-rules", params={"project_id": "default"}
-        )
+        await client.get("/governor/fiction/world-rules", params={"project_id": "default"})
     ).json()["rules"] == rules_before
 
     accepted = await client.post(
@@ -288,9 +284,7 @@ async def test_lightweight_workspaces_and_artifact_canon_control_plane(
     )
     assert accepted.status_code == 200
     rules_after = (
-        await client.get(
-            "/governor/fiction/world-rules", params={"project_id": "default"}
-        )
+        await client.get("/governor/fiction/world-rules", params={"project_id": "default"})
     ).json()["rules"]
     assert len(rules_after) == len(rules_before) + 1
 
@@ -327,12 +321,8 @@ async def test_workspace_backup_api_and_operational_provenance(
     assert listing["destination"]["writable"] is True
     assert listing["backups"][0]["filename"] == created["filename"]
 
-    verify = await client.post(
-        f"/v1/workspaces/erin/backups/{created['filename']}/verify"
-    )
-    rehearse = await client.post(
-        f"/v1/workspaces/erin/backups/{created['filename']}/restore-test"
-    )
+    verify = await client.post(f"/v1/workspaces/erin/backups/{created['filename']}/verify")
+    rehearse = await client.post(f"/v1/workspaces/erin/backups/{created['filename']}/restore-test")
     assert verify.json()["outer_checksum_verified"] is True
     assert rehearse.json()["restore_tested"] is True
 
@@ -402,9 +392,7 @@ async def test_manuscript_and_canon_review_foundations_survive_restart(
 
     adapter._manuscript_stores.clear()
     adapter._canon_review_stores.clear()
-    manuscript = (
-        await client.get("/v1/manuscript", params={"project_id": "default"})
-    ).json()
+    manuscript = (await client.get("/v1/manuscript", params={"project_id": "default"})).json()
     pending = (
         await client.get(
             "/governor/fiction/captures",
@@ -415,13 +403,8 @@ async def test_manuscript_and_canon_review_foundations_survive_restart(
         chapter["id"],
         scene["id"],
     }
-    assert {item["id"] for item in pending["captures"]} == {
-        item["id"] for item in captures
-    }
-    assert all(
-        item["conversation_id"] == "conversation-source"
-        for item in pending["captures"]
-    )
+    assert {item["id"] for item in pending["captures"]} == {item["id"] for item in captures}
+    assert all(item["conversation_id"] == "conversation-source" for item in pending["captures"])
 
     lifecycle = (
         await client.patch(
@@ -549,9 +532,7 @@ async def test_artifact_autosave_search_compare_restore_and_trash(library_client
     )
     assert autosaved.status_code == 200
     detail = (
-        await client.get(
-            f"/governor/artifacts/{artifact['id']}", params={"project_id": "default"}
-        )
+        await client.get(f"/governor/artifacts/{artifact['id']}", params={"project_id": "default"})
     ).json()
     assert detail["content"] == "The rain began."
     assert detail["working_copy"] == "The impossible rain began."
@@ -570,9 +551,7 @@ async def test_artifact_autosave_search_compare_restore_and_trash(library_client
     ).json()
     assert updated["artifact"]["current_version"] == 2
     assert (
-        await client.get(
-            f"/governor/artifacts/{artifact['id']}", params={"project_id": "default"}
-        )
+        await client.get(f"/governor/artifacts/{artifact['id']}", params={"project_id": "default"})
     ).json()["working_copy"] is None
 
     compared = (
@@ -608,14 +587,10 @@ async def test_artifact_autosave_search_compare_restore_and_trash(library_client
         json={"trashed": True},
     )
     assert not (
-        await client.get(
-            "/governor/artifacts", params={"project_id": "default", "view": "active"}
-        )
+        await client.get("/governor/artifacts", params={"project_id": "default", "view": "active"})
     ).json()["artifacts"]
     assert (
-        await client.get(
-            "/governor/artifacts", params={"project_id": "default", "view": "trash"}
-        )
+        await client.get("/governor/artifacts", params={"project_id": "default", "view": "trash"})
     ).json()["artifacts"][0]["id"] == artifact["id"]
 
 
@@ -662,9 +637,9 @@ async def test_unified_search_backlinks_and_editable_canon_review(library_client
     assert message_result["conversation_id"] == conversation["id"]
     assert message_result["message_id"] == source_message["id"]
 
-    entities = (
-        await client.get("/v1/entities", params={"project_id": "default"})
-    ).json()["entities"]
+    entities = (await client.get("/v1/entities", params={"project_id": "default"})).json()[
+        "entities"
+    ]
     elena = next(item for item in entities if item["name"] == "Elena")
     assert elena["reference_count"] >= 2
     assert {item["kind"] for item in elena["references"]} >= {"message", "artifact"}
@@ -716,9 +691,7 @@ async def test_conversation_branch_tree_preserves_explicit_lineage(library_clien
             json={"title": "Darker ending", "message_id": message["id"]},
         )
     ).json()
-    tree = (
-        await client.get("/v1/conversations/tree", params={"project_id": "default"})
-    ).json()
+    tree = (await client.get("/v1/conversations/tree", params={"project_id": "default"})).json()
     nodes = {item["id"]: item for item in tree["nodes"]}
     assert tree["roots"] == [original["id"]]
     assert nodes[original["id"]]["child_session_ids"] == [fork["id"]]

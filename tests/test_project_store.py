@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 """Unit tests for CodeProjectStore — data model, persistence, state machine."""
+
 from __future__ import annotations
 
 import json
@@ -28,6 +29,7 @@ def store(tmp_path: Path) -> CodeProjectStore:
 
 
 # ── Persistence ───────────────────────────────────────────────────────────
+
 
 class TestPersistence:
     def test_fresh_store_creates_state(self, store: CodeProjectStore) -> None:
@@ -75,6 +77,7 @@ class TestPersistence:
 
 # ── Optimistic concurrency ────────────────────────────────────────────────
 
+
 class TestOptimisticConcurrency:
     def test_stale_version_raises(self, store: CodeProjectStore) -> None:
         store.update_intent("v1", locked=False)
@@ -92,6 +95,7 @@ class TestOptimisticConcurrency:
 
 # ── Intent ────────────────────────────────────────────────────────────────
 
+
 class TestIntent:
     def test_update_intent(self, store: CodeProjectStore) -> None:
         intent = store.update_intent("parse CSV files", locked=False)
@@ -104,6 +108,7 @@ class TestIntent:
 
 
 # ── Contract ──────────────────────────────────────────────────────────────
+
 
 class TestContract:
     def test_update_contract(self, store: CodeProjectStore) -> None:
@@ -164,6 +169,7 @@ class TestContract:
 
 # ── Config canonicalization + hashing ────────────────────────────────────
 
+
 class TestConfigHash:
     def test_canonicalize_config_sorts_set_fields(self) -> None:
         config = {"voice": ["wry", "dry"], "bans": ["b", "a"], "length": "medium"}
@@ -205,6 +211,7 @@ class TestConfigHash:
 
 
 # ── Plan state machine ────────────────────────────────────────────────────
+
 
 class TestPlanStateMachine:
     def test_add_phase_and_item(self, store: CodeProjectStore) -> None:
@@ -273,6 +280,7 @@ class TestPlanStateMachine:
 
 # ── Phase gating ──────────────────────────────────────────────────────────
 
+
 class TestPhaseGating:
     def test_locked_phase_blocks_non_reject(self, store: CodeProjectStore) -> None:
         store.add_phase("Locked Phase")
@@ -314,9 +322,7 @@ class TestPhaseGating:
         item = store.update_item_status("p1-0", PlanItemStatus.accepted)
         assert item.status == PlanItemStatus.accepted
 
-    def test_previous_phase_with_rejected_items_is_complete(
-        self, store: CodeProjectStore
-    ) -> None:
+    def test_previous_phase_with_rejected_items_is_complete(self, store: CodeProjectStore) -> None:
         """Rejected items count as terminal — don't block next phase."""
         store.add_phase("Phase 1")
         store.add_phase("Phase 2")
@@ -345,6 +351,7 @@ class TestPhaseGating:
 
 
 # ── File operations ───────────────────────────────────────────────────────
+
 
 class TestFileOps:
     def test_put_and_get_file(self, store: CodeProjectStore) -> None:
@@ -402,6 +409,7 @@ class TestFileOps:
 
 # ── Path sanitization ────────────────────────────────────────────────────
 
+
 class TestPathSafety:
     def test_reject_absolute_path(self, store: CodeProjectStore) -> None:
         with pytest.raises(ValueError, match="Absolute"):
@@ -437,10 +445,9 @@ class TestPathSafety:
 
 # ── Thread safety ─────────────────────────────────────────────────────────
 
+
 class TestThreadSafety:
-    def test_concurrent_mutations_no_corruption(
-        self, store: CodeProjectStore
-    ) -> None:
+    def test_concurrent_mutations_no_corruption(self, store: CodeProjectStore) -> None:
         """Hammer the store from multiple threads; verify no data corruption."""
         store.add_phase("Phase 1")
         errors: list[Exception] = []

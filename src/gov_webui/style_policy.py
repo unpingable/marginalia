@@ -68,9 +68,7 @@ _RULES: list[tuple[str, Pattern[str], str]] = [
     ("multi_space", re.compile(r"(?<=\S) {2,}(?=\S)"), " "),
 ]
 
-_RULE_MAP: dict[str, tuple[Pattern[str], str]] = {
-    name: (pat, repl) for name, pat, repl in _RULES
-}
+_RULE_MAP: dict[str, tuple[Pattern[str], str]] = {name: (pat, repl) for name, pat, repl in _RULES}
 
 
 # ============================================================================
@@ -155,10 +153,15 @@ def check(content: str, profile: str) -> list[StyleCorrection]:
             line, col = _offset_to_line_col(content, m.start())
             # Compute actual replacement text (handles backrefs)
             actual_repl = m.expand(repl)
-            corrections.append(StyleCorrection(
-                line=line, col=col, rule=name,
-                original=m.group(), replacement=actual_repl,
-            ))
+            corrections.append(
+                StyleCorrection(
+                    line=line,
+                    col=col,
+                    rule=name,
+                    original=m.group(),
+                    replacement=actual_repl,
+                )
+            )
     corrections.sort(key=lambda c: (c.line, c.col))
     return corrections
 
@@ -186,10 +189,15 @@ def fix(content: str, profile: str) -> tuple[str, list[StyleCorrection]]:
     corrections: list[StyleCorrection] = []
     for start, _end, rule, orig, repl in sorted(matches, key=lambda t: t[0]):
         line, col = _offset_to_line_col(content, start)
-        corrections.append(StyleCorrection(
-            line=line, col=col, rule=rule,
-            original=orig, replacement=repl,
-        ))
+        corrections.append(
+            StyleCorrection(
+                line=line,
+                col=col,
+                rule=rule,
+                original=orig,
+                replacement=repl,
+            )
+        )
     # Apply in reverse offset order
     result = content
     for start, end, _rule, _orig, repl in matches:

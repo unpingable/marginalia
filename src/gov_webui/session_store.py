@@ -123,10 +123,7 @@ class ChatSession:
             updated_at=data["updated_at"],
             model=data.get("model", ""),
             message_count=data.get("message_count", 0),
-            messages=[
-                SessionMessage.from_dict(message)
-                for message in data.get("messages", [])
-            ],
+            messages=[SessionMessage.from_dict(message) for message in data.get("messages", [])],
         )
 
 
@@ -155,9 +152,7 @@ class SessionStore:
         if not path.exists():
             return None
         try:
-            return ChatSession.from_dict(
-                json.loads(path.read_text(encoding="utf-8"))
-            )
+            return ChatSession.from_dict(json.loads(path.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return None
 
@@ -188,9 +183,7 @@ class SessionStore:
         summaries: list[dict[str, Any]] = []
         for path in self.sessions_dir.glob("*.json"):
             try:
-                session = ChatSession.from_dict(
-                    json.loads(path.read_text(encoding="utf-8"))
-                )
+                session = ChatSession.from_dict(json.loads(path.read_text(encoding="utf-8")))
                 summaries.append(session.to_summary())
             except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                 continue

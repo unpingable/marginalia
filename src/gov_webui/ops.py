@@ -129,8 +129,14 @@ def migration_preflight(
                 errors.append(f"invalid session {path}: {exc}")
 
         validators = {
-            "creative project": (context_root / "marginalia" / "project.json", CreativeProjectConfig),
-            "artifact index": (context_root / ".governor" / ".governor" / "artifacts" / "index.json", ArtifactIndex),
+            "creative project": (
+                context_root / "marginalia" / "project.json",
+                CreativeProjectConfig,
+            ),
+            "artifact index": (
+                context_root / ".governor" / ".governor" / "artifacts" / "index.json",
+                ArtifactIndex,
+            ),
             "manuscript": (context_root / "marginalia" / "manuscript.json", ManuscriptState),
             "canon review": (context_root / "marginalia" / "canon-review.json", CanonReviewState),
             "snapshot index": (
@@ -197,9 +203,7 @@ def migration_preflight(
                     project_path.read_text(encoding="utf-8")
                 )
                 if config.context_id != project.context_id:
-                    errors.append(
-                        f"creative project context mismatch: {project.id}"
-                    )
+                    errors.append(f"creative project context mismatch: {project.id}")
             except (OSError, ValidationError, json.JSONDecodeError) as exc:
                 errors.append(f"creative project ownership validation failed: {exc}")
 
@@ -211,9 +215,7 @@ def migration_preflight(
                 )
                 for item in reviews.items.values():
                     if item.project_id != project.id:
-                        errors.append(
-                            f"canon review {item.id} belongs to another project"
-                        )
+                        errors.append(f"canon review {item.id} belongs to another project")
             except (OSError, ValidationError, json.JSONDecodeError) as exc:
                 errors.append(f"canon review ownership validation failed: {exc}")
 
@@ -261,9 +263,8 @@ def _manager(args: argparse.Namespace) -> WorkspaceBackupManager:
         backup_root=Path(args.backup_root),
         default_context_id=args.context_id,
         deployment=deployment_metadata(),
-        require_remote=os.environ.get(
-            "MARGINALIA_BACKUP_REQUIRE_REMOTE", "false"
-        ).lower() in {"true", "1", "yes"},
+        require_remote=os.environ.get("MARGINALIA_BACKUP_REQUIRE_REMOTE", "false").lower()
+        in {"true", "1", "yes"},
     )
 
 

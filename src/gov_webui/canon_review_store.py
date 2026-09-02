@@ -76,9 +76,7 @@ class CanonReviewStore:
             self._write(state)
             return state
         try:
-            return CanonReviewState.model_validate_json(
-                self.path.read_text(encoding="utf-8")
-            )
+            return CanonReviewState.model_validate_json(self.path.read_text(encoding="utf-8"))
         except (OSError, ValidationError, json.JSONDecodeError) as exc:
             raise CanonReviewStoreError(
                 f"cannot load canon review queue at {self.path}: {exc}"
@@ -145,9 +143,7 @@ class CanonReviewStore:
         with self._lock:
             item = self._state.items.get(candidate_id)
             if item is None:
-                raise CanonReviewNotFoundError(
-                    f"canon review candidate not found: {candidate_id}"
-                )
+                raise CanonReviewNotFoundError(f"canon review candidate not found: {candidate_id}")
             return item.model_copy(deep=True)
 
     def list(
@@ -174,9 +170,7 @@ class CanonReviewStore:
         with self._lock:
             item = self._state.items.get(candidate_id)
             if item is None:
-                raise CanonReviewNotFoundError(
-                    f"canon review candidate not found: {candidate_id}"
-                )
+                raise CanonReviewNotFoundError(f"canon review candidate not found: {candidate_id}")
             if item.status != "pending":
                 raise ValueError(f"canon review candidate already {item.status}")
             item.status = status
@@ -197,9 +191,7 @@ class CanonReviewStore:
         with self._lock:
             item = self._state.items.get(candidate_id)
             if item is None:
-                raise CanonReviewNotFoundError(
-                    f"canon review candidate not found: {candidate_id}"
-                )
+                raise CanonReviewNotFoundError(f"canon review candidate not found: {candidate_id}")
             if item.status != "pending":
                 raise ValueError(f"canon review candidate already {item.status}")
             if subject is not None:

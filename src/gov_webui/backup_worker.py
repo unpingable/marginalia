@@ -31,9 +31,8 @@ def run_once(
         backup_root=backup_root,
         default_context_id=default_context_id,
         deployment=deployment_metadata(),
-        require_remote=os.environ.get(
-            "MARGINALIA_BACKUP_REQUIRE_REMOTE", "false"
-        ).lower() in {"true", "1", "yes"},
+        require_remote=os.environ.get("MARGINALIA_BACKUP_REQUIRE_REMOTE", "false").lower()
+        in {"true", "1", "yes"},
     )
     results = []
     for workspace in library.list_workspaces():
@@ -43,16 +42,11 @@ def run_once(
             continue
         try:
             date_marker = current.strftime("%Y%m%dT")
-            if any(
-                date_marker in item["filename"]
-                for item in manager.list(workspace.id)
-            ):
+            if any(date_marker in item["filename"] for item in manager.list(workspace.id)):
                 continue
             results.append({"ok": True, **manager.create(workspace.id, now=current)})
         except (BackupError, OSError) as exc:
-            results.append(
-                {"ok": False, "workspace_id": workspace.id, "error": str(exc)}
-            )
+            results.append({"ok": False, "workspace_id": workspace.id, "error": str(exc)})
     return results
 
 

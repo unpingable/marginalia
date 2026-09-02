@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      qualification_fixture:
+        description: Manual CI negative control; ordinary runs always use normal
+        required: true
+        default: normal
+        type: choice
+        options:
+          - normal
+          - fail
+          - hang
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  AG_CONTRACT_COMMIT: e279a94326a0a13dbe43473846b53e4c3a9b31f2
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Marginalia
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-build.lock
+            requirements-dev.lock
+
+      - name: Install static and build dependencies
+        run: >-
+          python -m pip install
+          -r requirements.lock
+          -r requirements-build.lock
+          -r requirements-dev.lock
+
+      - name: Lint
+        run: make lint
+
+      - name: Check formatting
+        run: make fmt-check
+
+      - name: Build Python distributions
+        run: make build
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Marginalia
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Checkout the qualified Agent Governor contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: unpingable/agent_governor
+          ref: ${{ env.AG_CONTRACT_COMMIT }}
+          path: _agent_gov
+
+      - name: Verify the Agent Governor contract
+        run: |
+          test "$(tr -d '[:space:]' < AG_CONTRACT_COMMIT)" = "$AG_CONTRACT_COMMIT"
+          test "$(git -C _agent_gov rev-parse HEAD)" = "$AG_CONTRACT_COMMIT"
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-build.lock
+            requirements-dev.lock
+
+      - name: Install the exact test contract
+        run: |
+          python -m pip install \
+            -r requirements.lock \
+            -r requirements-build.lock \
+            -r requirements-dev.lock
+          python -m pip install --no-build-isolation --no-deps ./_agent_gov
+          python -m pip install --no-build-isolation --no-deps ./_agent_gov/libs/receipt_kernel
+          python -m pip install --no-build-isolation --no-deps ./_agent_gov/libs/receipt_v1
+          python -m pip install --no-build-isolation --no-deps -e .
+
+      - name: Controlled negative qualification fixture
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_fixture != 'normal'
+        run: |
+          case "${{ inputs.qualification_fixture }}" in
+            fail)
+              echo "Controlled failure fixture: CI must report this job as failed."
+              exit 1
+              ;;
+            hang)
+              echo "Controlled hanging fixture: timeout must stop it after five seconds."
+              timeout --signal=TERM --kill-after=2s 5s \
+                python -c 'import time; time.sleep(3600)'
+              ;;
+          esac
+
+      - name: Run the deterministic qualification suite
+        env:
+          MARGINALIA_AG_SOURCE_DIR: ${{ github.workspace }}/_agent_gov
+        run: make test
+
+  container:
+    name: container
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout Marginalia
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Checkout the qualified Agent Governor contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: unpingable/agent_governor
+          ref: ${{ env.AG_CONTRACT_COMMIT }}
+          path: _agent_gov
+
+      - name: Stage the exact local dependencies
+        env:
+          MARGINALIA_AG_SOURCE_DIR: ${{ github.workspace }}/_agent_gov
+        run: ./sync-deps.sh
+
+      - name: Build the production image
+        run: docker build --tag marginalia:ci .
+
+      - name: Smoke the built image
+        run: |
+          docker run --rm --entrypoint python3 marginalia:ci -c \
+            'import fiction_governor, governor, gov_webui, receipt_kernel, receipt_v1'
+          docker run --rm --entrypoint /opt/codex/codex marginalia:ci --version

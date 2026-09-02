@@ -151,10 +151,7 @@ def test_chat_response_records_exact_configured_identity(provider_client) -> Non
     assert response.json()["model"] == "fiction-model"
     assert response.json()["provider_id"] == "provider-a"
     assert response.json()["model_id"] == "upstream-a"
-    assert (
-        adapter._governed_chat_adapter.chat_send.await_args.kwargs["model"]
-        == "fiction-model"
-    )
+    assert adapter._governed_chat_adapter.chat_send.await_args.kwargs["model"] == "fiction-model"
 
 
 def test_unknown_configured_model_refuses_before_generation(provider_client) -> None:
@@ -235,10 +232,7 @@ def test_conversation_switch_preserves_historical_response_identity(
     assert second.status_code == 200
 
     messages = client.get(f"/sessions/{session_id}").json()["messages"]
-    assert [
-        (message["provider_id"], message["model_id"])
-        for message in messages
-    ] == [
+    assert [(message["provider_id"], message["model_id"]) for message in messages] == [
         ("provider-a", "upstream-a"),
         ("provider-b", "upstream-b"),
     ]

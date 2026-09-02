@@ -47,6 +47,7 @@ def _reset_adapter_singletons(tmp_path):
 def client():
     from starlette.testclient import TestClient
     from gov_webui.adapter import app
+
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -125,6 +126,7 @@ class TestIntentSchema:
 
     def test_schema_mode_matches_governor_mode(self, client):
         import gov_webui.adapter as adapter
+
         adapter.GOVERNOR_MODE = "fiction"
         res = client.get("/v2/intent/schema/session_start")
         data = res.json()
@@ -144,10 +146,13 @@ class TestIntentValidate:
 
     def test_valid_response(self, client):
         schema_id = self._get_schema_id(client)
-        res = client.post("/v2/intent/validate", json={
-            "schema_id": schema_id,
-            "values": {"profile": "strict", "mode": "general"},
-        })
+        res = client.post(
+            "/v2/intent/validate",
+            json={
+                "schema_id": schema_id,
+                "values": {"profile": "strict", "mode": "general"},
+            },
+        )
         assert res.status_code == 200
         data = res.json()
         assert data["valid"] is True
@@ -155,20 +160,26 @@ class TestIntentValidate:
 
     def test_invalid_value(self, client):
         schema_id = self._get_schema_id(client)
-        res = client.post("/v2/intent/validate", json={
-            "schema_id": schema_id,
-            "values": {"profile": "nonexistent", "mode": "general"},
-        })
+        res = client.post(
+            "/v2/intent/validate",
+            json={
+                "schema_id": schema_id,
+                "values": {"profile": "nonexistent", "mode": "general"},
+            },
+        )
         assert res.status_code == 200
         data = res.json()
         assert data["valid"] is False
         assert len(data["errors"]) > 0
 
     def test_unknown_schema_id(self, client):
-        res = client.post("/v2/intent/validate", json={
-            "schema_id": "bogus_id",
-            "values": {"profile": "strict"},
-        })
+        res = client.post(
+            "/v2/intent/validate",
+            json={
+                "schema_id": "bogus_id",
+                "values": {"profile": "strict"},
+            },
+        )
         assert res.status_code == 200
         data = res.json()
         assert len(data["errors"]) > 0
@@ -176,10 +187,13 @@ class TestIntentValidate:
 
     def test_missing_required_field(self, client):
         schema_id = self._get_schema_id(client)
-        res = client.post("/v2/intent/validate", json={
-            "schema_id": schema_id,
-            "values": {},
-        })
+        res = client.post(
+            "/v2/intent/validate",
+            json={
+                "schema_id": schema_id,
+                "values": {},
+            },
+        )
         assert res.status_code == 200
         data = res.json()
         assert data["valid"] is False
@@ -197,11 +211,14 @@ class TestIntentCompile:
 
     def test_compile_session_start(self, client):
         schema_id = self._get_schema_id(client)
-        res = client.post("/v2/intent/compile", json={
-            "schema_id": schema_id,
-            "values": {"profile": "strict", "mode": "general"},
-            "template_name": "session_start",
-        })
+        res = client.post(
+            "/v2/intent/compile",
+            json={
+                "schema_id": schema_id,
+                "values": {"profile": "strict", "mode": "general"},
+                "template_name": "session_start",
+            },
+        )
         assert res.status_code == 200
         data = res.json()
         assert data["intent_profile"] == "strict"
@@ -210,56 +227,71 @@ class TestIntentCompile:
 
     def test_compile_with_scope(self, client):
         schema_id = self._get_schema_id(client)
-        res = client.post("/v2/intent/compile", json={
-            "schema_id": schema_id,
-            "values": {"profile": "strict", "mode": "general", "scope": "src/**,tests/**"},
-            "template_name": "session_start",
-        })
+        res = client.post(
+            "/v2/intent/compile",
+            json={
+                "schema_id": schema_id,
+                "values": {"profile": "strict", "mode": "general", "scope": "src/**,tests/**"},
+                "template_name": "session_start",
+            },
+        )
         data = res.json()
         assert data["intent_scope"] == ["src/**", "tests/**"]
 
     def test_compile_with_escape_text(self, client):
         schema_id = self._get_schema_id(client)
-        res = client.post("/v2/intent/compile", json={
-            "schema_id": schema_id,
-            "values": {"profile": "strict", "mode": "general"},
-            "escape_text": "allow exception for testing",
-            "template_name": "session_start",
-        })
+        res = client.post(
+            "/v2/intent/compile",
+            json={
+                "schema_id": schema_id,
+                "values": {"profile": "strict", "mode": "general"},
+                "escape_text": "allow exception for testing",
+                "template_name": "session_start",
+            },
+        )
         data = res.json()
         assert data["escape_classification"] == "waiver_candidate"
 
     def test_compile_unknown_template_400(self, client):
-        res = client.post("/v2/intent/compile", json={
-            "schema_id": "x",
-            "values": {},
-            "template_name": "nonexistent",
-        })
+        res = client.post(
+            "/v2/intent/compile",
+            json={
+                "schema_id": "x",
+                "values": {},
+                "template_name": "nonexistent",
+            },
+        )
         assert res.status_code == 400
 
     def test_compile_task_scope(self, client):
         schema_id = self._get_schema_id(client, "task_scope")
-        res = client.post("/v2/intent/compile", json={
-            "schema_id": schema_id,
-            "values": {"task": "Refactor auth", "verification": "full"},
-            "template_name": "task_scope",
-        })
+        res = client.post(
+            "/v2/intent/compile",
+            json={
+                "schema_id": schema_id,
+                "values": {"task": "Refactor auth", "verification": "full"},
+                "template_name": "task_scope",
+            },
+        )
         assert res.status_code == 200
         data = res.json()
         assert "intent_profile" in data
 
     def test_compile_verification_config(self, client):
         schema_id = self._get_schema_id(client, "verification_config")
-        res = client.post("/v2/intent/compile", json={
-            "schema_id": schema_id,
-            "values": {
-                "evidence_level": "full",
-                "security_scan": True,
-                "continuity_check": True,
-                "max_violations": 3,
+        res = client.post(
+            "/v2/intent/compile",
+            json={
+                "schema_id": schema_id,
+                "values": {
+                    "evidence_level": "full",
+                    "security_scan": True,
+                    "continuity_check": True,
+                    "max_violations": 3,
+                },
+                "template_name": "verification_config",
             },
-            "template_name": "verification_config",
-        })
+        )
         assert res.status_code == 200
 
 
@@ -278,6 +310,7 @@ class TestIntentPolicy:
 
     def test_policy_fiction_mode(self, client):
         import gov_webui.adapter as adapter
+
         adapter.GOVERNOR_MODE = "fiction"
         res = client.get("/v2/intent/policy")
         data = res.json()
@@ -286,6 +319,7 @@ class TestIntentPolicy:
 
     def test_policy_code_mode(self, client):
         import gov_webui.adapter as adapter
+
         adapter.GOVERNOR_MODE = "code"
         res = client.get("/v2/intent/policy")
         data = res.json()
@@ -293,6 +327,7 @@ class TestIntentPolicy:
 
     def test_policy_research_mode(self, client):
         import gov_webui.adapter as adapter
+
         adapter.GOVERNOR_MODE = "research"
         res = client.get("/v2/intent/policy")
         data = res.json()

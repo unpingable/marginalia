@@ -109,30 +109,26 @@ async def test_block_restart_pending_isolation_resolve_authority(tmp_path: Path)
         contract = await adapter.contract_info()
         assert contract["governor"]["governor_dir"] == str(daemon_dir.resolve())
         assert (await adapter.provider())["type"] == "deterministic"
-        assert [model["id"] for model in await adapter.models()] == [
-            "deterministic-fiction-model"
-        ]
+        assert [model["id"] for model in await adapter.models()] == ["deterministic-fiction-model"]
 
         # The persisted product context crosses the real socket, reaches the
         # deterministic provider, and returns through AG with an authority
         # receipt before the separate blocking path is exercised.
         project_message = render_project_context(project_config)
         assert project_message is not None
-        applied = await adapter.chat_send([
-            project_message,
-            {"role": "user", "content": "MARGINALIA_PROJECT_ECHO"},
-        ])
+        applied = await adapter.chat_send(
+            [
+                project_message,
+                {"role": "user", "content": "MARGINALIA_PROJECT_ECHO"},
+            ]
+        )
         assert applied["content"] == "PROJECT_CONTEXT_APPLIED"
         assert applied["receipt"]["verdict"] == "pass"
-        applied_detail = await adapter.receipt_detail(
-            applied["receipt"]["receipt_id"]
-        )
+        applied_detail = await adapter.receipt_detail(applied["receipt"]["receipt_id"])
         assert applied_detail["evidence"]["context_id"] == context_id
         assert await adapter.pending() is None
 
-        blocked = await adapter.chat_send(
-            [{"role": "user", "content": "Write the next sentence."}]
-        )
+        blocked = await adapter.chat_send([{"role": "user", "content": "Write the next sentence."}])
         assert blocked["pending"]["context_id"] == context_id
         assert blocked["receipt"]["verdict"] == "block"
         assert blocked["receipt"]["receipt_role"] == "authority"
@@ -173,18 +169,14 @@ async def test_block_restart_pending_isolation_resolve_authority(tmp_path: Path)
         assert wrong_result["success"] is False
         assert (await adapter.pending())["id"] == pending_id
 
-        resolution = await adapter.resolve_pending(
-            "proceed", reason="intentional story exception"
-        )
+        resolution = await adapter.resolve_pending("proceed", reason="intentional story exception")
         assert resolution["success"] is True
         assert resolution["receipt"]["receipt_role"] == "authority"
         assert resolution["receipt"]["gate"] == "violation_resolution"
         assert await adapter.pending() is None
         assert not pending_file.exists()
 
-        detail = await adapter.receipt_detail(
-            resolution["receipt"]["receipt_id"]
-        )
+        detail = await adapter.receipt_detail(resolution["receipt"]["receipt_id"])
         assert detail["evidence"]["context_id"] == context_id
         assert detail["evidence"]["pending_id"] == pending_id
         assert detail["evidence"]["original_receipt_id"] == block_receipt_id

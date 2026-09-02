@@ -91,13 +91,9 @@ class ManuscriptStore:
             self._write(state)
             return state
         try:
-            return ManuscriptState.model_validate_json(
-                self.path.read_text(encoding="utf-8")
-            )
+            return ManuscriptState.model_validate_json(self.path.read_text(encoding="utf-8"))
         except (OSError, ValidationError, json.JSONDecodeError) as exc:
-            raise ManuscriptStoreError(
-                f"cannot load manuscript at {self.path}: {exc}"
-            ) from exc
+            raise ManuscriptStoreError(f"cannot load manuscript at {self.path}: {exc}") from exc
 
     def _write(self, state: ManuscriptState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,9 +106,7 @@ class ManuscriptStore:
             os.replace(temporary, self.path)
         except OSError as exc:
             temporary.unlink(missing_ok=True)
-            raise ManuscriptStoreError(
-                f"cannot persist manuscript at {self.path}: {exc}"
-            ) from exc
+            raise ManuscriptStoreError(f"cannot persist manuscript at {self.path}: {exc}") from exc
 
     def _save(self) -> None:
         self._state.version += 1
@@ -121,14 +115,10 @@ class ManuscriptStore:
 
     def _require_parent(self, parent_id: str | None) -> None:
         if parent_id is not None and parent_id not in self._state.nodes:
-            raise ManuscriptNodeNotFoundError(
-                f"manuscript parent not found: {parent_id}"
-            )
+            raise ManuscriptNodeNotFoundError(f"manuscript parent not found: {parent_id}")
 
     def _siblings(self, parent_id: str | None) -> list[ManuscriptNode]:
-        siblings = [
-            node for node in self._state.nodes.values() if node.parent_id == parent_id
-        ]
+        siblings = [node for node in self._state.nodes.values() if node.parent_id == parent_id]
         siblings.sort(key=lambda node: (node.position, node.created_at, node.id))
         return siblings
 
@@ -162,9 +152,7 @@ class ManuscriptStore:
             for node in self._state.nodes.values():
                 children.setdefault(node.parent_id, []).append(node)
             for siblings in children.values():
-                siblings.sort(
-                    key=lambda item: (item.position, item.created_at, item.id)
-                )
+                siblings.sort(key=lambda item: (item.position, item.created_at, item.id))
             ordered: list[ManuscriptNode] = []
 
             def visit(parent_id: str | None) -> None:
@@ -179,9 +167,7 @@ class ManuscriptStore:
         with self._lock:
             node = self._state.nodes.get(node_id)
             if node is None:
-                raise ManuscriptNodeNotFoundError(
-                    f"manuscript node not found: {node_id}"
-                )
+                raise ManuscriptNodeNotFoundError(f"manuscript node not found: {node_id}")
             return node.model_copy(deep=True)
 
     def create(
@@ -225,9 +211,7 @@ class ManuscriptStore:
         with self._lock:
             node = self._state.nodes.get(node_id)
             if node is None:
-                raise ManuscriptNodeNotFoundError(
-                    f"manuscript node not found: {node_id}"
-                )
+                raise ManuscriptNodeNotFoundError(f"manuscript node not found: {node_id}")
             if title is not None:
                 node.title = self._clean_title(title)
             if set_artifact:
@@ -249,9 +233,7 @@ class ManuscriptStore:
         with self._lock:
             node = self._state.nodes.get(node_id)
             if node is None:
-                raise ManuscriptNodeNotFoundError(
-                    f"manuscript node not found: {node_id}"
-                )
+                raise ManuscriptNodeNotFoundError(f"manuscript node not found: {node_id}")
             self._require_parent(parent_id)
             if parent_id == node_id:
                 raise ValueError("a manuscript node cannot contain itself")

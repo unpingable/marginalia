@@ -19,11 +19,13 @@ def adapter_mod():
     """Import and reset adapter module."""
     import importlib
     import os
+
     os.environ.setdefault("BACKEND_TYPE", "ollama")
     os.environ.setdefault("GOVERNOR_CONTEXT_ID", "test-parity")
     os.environ.setdefault("GOVERNOR_MODE", "general")
 
     import gov_webui.adapter as mod
+
     importlib.reload(mod)
     mod._bridge = None
     mod._context_manager = None
@@ -39,6 +41,7 @@ def adapter_mod():
 @pytest.fixture
 def client(adapter_mod):
     from fastapi.testclient import TestClient
+
     return TestClient(adapter_mod.app)
 
 
@@ -48,15 +51,17 @@ class TestChatDelegatesToDaemon:
     def test_non_streaming_calls_daemon_chat_send(self, client, adapter_mod):
         """POST /v1/chat/completions (non-streaming) calls daemon chat.send."""
         mock = AsyncMock()
-        mock.chat_send = AsyncMock(return_value={
-            "content": "Hello",
-            "model": "m",
-            "usage": {},
-            "violations": [],
-            "footer": None,
-            "pending": None,
-            "receipt": authority_receipt(),
-        })
+        mock.chat_send = AsyncMock(
+            return_value={
+                "content": "Hello",
+                "model": "m",
+                "usage": {},
+                "violations": [],
+                "footer": None,
+                "pending": None,
+                "receipt": authority_receipt(),
+            }
+        )
         adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
@@ -76,17 +81,21 @@ class TestChatDelegatesToDaemon:
 
     def test_streaming_calls_daemon_chat_stream(self, client, adapter_mod):
         """POST /v1/chat/completions (stream=true) calls daemon chat.stream."""
+
         async def mock_stream(*args, **kwargs):
             yield ("chunk", None)
-            yield (None, {
-                "content": "chunk",
-                "model": "m",
-                "usage": {},
-                "violations": [],
-                "footer": None,
-                "pending": None,
-                "receipt": authority_receipt(),
-            })
+            yield (
+                None,
+                {
+                    "content": "chunk",
+                    "model": "m",
+                    "usage": {},
+                    "violations": [],
+                    "footer": None,
+                    "pending": None,
+                    "receipt": authority_receipt(),
+                },
+            )
 
         mock = AsyncMock()
         mock.chat_stream = MagicMock(return_value=mock_stream())
@@ -108,20 +117,22 @@ class TestChatDelegatesToDaemon:
     def test_violations_from_daemon_are_surfaced(self, client, adapter_mod):
         """Daemon violations are included in the response."""
         mock = AsyncMock()
-        mock.chat_send = AsyncMock(return_value={
-            "content": "",
-            "model": "m",
-            "usage": {},
-            "violations": [{"anchor_id": "a1", "severity": "reject"}],
-            "footer": None,
-            "pending": {
-                "id": "p1",
+        mock.chat_send = AsyncMock(
+            return_value={
+                "content": "",
+                "model": "m",
+                "usage": {},
                 "violations": [{"anchor_id": "a1", "severity": "reject"}],
-                "mode": "general",
-                "blocked_response": "bad",
-            },
-            "receipt": authority_receipt(verdict="block"),
-        })
+                "footer": None,
+                "pending": {
+                    "id": "p1",
+                    "violations": [{"anchor_id": "a1", "severity": "reject"}],
+                    "mode": "general",
+                    "blocked_response": "bad",
+                },
+                "receipt": authority_receipt(verdict="block"),
+            }
+        )
         adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
@@ -141,15 +152,17 @@ class TestChatDelegatesToDaemon:
     def test_footer_from_daemon_appended(self, client, adapter_mod):
         """Daemon footer is appended to response content."""
         mock = AsyncMock()
-        mock.chat_send = AsyncMock(return_value={
-            "content": "Hello",
-            "model": "m",
-            "usage": {},
-            "violations": [],
-            "footer": "[Governor] OK — 3 anchors checked",
-            "pending": None,
-            "receipt": authority_receipt(),
-        })
+        mock.chat_send = AsyncMock(
+            return_value={
+                "content": "Hello",
+                "model": "m",
+                "usage": {},
+                "violations": [],
+                "footer": "[Governor] OK — 3 anchors checked",
+                "pending": None,
+                "receipt": authority_receipt(),
+            }
+        )
         adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
@@ -171,15 +184,17 @@ class TestChatDelegatesToDaemon:
         adapter_mod._bridge = mock_bridge
 
         mock_daemon = AsyncMock()
-        mock_daemon.chat_send = AsyncMock(return_value={
-            "content": "from daemon",
-            "model": "m",
-            "usage": {},
-            "violations": [],
-            "footer": None,
-            "pending": None,
-            "receipt": authority_receipt(),
-        })
+        mock_daemon.chat_send = AsyncMock(
+            return_value={
+                "content": "from daemon",
+                "model": "m",
+                "usage": {},
+                "violations": [],
+                "footer": None,
+                "pending": None,
+                "receipt": authority_receipt(),
+            }
+        )
         adapter_mod._governed_chat_adapter = mock_daemon
 
         client.post(
@@ -204,9 +219,7 @@ class TestAuthErrorHandling:
         from gov_webui.daemon_client import DaemonAuthError
 
         mock = AsyncMock()
-        mock.chat_send = AsyncMock(
-            side_effect=DaemonAuthError("Claude Code is not logged in")
-        )
+        mock.chat_send = AsyncMock(side_effect=DaemonAuthError("Claude Code is not logged in"))
         adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
@@ -223,9 +236,7 @@ class TestAuthErrorHandling:
     def test_non_streaming_generic_error_returns_502(self, client, adapter_mod):
         """Non-auth errors still produce HTTP 502."""
         mock = AsyncMock()
-        mock.chat_send = AsyncMock(
-            side_effect=RuntimeError("connection refused")
-        )
+        mock.chat_send = AsyncMock(side_effect=RuntimeError("connection refused"))
         adapter_mod._governed_chat_adapter = mock
 
         response = client.post(

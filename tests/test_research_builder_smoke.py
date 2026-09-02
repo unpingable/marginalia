@@ -7,6 +7,7 @@ Exercises the structured research workflow:
 Mirrors test_code_builder_smoke.py but with research-mode labels,
 RESEARCH_EXTENSIONS, and text validation instead of code execution.
 """
+
 from __future__ import annotations
 
 import os
@@ -44,6 +45,7 @@ def research_client(tmp_path: Path):
     adapter_mod._context_manager = cm
 
     from fastapi.testclient import TestClient
+
     client = TestClient(adapter_mod.app, raise_server_exceptions=False)
     yield client
 
@@ -72,41 +74,50 @@ class TestResearchBuilderSmokeLoop:
         assert state["files"] == {}
 
         # 2. Set thesis (intent)
-        r = c.put("/governor/research/project/intent", json={
-            "text": "How does cognitive load affect code review quality?",
-            "locked": False,
-            "expected_version": v,
-        })
+        r = c.put(
+            "/governor/research/project/intent",
+            json={
+                "text": "How does cognitive load affect code review quality?",
+                "locked": False,
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
         v += 1
 
         # 3. Lock thesis
-        r = c.put("/governor/research/project/intent", json={
-            "text": "How does cognitive load affect code review quality?",
-            "locked": True,
-            "expected_version": v,
-        })
+        r = c.put(
+            "/governor/research/project/intent",
+            json={
+                "text": "How does cognitive load affect code review quality?",
+                "locked": True,
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
         assert r.json()["intent"]["locked"] is True
         v += 1
 
         # 4. Set scope (contract) with wizard config
-        r = c.put("/governor/research/project/contract", json={
-            "description": "Literature review of cognitive load in code review",
-            "inputs": [{"name": "search_terms", "type": "str"}],
-            "outputs": [{"name": "summary", "type": "str"}],
-            "constraints": ["No anecdotal evidence", "Avoid speculation"],
-            "transport": "stdio",
-            "expected_version": v,
-            "config": {
-                "artifact_type": "lit_review",
-                "length": "short",
-                "voice": ["academic"],
-                "citations": "light",
-                "bans": [],
-                "strict": False,
+        r = c.put(
+            "/governor/research/project/contract",
+            json={
+                "description": "Literature review of cognitive load in code review",
+                "inputs": [{"name": "search_terms", "type": "str"}],
+                "outputs": [{"name": "summary", "type": "str"}],
+                "constraints": ["No anecdotal evidence", "Avoid speculation"],
+                "transport": "stdio",
+                "expected_version": v,
+                "config": {
+                    "artifact_type": "lit_review",
+                    "length": "short",
+                    "voice": ["academic"],
+                    "citations": "light",
+                    "bans": [],
+                    "strict": False,
+                },
             },
-        })
+        )
         assert r.status_code == 200
         scope = r.json()["contract"]
         assert scope["description"] == "Literature review of cognitive load in code review"
@@ -127,39 +138,52 @@ class TestResearchBuilderSmokeLoop:
         assert r.status_code == 200
         v += 1
 
-        r = c.post("/governor/research/project/plan/item", json={
-            "phase_idx": 0, "text": "Collect primary sources"
-        })
+        r = c.post(
+            "/governor/research/project/plan/item",
+            json={"phase_idx": 0, "text": "Collect primary sources"},
+        )
         assert r.status_code == 200
         assert r.json()["item"]["id"] == "p0-0"
         v += 1
 
-        r = c.post("/governor/research/project/plan/item", json={
-            "phase_idx": 1, "text": "Draft synthesis section"
-        })
+        r = c.post(
+            "/governor/research/project/plan/item",
+            json={"phase_idx": 1, "text": "Draft synthesis section"},
+        )
         assert r.status_code == 200
         v += 1
 
         # 6. Walk plan item through state machine
-        r = c.patch("/governor/research/project/plan/item/p0-0", json={
-            "status": "accepted", "expected_version": v,
-        })
+        r = c.patch(
+            "/governor/research/project/plan/item/p0-0",
+            json={
+                "status": "accepted",
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
         v += 1
 
-        r = c.patch("/governor/research/project/plan/item/p0-0", json={
-            "status": "in_progress", "expected_version": v,
-        })
+        r = c.patch(
+            "/governor/research/project/plan/item/p0-0",
+            json={
+                "status": "in_progress",
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
         v += 1
 
         # 7. Accept a draft (research uses .md files)
-        r = c.put("/governor/research/project/files/notes.md", json={
-            "content": "# Literature Review\n\nSmith (2023) found that cognitive load "
-                       "increases with code complexity [1].\n\n## References\n[1] Smith, "
-                       "J. (2023). Cognitive Load in Code Review.\n",
-            "turn_id": "turn-rsmoke001",
-        })
+        r = c.put(
+            "/governor/research/project/files/notes.md",
+            json={
+                "content": "# Literature Review\n\nSmith (2023) found that cognitive load "
+                "increases with code complexity [1].\n\n## References\n[1] Smith, "
+                "J. (2023). Cognitive Load in Code Review.\n",
+                "turn_id": "turn-rsmoke001",
+            },
+        )
         assert r.status_code == 200
         file_result = r.json()
         assert file_result["version"] == 1
@@ -176,9 +200,12 @@ class TestResearchBuilderSmokeLoop:
         assert "notes.md" in r.json()["files"]
 
         # 10. Validate the draft (no findings expected)
-        r = c.post("/governor/research/project/validate", json={
-            "filepath": "notes.md",
-        })
+        r = c.post(
+            "/governor/research/project/validate",
+            json={
+                "filepath": "notes.md",
+            },
+        )
         assert r.status_code == 200
         val = r.json()
         assert val["success"] is True
@@ -187,25 +214,36 @@ class TestResearchBuilderSmokeLoop:
         assert val["preflight_hit"] is False
 
         # 11. Complete the plan item
-        r = c.patch("/governor/research/project/plan/item/p0-0", json={
-            "status": "completed", "expected_version": v,
-        })
+        r = c.patch(
+            "/governor/research/project/plan/item/p0-0",
+            json={
+                "status": "completed",
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
         assert r.json()["item"]["status"] == "completed"
         v += 1
 
         # 12. Phase gating: Phase 2 item now accessible
-        r = c.patch("/governor/research/project/plan/item/p1-0", json={
-            "status": "accepted", "expected_version": v,
-        })
+        r = c.patch(
+            "/governor/research/project/plan/item/p1-0",
+            json={
+                "status": "accepted",
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
         v += 1
 
         # 13. Accept a second version of the draft
-        r = c.put("/governor/research/project/files/notes.md", json={
-            "content": "# Literature Review v2\n\nExpanded with additional sources.\n",
-            "turn_id": "turn-rsmoke002",
-        })
+        r = c.put(
+            "/governor/research/project/files/notes.md",
+            json={
+                "content": "# Literature Review v2\n\nExpanded with additional sources.\n",
+                "turn_id": "turn-rsmoke002",
+            },
+        )
         assert r.status_code == 200
         assert r.json()["version"] == 2
         v += 1
@@ -221,7 +259,9 @@ class TestResearchBuilderSmokeLoop:
         final = r.json()
         assert final["intent"]["text"] == "How does cognitive load affect code review quality?"
         assert final["intent"]["locked"] is True
-        assert final["contract"]["description"] == "Literature review of cognitive load in code review"
+        assert (
+            final["contract"]["description"] == "Literature review of cognitive load in code review"
+        )
         assert final["files"]["notes.md"]["version"] == 2
         assert final["files"]["notes.md"]["accepted_turn_id"] == "turn-rsmoke002"
         assert final["plan"]["phases"][0]["items"][0]["status"] == "completed"
@@ -235,14 +275,24 @@ class TestResearchBuilderSmokeLoop:
         state = c.get("/governor/research/project").json()
         v = state["version"]
 
-        r = c.put("/governor/research/project/intent", json={
-            "text": "first", "locked": False, "expected_version": v,
-        })
+        r = c.put(
+            "/governor/research/project/intent",
+            json={
+                "text": "first",
+                "locked": False,
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
 
-        r = c.put("/governor/research/project/intent", json={
-            "text": "second", "locked": False, "expected_version": v,
-        })
+        r = c.put(
+            "/governor/research/project/intent",
+            json={
+                "text": "second",
+                "locked": False,
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 409
 
     def test_research_extensions_accepted(self, research_client) -> None:
@@ -255,9 +305,12 @@ class TestResearchBuilderSmokeLoop:
             ("refs.bib", "@article{smith2023, author={Smith}}\n"),
             ("notes.txt", "Field notes from observation.\n"),
         ]:
-            r = c.put(f"/governor/research/project/files/{fname}", json={
-                "content": content,
-            })
+            r = c.put(
+                f"/governor/research/project/files/{fname}",
+                json={
+                    "content": content,
+                },
+            )
             assert r.status_code == 200, f"Failed to accept {fname}: {r.json()}"
             assert r.json()["version"] == 1
 
@@ -272,9 +325,12 @@ class TestResearchBuilderSmokeLoop:
         """Research store rejects .py and .cfg files."""
         c = research_client
 
-        r = c.put("/governor/research/project/files/script.py", json={
-            "content": "print('hello')",
-        })
+        r = c.put(
+            "/governor/research/project/files/script.py",
+            json={
+                "content": "print('hello')",
+            },
+        )
         assert r.status_code == 400
         assert "not allowed" in r.json()["detail"]
 
@@ -282,15 +338,21 @@ class TestResearchBuilderSmokeLoop:
         """Validator detects uncited weasel phrases."""
         c = research_client
 
-        c.put("/governor/research/project/files/draft.md", json={
-            "content": "# Analysis\n\nStudies show that X is important.\n"
-                       "Research suggests Y may be relevant.\n"
-                       "Smith (2023) confirmed Z [1].\n",
-        })
+        c.put(
+            "/governor/research/project/files/draft.md",
+            json={
+                "content": "# Analysis\n\nStudies show that X is important.\n"
+                "Research suggests Y may be relevant.\n"
+                "Smith (2023) confirmed Z [1].\n",
+            },
+        )
 
-        r = c.post("/governor/research/project/validate", json={
-            "filepath": "draft.md",
-        })
+        r = c.post(
+            "/governor/research/project/validate",
+            json={
+                "filepath": "draft.md",
+            },
+        )
         assert r.status_code == 200
         val = r.json()
         assert val["success"] is False
@@ -309,23 +371,32 @@ class TestResearchBuilderSmokeLoop:
         v = state["version"]
 
         # Set scope with constraint "Avoid speculation"
-        c.put("/governor/research/project/contract", json={
-            "description": "Focused review",
-            "inputs": [],
-            "outputs": [],
-            "constraints": ["Avoid speculation"],
-            "transport": "stdio",
-            "expected_version": v,
-        })
+        c.put(
+            "/governor/research/project/contract",
+            json={
+                "description": "Focused review",
+                "inputs": [],
+                "outputs": [],
+                "constraints": ["Avoid speculation"],
+                "transport": "stdio",
+                "expected_version": v,
+            },
+        )
 
         # Accept draft containing the forbidden term
-        c.put("/governor/research/project/files/draft.md", json={
-            "content": "# Draft\n\nThis section involves some speculation about causes.\n",
-        })
+        c.put(
+            "/governor/research/project/files/draft.md",
+            json={
+                "content": "# Draft\n\nThis section involves some speculation about causes.\n",
+            },
+        )
 
-        r = c.post("/governor/research/project/validate", json={
-            "filepath": "draft.md",
-        })
+        r = c.post(
+            "/governor/research/project/validate",
+            json={
+                "filepath": "draft.md",
+            },
+        )
         assert r.status_code == 200
         val = r.json()
         assert val["success"] is False
@@ -336,22 +407,31 @@ class TestResearchBuilderSmokeLoop:
         """Validate returns 400 when no drafts exist."""
         c = research_client
 
-        r = c.post("/governor/research/project/validate", json={
-            "filepath": "nonexistent.md",
-        })
+        r = c.post(
+            "/governor/research/project/validate",
+            json={
+                "filepath": "nonexistent.md",
+            },
+        )
         assert r.status_code == 400
 
     def test_validate_missing_draft_404(self, research_client) -> None:
         """Validate returns 404 for wrong filename when other drafts exist."""
         c = research_client
 
-        c.put("/governor/research/project/files/draft.md", json={
-            "content": "Some content.\n",
-        })
+        c.put(
+            "/governor/research/project/files/draft.md",
+            json={
+                "content": "Some content.\n",
+            },
+        )
 
-        r = c.post("/governor/research/project/validate", json={
-            "filepath": "other.md",
-        })
+        r = c.post(
+            "/governor/research/project/validate",
+            json={
+                "filepath": "other.md",
+            },
+        )
         assert r.status_code == 404
 
     def test_invalid_transition_rejected(self, research_client) -> None:
@@ -359,14 +439,17 @@ class TestResearchBuilderSmokeLoop:
         c = research_client
 
         c.post("/governor/research/project/plan/phase", json={"name": "Phase 1"})
-        c.post("/governor/research/project/plan/item", json={
-            "phase_idx": 0, "text": "Research task"
-        })
+        c.post(
+            "/governor/research/project/plan/item", json={"phase_idx": 0, "text": "Research task"}
+        )
 
         # proposed -> completed (skipping accepted)
-        r = c.patch("/governor/research/project/plan/item/p0-0", json={
-            "status": "completed",
-        })
+        r = c.patch(
+            "/governor/research/project/plan/item/p0-0",
+            json={
+                "status": "completed",
+            },
+        )
         assert r.status_code == 400
         assert "Invalid transition" in r.json()["detail"]
 
@@ -376,17 +459,16 @@ class TestResearchBuilderSmokeLoop:
 
         c.post("/governor/research/project/plan/phase", json={"name": "Phase 1"})
         c.post("/governor/research/project/plan/phase", json={"name": "Phase 2"})
-        c.post("/governor/research/project/plan/item", json={
-            "phase_idx": 0, "text": "Task A"
-        })
-        c.post("/governor/research/project/plan/item", json={
-            "phase_idx": 1, "text": "Task B"
-        })
+        c.post("/governor/research/project/plan/item", json={"phase_idx": 0, "text": "Task A"})
+        c.post("/governor/research/project/plan/item", json={"phase_idx": 1, "text": "Task B"})
 
         # Try to accept phase 2 item while phase 1 has pending items
-        r = c.patch("/governor/research/project/plan/item/p1-0", json={
-            "status": "accepted",
-        })
+        r = c.patch(
+            "/governor/research/project/plan/item/p1-0",
+            json={
+                "status": "accepted",
+            },
+        )
         assert r.status_code == 400
         assert "incomplete" in r.json()["detail"].lower()
 
@@ -398,30 +480,39 @@ class TestResearchBuilderSmokeLoop:
         v = state["version"]
 
         # Set scope with config bans
-        c.put("/governor/research/project/contract", json={
-            "description": "Test",
-            "inputs": [],
-            "outputs": [],
-            "constraints": [],
-            "transport": "stdio",
-            "expected_version": v,
-            "config": {
-                "artifact_type": "essay",
-                "length": "medium",
-                "bans": ["inspirational closer", "in conclusion"],
-                "strict": False,
+        c.put(
+            "/governor/research/project/contract",
+            json={
+                "description": "Test",
+                "inputs": [],
+                "outputs": [],
+                "constraints": [],
+                "transport": "stdio",
+                "expected_version": v,
+                "config": {
+                    "artifact_type": "essay",
+                    "length": "medium",
+                    "bans": ["inspirational closer", "in conclusion"],
+                    "strict": False,
+                },
             },
-        })
+        )
 
         # Accept draft containing banned phrase
-        c.put("/governor/research/project/files/draft.md", json={
-            "content": "# Analysis\n\nThis is a solid analysis.\n\n"
-                       "In conclusion, everything worked out.\n",
-        })
+        c.put(
+            "/governor/research/project/files/draft.md",
+            json={
+                "content": "# Analysis\n\nThis is a solid analysis.\n\n"
+                "In conclusion, everything worked out.\n",
+            },
+        )
 
-        r = c.post("/governor/research/project/validate", json={
-            "filepath": "draft.md",
-        })
+        r = c.post(
+            "/governor/research/project/validate",
+            json={
+                "filepath": "draft.md",
+            },
+        )
         assert r.status_code == 200
         val = r.json()
         assert val["success"] is False
@@ -435,15 +526,18 @@ class TestResearchBuilderSmokeLoop:
         state = c.get("/governor/research/project").json()
         v = state["version"]
 
-        r = c.put("/governor/research/project/contract", json={
-            "description": "Test",
-            "inputs": [],
-            "outputs": [],
-            "constraints": [],
-            "transport": "stdio",
-            "expected_version": v,
-            "config": {"artifact_type": "essay", "length": "short"},
-            "config_hash": "deadbeefdeadbeef",  # wrong hash
-        })
+        r = c.put(
+            "/governor/research/project/contract",
+            json={
+                "description": "Test",
+                "inputs": [],
+                "outputs": [],
+                "constraints": [],
+                "transport": "stdio",
+                "expected_version": v,
+                "config": {"artifact_type": "essay", "length": "short"},
+                "config_hash": "deadbeefdeadbeef",  # wrong hash
+            },
+        )
         assert r.status_code == 400
         assert "mismatch" in r.json()["detail"].lower()

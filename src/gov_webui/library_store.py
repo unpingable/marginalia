@@ -247,9 +247,7 @@ class LibraryStore:
             raise LibraryStoreError(f"cannot read pending library migration: {exc}") from exc
         result_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
         if receipt.get("result_sha256") != result_hash:
-            raise LibraryStoreError(
-                "pending library migration does not match the current library"
-            )
+            raise LibraryStoreError("pending library migration does not match the current library")
         os.replace(pending, self.path.with_name("library.migration-1-2.json"))
         self._fsync_directory(self.path.parent)
 
@@ -268,9 +266,7 @@ class LibraryStore:
                 state = LibraryState.model_validate(raw)
                 self._finalize_pending_migration(source)
             else:
-                raise LibraryStoreError(
-                    f"unsupported library schema version: {schema_version}"
-                )
+                raise LibraryStoreError(f"unsupported library schema version: {schema_version}")
         except (OSError, ValidationError, json.JSONDecodeError) as exc:
             raise LibraryStoreError(f"cannot load library at {self.path}: {exc}") from exc
         if state.default_project_id not in state.projects:
@@ -285,9 +281,7 @@ class LibraryStore:
         for workspace in state.workspaces.values():
             project = state.projects.get(workspace.default_project_id)
             if project is None or project.workspace_id != workspace.id:
-                raise LibraryStoreError(
-                    f"workspace {workspace.id} default project is invalid"
-                )
+                raise LibraryStoreError(f"workspace {workspace.id} default project is invalid")
         for project in state.projects.values():
             if project.workspace_id not in state.workspaces:
                 raise LibraryStoreError(
@@ -318,9 +312,7 @@ class LibraryStore:
 
     def default_workspace(self) -> WorkspaceRecord:
         with self._lock:
-            return self._state.workspaces[
-                self._state.default_workspace_id
-            ].model_copy(deep=True)
+            return self._state.workspaces[self._state.default_workspace_id].model_copy(deep=True)
 
     def get_workspace(self, workspace_id: str | None = None) -> WorkspaceRecord:
         with self._lock:
@@ -347,11 +339,12 @@ class LibraryStore:
             raise ValueError("backup subdirectory must not be empty")
         if len(cleaned) > cls.MAX_BACKUP_SUBDIRECTORY_LENGTH:
             raise ValueError(
-                "backup subdirectory is limited to "
-                f"{cls.MAX_BACKUP_SUBDIRECTORY_LENGTH} characters"
+                f"backup subdirectory is limited to {cls.MAX_BACKUP_SUBDIRECTORY_LENGTH} characters"
             )
         if "/" in cleaned or "\\" in cleaned or not re.fullmatch(r"[A-Za-z0-9._-]+", cleaned):
-            raise ValueError("backup subdirectory may contain letters, numbers, dot, dash, and underscore")
+            raise ValueError(
+                "backup subdirectory may contain letters, numbers, dot, dash, and underscore"
+            )
         return cleaned
 
     def create_workspace(self, name: str) -> tuple[WorkspaceRecord, ProjectRecord]:
@@ -406,9 +399,7 @@ class LibraryStore:
             if backup_enabled is not None:
                 workspace.backup_enabled = backup_enabled
             if backup_subdirectory is not None:
-                workspace.backup_subdirectory = self._clean_backup_subdirectory(
-                    backup_subdirectory
-                )
+                workspace.backup_subdirectory = self._clean_backup_subdirectory(backup_subdirectory)
             if backup_schedule is not None:
                 if backup_schedule not in {"manual", "daily"}:
                     raise ValueError("backup schedule must be manual or daily")

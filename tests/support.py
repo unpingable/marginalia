@@ -38,35 +38,38 @@ def fake_governed_chat(
 ) -> AsyncMock:
     receipt = authority_receipt(verdict="block" if pending else "pass")
     mock = AsyncMock()
-    mock.chat_send = AsyncMock(return_value={
-        "content": content,
-        "model": model,
-        "usage": usage
-        or {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-        "violations": violations or [],
-        "footer": footer,
-        "pending": pending,
-        "receipt": receipt,
-    })
-    mock.provider = AsyncMock(return_value={
-        "type": "mock",
-        "connected": True,
-        "model": model,
-    })
+    mock.chat_send = AsyncMock(
+        return_value={
+            "content": content,
+            "model": model,
+            "usage": usage or {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+            "violations": violations or [],
+            "footer": footer,
+            "pending": pending,
+            "receipt": receipt,
+        }
+    )
+    mock.provider = AsyncMock(
+        return_value={
+            "type": "mock",
+            "connected": True,
+            "model": model,
+        }
+    )
     mock.models = AsyncMock(return_value=[{"id": model, "owned_by": "mock"}])
-    mock.contract_info = AsyncMock(return_value={
-        "capabilities": {
-            "governed_chat": {
-                "contract_version": "1",
-                "context_scoped_pending": True,
-                "authoritative_receipts": True,
+    mock.contract_info = AsyncMock(
+        return_value={
+            "capabilities": {
+                "governed_chat": {
+                    "contract_version": "1",
+                    "context_scoped_pending": True,
+                    "authoritative_receipts": True,
+                }
             }
         }
-    })
+    )
     mock.format_pending_message = MagicMock(
-        side_effect=lambda value: (
-            value.get("prompt") or "This response needs your decision."
-        )
+        side_effect=lambda value: value.get("prompt") or "This response needs your decision."
     )
     mock.close = AsyncMock()
     return mock

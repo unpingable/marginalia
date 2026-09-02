@@ -32,12 +32,7 @@ def _populated_manager(tmp_path: Path) -> tuple[WorkspaceBackupManager, str]:
     library.add_conversation(session.id, project.id)
 
     artifact_dir = (
-        data_root
-        / ".governor"
-        / project.context_id
-        / ".governor"
-        / ".governor"
-        / "artifacts"
+        data_root / ".governor" / project.context_id / ".governor" / ".governor" / "artifacts"
     )
     artifact_dir.mkdir(parents=True)
     (artifact_dir / "test-record.json").write_text(

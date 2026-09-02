@@ -6,6 +6,7 @@ Exercises the full mechanically binding loop:
 
 This is the "does it still boot and close the loop" gate for every PR.
 """
+
 from __future__ import annotations
 
 import os
@@ -43,6 +44,7 @@ def code_client(tmp_path: Path):
     adapter_mod._context_manager = cm
 
     from fastapi.testclient import TestClient
+
     client = TestClient(adapter_mod.app, raise_server_exceptions=False)
     yield client
 
@@ -71,41 +73,50 @@ class TestCodeBuilderSmokeLoop:
         assert state["files"] == {}
 
         # 2. Set intent (with expected_version)
-        r = c.put("/governor/code/project/intent", json={
-            "text": "Parse CSV files and output JSON",
-            "locked": False,
-            "expected_version": v,
-        })
+        r = c.put(
+            "/governor/code/project/intent",
+            json={
+                "text": "Parse CSV files and output JSON",
+                "locked": False,
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
         v += 1  # version bumped
 
         # 3. Lock intent
-        r = c.put("/governor/code/project/intent", json={
-            "text": "Parse CSV files and output JSON",
-            "locked": True,
-            "expected_version": v,
-        })
+        r = c.put(
+            "/governor/code/project/intent",
+            json={
+                "text": "Parse CSV files and output JSON",
+                "locked": True,
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
         assert r.json()["intent"]["locked"] is True
         v += 1
 
         # 4. Set contract with wizard config
-        r = c.put("/governor/code/project/contract", json={
-            "description": "CSV to JSON converter",
-            "inputs": [{"name": "filepath", "type": "str"}],
-            "outputs": [{"name": "json_data", "type": "list[dict]"}],
-            "constraints": ["No pandas", "Handle UTF-8"],
-            "transport": "stdio",
-            "expected_version": v,
-            "config": {
-                "artifact_type": "tool",
-                "length": "medium",
-                "voice": ["dry"],
-                "citations": "none",
-                "bans": [],
-                "strict": False,
+        r = c.put(
+            "/governor/code/project/contract",
+            json={
+                "description": "CSV to JSON converter",
+                "inputs": [{"name": "filepath", "type": "str"}],
+                "outputs": [{"name": "json_data", "type": "list[dict]"}],
+                "constraints": ["No pandas", "Handle UTF-8"],
+                "transport": "stdio",
+                "expected_version": v,
+                "config": {
+                    "artifact_type": "tool",
+                    "length": "medium",
+                    "voice": ["dry"],
+                    "citations": "none",
+                    "bans": [],
+                    "strict": False,
+                },
             },
-        })
+        )
         assert r.status_code == 200
         contract = r.json()["contract"]
         assert contract["description"] == "CSV to JSON converter"
@@ -128,39 +139,48 @@ class TestCodeBuilderSmokeLoop:
         assert r.status_code == 200
         v += 1
 
-        r = c.post("/governor/code/plan/item", json={
-            "phase_idx": 0, "text": "Write parser function"
-        })
+        r = c.post(
+            "/governor/code/plan/item", json={"phase_idx": 0, "text": "Write parser function"}
+        )
         assert r.status_code == 200
         assert r.json()["item"]["id"] == "p0-0"
         v += 1
 
-        r = c.post("/governor/code/plan/item", json={
-            "phase_idx": 1, "text": "Write unit tests"
-        })
+        r = c.post("/governor/code/plan/item", json={"phase_idx": 1, "text": "Write unit tests"})
         assert r.status_code == 200
         v += 1
 
         # 6. Walk plan item through state machine
         # proposed -> accepted
-        r = c.patch("/governor/code/plan/item/p0-0", json={
-            "status": "accepted", "expected_version": v,
-        })
+        r = c.patch(
+            "/governor/code/plan/item/p0-0",
+            json={
+                "status": "accepted",
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
         v += 1
 
         # accepted -> in_progress
-        r = c.patch("/governor/code/plan/item/p0-0", json={
-            "status": "in_progress", "expected_version": v,
-        })
+        r = c.patch(
+            "/governor/code/plan/item/p0-0",
+            json={
+                "status": "in_progress",
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
         v += 1
 
         # 7. Accept a file (simulating user clicking Accept on a code block)
-        r = c.put("/governor/code/files/tool.py", json={
-            "content": 'import sys\nimport json\nimport csv\n\ndef parse_csv(filepath):\n    with open(filepath) as f:\n        reader = csv.DictReader(f)\n        return list(reader)\n\nif __name__ == "__main__":\n    # Read filepath from stdin\n    filepath = sys.stdin.read().strip()\n    if filepath:\n        data = parse_csv(filepath)\n        print(json.dumps(data, indent=2))\n    else:\n        print("hello world")\n',
-            "turn_id": "turn-smoke001",
-        })
+        r = c.put(
+            "/governor/code/files/tool.py",
+            json={
+                "content": 'import sys\nimport json\nimport csv\n\ndef parse_csv(filepath):\n    with open(filepath) as f:\n        reader = csv.DictReader(f)\n        return list(reader)\n\nif __name__ == "__main__":\n    # Read filepath from stdin\n    filepath = sys.stdin.read().strip()\n    if filepath:\n        data = parse_csv(filepath)\n        print(json.dumps(data, indent=2))\n    else:\n        print("hello world")\n',
+                "turn_id": "turn-smoke001",
+            },
+        )
         assert r.status_code == 200
         file_result = r.json()
         assert file_result["version"] == 1
@@ -177,11 +197,14 @@ class TestCodeBuilderSmokeLoop:
         assert "tool.py" in r.json()["files"]
 
         # 10. Run the code
-        r = c.post("/governor/code/run", json={
-            "filepath": "tool.py",
-            "stdin": "",
-            "timeout": 10,
-        })
+        r = c.post(
+            "/governor/code/run",
+            json={
+                "filepath": "tool.py",
+                "stdin": "",
+                "timeout": 10,
+            },
+        )
         assert r.status_code == 200
         run_result = r.json()
         assert run_result["success"] is True
@@ -191,25 +214,36 @@ class TestCodeBuilderSmokeLoop:
         assert run_result["forced"] is False
 
         # 11. Complete the plan item
-        r = c.patch("/governor/code/plan/item/p0-0", json={
-            "status": "completed", "expected_version": v,
-        })
+        r = c.patch(
+            "/governor/code/plan/item/p0-0",
+            json={
+                "status": "completed",
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
         assert r.json()["item"]["status"] == "completed"
         v += 1
 
         # 12. Verify phase gating: Phase 2 item should now be accessible
-        r = c.patch("/governor/code/plan/item/p1-0", json={
-            "status": "accepted", "expected_version": v,
-        })
+        r = c.patch(
+            "/governor/code/plan/item/p1-0",
+            json={
+                "status": "accepted",
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
         v += 1
 
         # 13. Accept a second version of the file
-        r = c.put("/governor/code/files/tool.py", json={
-            "content": 'print("v2 - improved")\n',
-            "turn_id": "turn-smoke002",
-        })
+        r = c.put(
+            "/governor/code/files/tool.py",
+            json={
+                "content": 'print("v2 - improved")\n',
+                "turn_id": "turn-smoke002",
+            },
+        )
         assert r.status_code == 200
         assert r.json()["version"] == 2
         v += 1
@@ -240,27 +274,39 @@ class TestCodeBuilderSmokeLoop:
         v = state["version"]
 
         # First mutation succeeds
-        r = c.put("/governor/code/project/intent", json={
-            "text": "first", "locked": False, "expected_version": v,
-        })
+        r = c.put(
+            "/governor/code/project/intent",
+            json={
+                "text": "first",
+                "locked": False,
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 200
 
         # Second mutation with the SAME (now stale) version fails
-        r = c.put("/governor/code/project/intent", json={
-            "text": "second", "locked": False, "expected_version": v,
-        })
+        r = c.put(
+            "/governor/code/project/intent",
+            json={
+                "text": "second",
+                "locked": False,
+                "expected_version": v,
+            },
+        )
         assert r.status_code == 409
 
     def test_multifile_run(self, code_client) -> None:
         """File A imports file B — both available in tempdir."""
         c = code_client
 
-        c.put("/governor/code/files/helper.py", json={
-            "content": "def greet(name):\n    return f'Hello, {name}!'\n"
-        })
-        c.put("/governor/code/files/tool.py", json={
-            "content": "from helper import greet\nprint(greet('world'))\n"
-        })
+        c.put(
+            "/governor/code/files/helper.py",
+            json={"content": "def greet(name):\n    return f'Hello, {name}!'\n"},
+        )
+        c.put(
+            "/governor/code/files/tool.py",
+            json={"content": "from helper import greet\nprint(greet('world'))\n"},
+        )
 
         r = c.post("/governor/code/run", json={"filepath": "tool.py"})
         data = r.json()
@@ -271,9 +317,7 @@ class TestCodeBuilderSmokeLoop:
         """Run that raises an exception returns returncode != 0."""
         c = code_client
 
-        c.put("/governor/code/files/tool.py", json={
-            "content": "raise RuntimeError('intentional')"
-        })
+        c.put("/governor/code/files/tool.py", json={"content": "raise RuntimeError('intentional')"})
 
         r = c.post("/governor/code/run", json={"filepath": "tool.py"})
         data = r.json()

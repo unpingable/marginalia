@@ -143,11 +143,14 @@ class CreativeProjectStore:
     def _save(self, config: CreativeProjectConfig) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".json.tmp")
-        payload = json.dumps(
-            config.model_dump(mode="json"),
-            indent=2,
-            ensure_ascii=False,
-        ) + "\n"
+        payload = (
+            json.dumps(
+                config.model_dump(mode="json"),
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
         try:
             with temporary.open("w", encoding="utf-8") as handle:
                 handle.write(payload)

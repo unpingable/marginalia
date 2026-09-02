@@ -223,18 +223,13 @@ def test_release_contract_names_and_pins_the_complete_marginalia_appliance() -> 
     assert "CODEX_BINARY" not in codex_compose
     assert "auth.json:ro" not in codex_compose
     assert project["scripts"] == {"marginalia-server": "gov_webui.adapter:main"}
-    assert f'MARGINALIA_VERSION="{project["version"]}"' in (
-        REPO_ROOT / "marginalia"
-    ).read_text()
-    assert 'DEFAULT_IMAGE="ghcr.io/unpingable/marginalia:${MARGINALIA_VERSION}"' in (
-        REPO_ROOT / "marginalia"
-    ).read_text()
-    assert f'VERSION="{project["version"]}"' in (
-        REPO_ROOT / "install-marginalia.sh"
-    ).read_text()
-    assert f"marginalia:{project['version']}" in (
-        REPO_ROOT / "docker-compose.yml"
-    ).read_text()
+    assert f'MARGINALIA_VERSION="{project["version"]}"' in (REPO_ROOT / "marginalia").read_text()
+    assert (
+        'DEFAULT_IMAGE="ghcr.io/unpingable/marginalia:${MARGINALIA_VERSION}"'
+        in (REPO_ROOT / "marginalia").read_text()
+    )
+    assert f'VERSION="{project["version"]}"' in (REPO_ROOT / "install-marginalia.sh").read_text()
+    assert f"marginalia:{project['version']}" in (REPO_ROOT / "docker-compose.yml").read_text()
 
 
 def test_start_scripts_enable_the_direct_nfs_backup_override() -> None:

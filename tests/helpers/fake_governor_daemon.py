@@ -29,9 +29,7 @@ class DeterministicBackend:
             and self._message_value(message, "content") == "MARGINALIA_PROJECT_ECHO"
             for message in messages
         ):
-            full_prompt = "\n".join(
-                self._message_value(message, "content") for message in messages
-            )
+            full_prompt = "\n".join(self._message_value(message, "content") for message in messages)
             required = (
                 "MARGINALIA_PROJECT_CONTEXT_V1",
                 "A clockmaker inherits a flooded theatre.",

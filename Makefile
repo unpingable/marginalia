@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 PY ?= python3
 
-.PHONY: test lint fmt ci
+.PHONY: test lint fmt fmt-check build ci
 
 test:
 	$(PY) -m pytest tests/ -q
@@ -12,4 +12,10 @@ lint:
 fmt:
 	$(PY) -m ruff format .
 
-ci: lint test
+fmt-check:
+	$(PY) -m ruff format --check src tests
+
+build:
+	$(PY) -m build --no-isolation
+
+ci: lint fmt-check test build

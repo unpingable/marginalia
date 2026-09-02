@@ -4,6 +4,7 @@
 Manages intent/contract/plan + workspace files for the structured
 code-building workflow.  Thread-safe, atomic saves, optimistic concurrency.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -22,6 +23,7 @@ from pydantic import BaseModel, Field
 # Exceptions
 # ---------------------------------------------------------------------------
 
+
 class StaleVersionError(Exception):
     """Raised when expected_version doesn't match current state version."""
 
@@ -29,6 +31,7 @@ class StaleVersionError(Exception):
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
+
 
 class PlanItemStatus(str, Enum):
     proposed = "proposed"
@@ -39,11 +42,11 @@ class PlanItemStatus(str, Enum):
 
 
 VALID_TRANSITIONS: dict[PlanItemStatus, set[PlanItemStatus]] = {
-    PlanItemStatus.proposed:    {PlanItemStatus.accepted, PlanItemStatus.rejected},
-    PlanItemStatus.accepted:    {PlanItemStatus.in_progress, PlanItemStatus.rejected},
+    PlanItemStatus.proposed: {PlanItemStatus.accepted, PlanItemStatus.rejected},
+    PlanItemStatus.accepted: {PlanItemStatus.in_progress, PlanItemStatus.rejected},
     PlanItemStatus.in_progress: {PlanItemStatus.completed, PlanItemStatus.rejected},
-    PlanItemStatus.completed:   set(),
-    PlanItemStatus.rejected:    set(),
+    PlanItemStatus.completed: set(),
+    PlanItemStatus.rejected: set(),
 }
 
 TERMINAL_STATUSES = {PlanItemStatus.completed, PlanItemStatus.rejected}
@@ -91,6 +94,7 @@ def compute_config_hash(config: dict) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Data Models
 # ---------------------------------------------------------------------------
+
 
 class Intent(BaseModel):
     text: str = ""
@@ -154,6 +158,7 @@ class ProjectState(BaseModel):
 # Path safety
 # ---------------------------------------------------------------------------
 
+
 def _validate_path(
     path: str,
     workspace_root: Path,
@@ -179,10 +184,7 @@ def _validate_path(
 
     ext = Path(path).suffix.lower()
     if ext not in allowed_extensions:
-        raise ValueError(
-            f"Extension '{ext}' not allowed. "
-            f"Allowed: {sorted(allowed_extensions)}"
-        )
+        raise ValueError(f"Extension '{ext}' not allowed. Allowed: {sorted(allowed_extensions)}")
 
     resolved = (workspace_root / path).resolve()
     if not resolved.is_relative_to(workspace_root.resolve()):
@@ -194,6 +196,7 @@ def _validate_path(
 # ---------------------------------------------------------------------------
 # CodeProjectStore
 # ---------------------------------------------------------------------------
+
 
 class CodeProjectStore:
     """Manages project state + workspace files for the code/research builder.
@@ -245,8 +248,7 @@ class CodeProjectStore:
         """Raise StaleVersionError if expected_version mismatches."""
         if expected_version is not None and expected_version != self._state.version:
             raise StaleVersionError(
-                f"Expected version {expected_version}, "
-                f"current is {self._state.version}"
+                f"Expected version {expected_version}, current is {self._state.version}"
             )
 
     # -- Intent -------------------------------------------------------------
@@ -340,24 +342,17 @@ class CodeProjectStore:
                 # Validate transition
                 allowed = VALID_TRANSITIONS.get(item.status, set())
                 if status not in allowed:
-                    raise ValueError(
-                        f"Invalid transition: {item.status.value} -> {status.value}"
-                    )
+                    raise ValueError(f"Invalid transition: {item.status.value} -> {status.value}")
 
                 # Phase gating
                 phase = self._state.plan.phases[pi]
                 if phase.locked:
-                    raise ValueError(
-                        f"Phase '{phase.name}' is locked"
-                    )
+                    raise ValueError(f"Phase '{phase.name}' is locked")
 
                 # Previous phase must be complete
                 if pi > 0:
                     prev_phase = self._state.plan.phases[pi - 1]
-                    pending = [
-                        it for it in prev_phase.items
-                        if it.status not in TERMINAL_STATUSES
-                    ]
+                    pending = [it for it in prev_phase.items if it.status not in TERMINAL_STATUSES]
                     if pending:
                         raise ValueError(
                             f"Previous phase '{prev_phase.name}' "
@@ -368,9 +363,7 @@ class CodeProjectStore:
                 # (can't reject something already completed or rejected)
                 allowed = VALID_TRANSITIONS.get(item.status, set())
                 if PlanItemStatus.rejected not in allowed and item.status in TERMINAL_STATUSES:
-                    raise ValueError(
-                        f"Cannot reject item in terminal state: {item.status.value}"
-                    )
+                    raise ValueError(f"Cannot reject item in terminal state: {item.status.value}")
 
             item.status = status
             self._save()
@@ -432,10 +425,7 @@ class CodeProjectStore:
 
     def list_files(self) -> dict[str, dict]:
         """Return file metadata for all tracked files."""
-        return {
-            path: entry.model_dump()
-            for path, entry in self._state.files.items()
-        }
+        return {path: entry.model_dump() for path, entry in self._state.files.items()}
 
     # -- Full state ---------------------------------------------------------
 

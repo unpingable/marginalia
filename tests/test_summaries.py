@@ -105,12 +105,17 @@ def _make_claim(state: str = "proposed", **kw) -> ClaimView:
     )
 
 
-def _make_execution(blocked: int = 0, pending: int = 0, running: int = 0, completed: int = 0) -> ExecutionView:
+def _make_execution(
+    blocked: int = 0, pending: int = 0, running: int = 0, completed: int = 0
+) -> ExecutionView:
     def _actions(n: int, status: str) -> list[ExecutionActionView]:
         return [
-            ExecutionActionView(id=f"act_{status}_{i}", description=f"action {i}", status=status, detail="")
+            ExecutionActionView(
+                id=f"act_{status}_{i}", description=f"action {i}", status=status, detail=""
+            )
             for i in range(n)
         ]
+
     return ExecutionView(
         pending=_actions(pending, "pending"),
         blocked=_actions(blocked, "blocked"),
@@ -213,10 +218,12 @@ class TestDeriveOneSentence:
         assert "quarantine" in result
 
     def test_blocked_violations(self) -> None:
-        vm = _make_vm(violations=[
-            _make_violation("high"),
-            _make_violation("high", id="vio_test_002"),
-        ])
+        vm = _make_vm(
+            violations=[
+                _make_violation("high"),
+                _make_violation("high", id="vio_test_002"),
+            ]
+        )
         result = derive_one_sentence(vm)
         assert result.startswith("Blocked:")
         assert "2 unresolved violations" in result
@@ -268,10 +275,12 @@ class TestDeriveSuggestedAction:
         assert "premise" in result.lower()
 
     def test_highest_severity_first(self) -> None:
-        vm = _make_vm(violations=[
-            _make_violation("low", id="vio_low", rule_breached="minor_issue"),
-            _make_violation("critical", id="vio_crit", rule_breached="grounding_failure"),
-        ])
+        vm = _make_vm(
+            violations=[
+                _make_violation("low", id="vio_low", rule_breached="minor_issue"),
+                _make_violation("critical", id="vio_crit", rule_breached="grounding_failure"),
+            ]
+        )
         result = derive_suggested_action(vm)
         assert result is not None
         assert "source" in result.lower() or "ungrounded" in result.lower()
@@ -305,10 +314,12 @@ class TestDeriveLastEvent:
         now = datetime.now(timezone.utc)
         old = (now - timedelta(hours=2)).isoformat()
         recent = (now - timedelta(minutes=5)).isoformat()
-        vm = _make_vm(decisions=[
-            _make_decision("accepted", id="dec_old", created_at=old),
-            _make_decision("rejected", id="dec_new", created_at=recent),
-        ])
+        vm = _make_vm(
+            decisions=[
+                _make_decision("accepted", id="dec_old", created_at=old),
+                _make_decision("rejected", id="dec_new", created_at=recent),
+            ]
+        )
         result = derive_last_event(vm)
         assert result is not None
         assert "summary" in result
@@ -395,10 +406,12 @@ class TestDeriveWhyFeed:
         assert len(feed) == 3
 
     def test_severity_filter(self) -> None:
-        vm = _make_vm(decisions=[
-            _make_decision("accepted", id="dec_a"),
-            _make_decision("rejected", id="dec_b"),
-        ])
+        vm = _make_vm(
+            decisions=[
+                _make_decision("accepted", id="dec_a"),
+                _make_decision("rejected", id="dec_b"),
+            ]
+        )
         feed = derive_why_feed(vm, severity_filter="error")
         assert len(feed) == 1
         assert feed[0]["severity"] == "error"
@@ -414,10 +427,12 @@ class TestDeriveWhyFeed:
         now = datetime.now(timezone.utc)
         old = (now - timedelta(hours=5)).isoformat()
         new = (now - timedelta(minutes=1)).isoformat()
-        vm = _make_vm(decisions=[
-            _make_decision("accepted", id="dec_old", created_at=old),
-            _make_decision("rejected", id="dec_new", created_at=new),
-        ])
+        vm = _make_vm(
+            decisions=[
+                _make_decision("accepted", id="dec_old", created_at=old),
+                _make_decision("rejected", id="dec_new", created_at=new),
+            ]
+        )
         feed = derive_why_feed(vm)
         assert feed[0]["id"] == "dec_new"
         assert feed[1]["id"] == "dec_old"
@@ -439,10 +454,12 @@ class TestDeriveHistoryDays:
         now = datetime.now(timezone.utc)
         today = now.isoformat()
         yesterday = (now - timedelta(days=1)).isoformat()
-        vm = _make_vm(decisions=[
-            _make_decision("accepted", id="dec_today", created_at=today),
-            _make_decision("rejected", id="dec_yest", created_at=yesterday),
-        ])
+        vm = _make_vm(
+            decisions=[
+                _make_decision("accepted", id="dec_today", created_at=today),
+                _make_decision("rejected", id="dec_yest", created_at=yesterday),
+            ]
+        )
         result = derive_history_days(vm)
         assert len(result) == 2
         # First day should be most recent
@@ -450,11 +467,13 @@ class TestDeriveHistoryDays:
 
     def test_counts_rejections(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        vm = _make_vm(decisions=[
-            _make_decision("accepted", id="dec_1", created_at=now),
-            _make_decision("rejected", id="dec_2", created_at=now),
-            _make_decision("rejected", id="dec_3", created_at=now),
-        ])
+        vm = _make_vm(
+            decisions=[
+                _make_decision("accepted", id="dec_1", created_at=now),
+                _make_decision("rejected", id="dec_2", created_at=now),
+                _make_decision("rejected", id="dec_3", created_at=now),
+            ]
+        )
         result = derive_history_days(vm)
         assert len(result) == 1
         assert result[0]["items_count"] == 3
@@ -472,10 +491,12 @@ class TestDeriveHistoryDays:
 
     def test_outcomes_list(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        vm = _make_vm(decisions=[
-            _make_decision("accepted", id="dec_a", created_at=now),
-            _make_decision("rejected", id="dec_b", created_at=now),
-        ])
+        vm = _make_vm(
+            decisions=[
+                _make_decision("accepted", id="dec_a", created_at=now),
+                _make_decision("rejected", id="dec_b", created_at=now),
+            ]
+        )
         result = derive_history_days(vm)
         assert "accepted" in result[0]["outcomes"]
         assert "rejected" in result[0]["outcomes"]
