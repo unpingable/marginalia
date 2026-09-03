@@ -2353,12 +2353,12 @@
           toast(error.message);
         }
       });
-        persistPromptDraft(event.target.value);
       $("#composer").addEventListener("submit", sendMessage);
       $("#prompt").addEventListener("keydown", (event) => {
         if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); $("#composer").requestSubmit(); }
       });
       $("#prompt").addEventListener("input", (event) => {
+        persistPromptDraft(event.target.value);
         event.target.style.height = "auto";
         event.target.style.height = `${Math.min(event.target.scrollHeight, 180)}px`;
       });
