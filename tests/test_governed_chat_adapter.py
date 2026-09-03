@@ -115,3 +115,35 @@ async def test_every_pending_call_supplies_context(tmp_path: Path):
 
     assert await adapter.pending() is None
     client.commit_pending.assert_awaited_once_with("erin-novel")
+
+
+@pytest.mark.asyncio
+async def test_stream_shape_withholds_content_until_transactional_result(tmp_path: Path):
+    client = _client(tmp_path)
+    receipt = authority_receipt()
+    result = {
+        "content": "Validated whole response",
+        "model": "mock",
+        "usage": {},
+        "pending": None,
+        "receipt": receipt,
+    }
+    client.chat_send.return_value = result
+    client.receipt_detail.return_value = {
+        "receipt": receipt,
+        "evidence": {"context_id": "erin"},
+    }
+    adapter = GovernedChatAdapter(
+        client, context_id="erin", expected_governor_dir=tmp_path / ".governor"
+    )
+
+    chunks = [
+        item
+        async for item in adapter.chat_stream(
+            [{"role": "user", "content": "continue"}], model="mock"
+        )
+    ]
+
+    assert chunks == [("Validated whole response", None), (None, result)]
+    client.chat_send.assert_awaited_once()
+    client.chat_stream.assert_not_called()

@@ -283,6 +283,61 @@ print(json.dumps([{
 
 
 @pytest.mark.asyncio
+async def test_claude_nonzero_structured_session_limit_is_typed_without_leak(
+    tmp_path: Path,
+) -> None:
+    executable = _executable(
+        tmp_path / "claude",
+        """import json
+import sys
+print(json.dumps([{
+    "type": "result",
+    "is_error": True,
+    "api_error_status": 429,
+    "result": "You've hit your session limit; private reset metadata",
+}]))
+print("private stderr path", file=sys.stderr)
+raise SystemExit(1)
+""",
+    )
+    catalog, environ = _claude_catalog(tmp_path, executable)
+
+    with pytest.raises(ProviderError) as caught:
+        await LocalCommandTransport(catalog.resolve("claude-writing"), environ=environ).complete(
+            "Hello"
+        )
+
+    assert caught.value.code == "usage_limit"
+    assert caught.value.status_code == 429
+    assert str(caught.value) == "Claude Code usage window is exhausted"
+    assert "private" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_claude_nonzero_never_accepts_success_shaped_stdout(tmp_path: Path) -> None:
+    executable = _executable(
+        tmp_path / "claude",
+        """import json
+print(json.dumps({
+    "type": "result",
+    "is_error": False,
+    "result": "must not become authored output",
+}))
+raise SystemExit(1)
+""",
+    )
+    catalog, environ = _claude_catalog(tmp_path, executable)
+
+    with pytest.raises(ProviderError) as caught:
+        await LocalCommandTransport(catalog.resolve("claude-writing"), environ=environ).complete(
+            "Hello"
+        )
+
+    assert caught.value.code == "command_error"
+    assert str(caught.value) == "Claude Code command failed with exit code 1"
+
+
+@pytest.mark.asyncio
 async def test_usage_window_refusal_is_normalized_without_stderr_leak(
     tmp_path: Path,
 ) -> None:
@@ -301,7 +356,7 @@ raise SystemExit(1)
         )
 
     assert caught.value.code == "usage_limit"
-    assert caught.value.status_code == 403
+    assert caught.value.status_code == 429
     assert str(caught.value) == "Kimi Code usage window is exhausted"
     assert "private path" not in str(caught.value)
 

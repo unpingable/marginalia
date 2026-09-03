@@ -72,6 +72,9 @@ def provider_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     adapter._canon_review_stores.clear()
     adapter._manuscript_stores.clear()
     adapter._snapshot_stores.clear()
+    adapter._context_summary_stores.clear()
+    adapter._context_maintenance_adapters.clear()
+    adapter._context_maintenance_tasks.clear()
     adapter._governed_chat_adapter = fake_governed_chat(
         content="Configured response",
         model="fiction-model",
@@ -92,6 +95,9 @@ def provider_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     adapter._canon_review_stores.clear()
     adapter._manuscript_stores.clear()
     adapter._snapshot_stores.clear()
+    adapter._context_summary_stores.clear()
+    adapter._context_maintenance_adapters.clear()
+    adapter._context_maintenance_tasks.clear()
     adapter._governed_chat_adapter = None
 
 
@@ -185,7 +191,9 @@ def test_daemon_model_substitution_is_not_accepted(provider_client) -> None:
     )
 
     assert response.status_code == 502
-    assert "different model" in response.json()["detail"]
+    assert response.json()["outcome"] == "failure"
+    assert response.json()["failure_type"] == "invalid_result"
+    assert "different model" in response.json()["message"]
 
 
 def test_conversation_switch_preserves_historical_response_identity(
@@ -208,6 +216,7 @@ def test_conversation_switch_preserves_historical_response_identity(
             "model": "fiction-model",
             "provider_id": "provider-a",
             "model_id": "upstream-a",
+            "outcome": "authored",
         },
     )
     assert first.status_code == 200
@@ -227,6 +236,7 @@ def test_conversation_switch_preserves_historical_response_identity(
             "model": "fiction-model-b",
             "provider_id": "provider-b",
             "model_id": "upstream-b",
+            "outcome": "authored",
         },
     )
     assert second.status_code == 200

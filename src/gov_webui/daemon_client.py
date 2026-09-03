@@ -28,6 +28,15 @@ class DaemonTimeoutError(TimeoutError):
     """A bounded governor RPC could not acquire capacity or finish in time."""
 
 
+class DaemonRPCError(RuntimeError):
+    """The daemon returned a typed JSON-RPC failure response."""
+
+    def __init__(self, code: int, message: str) -> None:
+        self.code = code
+        self.rpc_message = message
+        super().__init__(f"RPC error {code}: {message}")
+
+
 def _timeout_setting(name: str, default: float) -> float:
     raw = os.environ.get(name, str(default)).strip()
     try:
@@ -204,7 +213,7 @@ class DaemonChatClient:
                             message = err.get("message", "unknown error")
                             if code == AUTH_ERROR_CODE:
                                 raise DaemonAuthError(message)
-                            raise RuntimeError(f"RPC error {code}: {message}")
+                            raise DaemonRPCError(code, message)
                         return resp.get("result")
             except TimeoutError as exc:
                 await self.close()
@@ -294,7 +303,7 @@ class DaemonChatClient:
                                 message = err.get("message", "unknown error")
                                 if code == AUTH_ERROR_CODE:
                                     raise DaemonAuthError(message)
-                                raise RuntimeError(f"RPC error {code}: {message}")
+                                raise DaemonRPCError(code, message)
                             yield (None, resp.get("result"))
                             return
             except TimeoutError as exc:

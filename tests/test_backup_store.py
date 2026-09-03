@@ -9,8 +9,17 @@ from pathlib import Path
 
 import pytest
 
-from governor.session_store import SessionMessage, SessionStore
+from gov_webui.session_store import SessionMessage, SessionStore
 
+from gov_webui.context_summary import (
+    ContextSummary,
+    ContextSummaryStore,
+    SummaryFact,
+    SummaryGenerator,
+    SummarySections,
+    source_for,
+    utc_now,
+)
 from gov_webui.backup_store import BackupError, WorkspaceBackupManager
 from gov_webui.library_store import LibraryStore
 
@@ -54,6 +63,33 @@ def _populated_manager(tmp_path: Path) -> tuple[WorkspaceBackupManager, str]:
 
 def test_backup_verifies_and_survives_real_restore_rehearsal(tmp_path):
     manager, session_id = _populated_manager(tmp_path)
+
+    project = manager._library().default_project()
+    session = SessionStore(manager.data_root / ".governor" / project.context_id / "sessions").get(
+        session_id
+    )
+    assert session is not None
+    context_store = ContextSummaryStore(manager.data_root / ".governor" / project.context_id)
+    context_store.set_enabled(True)
+    context_store.save(
+        ContextSummary(
+            source=source_for(session, [session.messages[0]]),
+            generator=SummaryGenerator(
+                configured_model="claude-sonnet-4-20250514",
+                provider_id="claude-code-local",
+                model_id="sonnet",
+            ),
+            created_at=utc_now(),
+            sections=SummarySections(
+                observed_facts=[
+                    SummaryFact(
+                        text="The lantern position is preserved.",
+                        evidence_message_ids=[session.messages[0].id],
+                    )
+                ]
+            ),
+        )
+    )
 
     created = manager.create("erin")
     path = Path(created["path"])

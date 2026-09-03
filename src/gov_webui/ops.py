@@ -15,6 +15,8 @@ from typing import Any
 from pydantic import ValidationError
 
 from gov_webui.session_store import ChatSession
+from gov_webui.context_ops import ContextOperations, run_build
+from gov_webui.context_summary import ContextSummaryError, ContextSummaryStore
 
 from gov_webui.artifact_store import ArtifactIndex
 from gov_webui.backup_store import BackupError, WorkspaceBackupManager
@@ -51,6 +53,8 @@ def schema_versions() -> dict[str, int]:
         "canon_review": 1,
         "snapshot_index": 1,
         "workspace_backup": 1,
+        "context_policy": 1,
+        "context_summary": 1,
     }
 
 
@@ -115,6 +119,7 @@ def migration_preflight(
     for project in state.projects.values():
         context_root = context_base / project.context_id
         sessions_dir = context_root / "sessions"
+        project_sessions: list[ChatSession] = []
         for path in sessions_dir.glob("*.json"):
             checked_files += 1
             try:
@@ -122,6 +127,7 @@ def migration_preflight(
                 sessions += 1
                 messages += len(session.messages)
                 loaded_session_ids.add(session.id)
+                project_sessions.append(session)
                 lifecycle = state.conversations.get(session.id)
                 if lifecycle is None or lifecycle.project_id != project.id:
                     errors.append(f"session lifecycle mismatch: {session.id}")
@@ -154,6 +160,30 @@ def migration_preflight(
                 errors.append(f"invalid {label} {path}: {exc}")
 
         artifact_ids: set[str] = set()
+
+        context_store = ContextSummaryStore(context_root)
+        if context_store.policy_path.exists():
+            checked_files += 1
+            try:
+                context_store.policy()
+            except ContextSummaryError as exc:
+                errors.append(f"invalid context policy: {exc}")
+        for session in project_sessions:
+            for label, path, loader in (
+                ("context summary", context_store.summary_path(session.id), context_store.load),
+                (
+                    "context summary work",
+                    context_store.work_path(session.id),
+                    context_store.load_work,
+                ),
+            ):
+                if not path.exists():
+                    continue
+                checked_files += 1
+                try:
+                    loader(session if label == "context summary" else session.id)
+                except ContextSummaryError as exc:
+                    errors.append(f"invalid {label} for session {session.id}: {exc}")
         artifact_index_path = validators["artifact index"][0]
         if artifact_index_path.exists():
             try:
@@ -277,6 +307,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--context-id", default=os.environ.get("GOVERNOR_CONTEXT_ID", "erin-writing")
     )
+    parser.add_argument("--model-config", default=os.environ.get("MARGINALIA_MODEL_CONFIG", ""))
+    parser.add_argument(
+        "--maintenance-model",
+        default=os.environ.get("MARGINALIA_CONTEXT_MAINTENANCE_MODEL", "claude-sonnet-4-20250514"),
+    )
+    parser.add_argument("--governor-socket", default=os.environ.get("GOVERNOR_SOCKET", ""))
     commands = parser.add_subparsers(dest="command", required=True)
     preflight = commands.add_parser("preflight")
     preflight.add_argument("--apply-migrations", action="store_true")
@@ -289,7 +325,27 @@ def _parser() -> argparse.ArgumentParser:
     restore = commands.add_parser("restore")
     restore.add_argument("archive")
     restore.add_argument("--target-data-root", required=True)
+    for name in ("context-plan", "context-build", "context-validate"):
+        command = commands.add_parser(name)
+        command.add_argument("--workspace-id")
+        command.add_argument("--project-id")
+        command.add_argument("--session-id")
+    for name in ("context-activate", "context-deactivate"):
+        command = commands.add_parser(name)
+        command.add_argument("--workspace-id")
+        command.add_argument("--project-id")
     return parser
+
+
+def _context_operations(args: argparse.Namespace) -> ContextOperations:
+    socket = Path(args.governor_socket) if args.governor_socket else None
+    return ContextOperations(
+        data_root=Path(args.data_root),
+        default_context_id=args.context_id,
+        model_config=Path(args.model_config) if args.model_config else None,
+        maintenance_model=args.maintenance_model,
+        socket_path=socket,
+    )
 
 
 def main() -> int:
@@ -307,11 +363,30 @@ def main() -> int:
             result = _manager(args).verify(Path(args.archive))
         elif args.command == "restore-test":
             result = _manager(args).restore_test(Path(args.archive))
-        else:
+        elif args.command == "restore":
             result = _manager(args).restore(
                 Path(args.archive), target_data_root=Path(args.target_data_root)
             )
-    except BackupError as exc:
+        else:
+            operations = _context_operations(args)
+            filters = {
+                "workspace_id": getattr(args, "workspace_id", None),
+                "project_id": getattr(args, "project_id", None),
+            }
+            if args.command in {"context-plan", "context-build", "context-validate"}:
+                filters["session_id"] = args.session_id
+            if args.command == "context-plan":
+                result = operations.plan(**filters)
+            elif args.command == "context-build":
+                result = run_build(operations, **filters)
+            elif args.command == "context-validate":
+                result = operations.validate(**filters)
+            else:
+                result = operations.activate(
+                    enabled=args.command == "context-activate",
+                    **filters,
+                )
+    except (BackupError, ContextSummaryError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2))

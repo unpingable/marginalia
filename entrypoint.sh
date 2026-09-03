@@ -39,6 +39,24 @@ fi
 
 mkdir -p "$DATA_ROOT"
 export MARGINALIA_DATA_ROOT="$DATA_ROOT"
+
+prepare_local_command_workdir() {
+    local variable_name="$1"
+    local path="$2"
+    if [ -z "$path" ]; then
+        return
+    fi
+    case "$path" in
+        /*) mkdir -p -- "$path" ;;
+        *)
+            echo "$variable_name must be an absolute path" >&2
+            exit 1
+            ;;
+    esac
+}
+
+prepare_local_command_workdir CLAUDE_COMMAND_WORKDIR "${CLAUDE_COMMAND_WORKDIR:-}"
+prepare_local_command_workdir KIMI_COMMAND_WORKDIR "${KIMI_COMMAND_WORKDIR:-}"
 export GOVERNOR_DAEMON_DIR="$DAEMON_DIR"
 export GOVERNOR_CONTEXTS_DIR="$DAEMON_DIR"
 export GOVERNOR_CONTEXT_ID="$CONTEXT_ID"

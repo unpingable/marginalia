@@ -20,6 +20,7 @@ dependencies = [
     "httpx==0.28.1",
     "markdown-it-py==3.0.0",
     "pydantic==2.12.5",
+    "tiktoken==0.14.0",
 ]
 keywords = [
     "ai",

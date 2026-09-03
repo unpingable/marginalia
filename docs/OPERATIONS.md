@@ -83,6 +83,24 @@ docker compose exec -T marginalia \
 The Docker health check uses `/health/ready`. Build SHA, build time, image ref,
 and deployment ID are also stored in every backup manifest.
 
+## Live updates and incident retention
+
+The current appliance is a single web-and-governor container. Replacing that
+container creates a brief service interruption and can turn an in-flight
+generation into a correctly typed, retryable transport failure. Do not rebuild
+or recreate a household's live container while someone is writing. Announce a
+quiet update window, confirm `execution.in_flight` is zero in
+`/health/ready`, take and verify a backup, and then perform the replacement.
+The zero count is a preflight signal, not a drain lock; there is currently no
+zero-downtime handoff.
+
+Full generation diagnostics are written to container logs while the writer sees
+only a safe incident ID and failure class. Docker removes those logs when it
+removes the old container. Capture the old container's logs before replacement
+or configure deployment-level log retention if post-replacement incident
+correlation is required. Incident diagnostics are operational metadata and must
+never be copied into sessions, canon, artifacts, or model context.
+
 ## Manual backup, verification, and restore rehearsal
 
 The UI is the normal path. The equivalent operator commands are:
@@ -167,3 +185,62 @@ signal proves, synthetic cadence, and PASS semantics.
   Rebuild the service on a clean host, verify the restored writing and service
   readiness, retain the original data throughout the drill, and record the
   backup identifier, image identifier, duration, and outcome.
+
+## Bounded-context rollout
+
+Back up and verify the target workspace before activation. Context planning,
+validation, deactivation, and activation do not call a provider. Only
+`context-build` invokes the dedicated maintenance model.
+
+```bash
+docker compose exec -T marginalia python3 -m gov_webui.ops \
+  --data-root /data --context-id erin-writing \
+  context-plan --project-id PROJECT_ID
+
+docker compose exec -T marginalia python3 -m gov_webui.ops \
+  --data-root /data --context-id erin-writing \
+  --model-config /path/to/models.json \
+  --maintenance-model claude-sonnet-4-20250514 \
+  context-build --project-id PROJECT_ID
+
+docker compose exec -T marginalia python3 -m gov_webui.ops \
+  --data-root /data --context-id erin-writing \
+  context-validate --project-id PROJECT_ID
+
+docker compose exec -T marginalia python3 -m gov_webui.ops \
+  --data-root /data --context-id erin-writing \
+  context-activate --project-id PROJECT_ID
+```
+
+The report uses hashed session references and token/message counts, never story
+text. Build work is resumable and idempotent: rerunning reuses source-identical
+chunks, validated pairwise merges, and already-valid summaries. Activation fails closed unless every
+session that currently needs compaction has a source-valid summary covering at
+least the required prefix.
+
+Derived files live under:
+
+```text
+/data/.governor/CONTEXT/marginalia/context/
+├── policy.json
+├── SESSION.summary.json
+└── SESSION.work.json
+```
+
+They are included in verified backups and restore rehearsals, but remain
+rebuildable derived/operational state. They are not sessions, canon, artifacts,
+search results, manuscript nodes, or authored context.
+
+Rollback is immediate and provider-free:
+
+```bash
+docker compose exec -T marginalia python3 -m gov_webui.ops \
+  --data-root /data --context-id erin-writing \
+  context-deactivate --project-id PROJECT_ID
+```
+
+Deactivation leaves durable history and derived files intact. Monitor
+content-free `context_allocation` logs (full, summary, recent, prompt, and
+predicted-provider token counts), maintenance failures, and provider latency.
+Do not raise provider timeouts, delete history, or activate a project whose
+validation report is not ready.

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the WebUI adapter (FastAPI endpoints)."""
 
+import asyncio
 import json
 import os
 import pytest
@@ -51,6 +52,9 @@ def reset_adapter_globals() -> None:
     adapter_mod._canon_review_stores.clear()
     adapter_mod._manuscript_stores.clear()
     adapter_mod._snapshot_stores.clear()
+    adapter_mod._context_summary_stores.clear()
+    adapter_mod._context_maintenance_adapters.clear()
+    adapter_mod._context_maintenance_tasks.clear()
     adapter_mod._project_store = None
     adapter_mod._research_project_store = None
     adapter_mod._artifact_store = None
@@ -74,6 +78,9 @@ def reset_adapter_globals() -> None:
     adapter_mod._canon_review_stores.clear()
     adapter_mod._manuscript_stores.clear()
     adapter_mod._snapshot_stores.clear()
+    adapter_mod._context_summary_stores.clear()
+    adapter_mod._context_maintenance_adapters.clear()
+    adapter_mod._context_maintenance_tasks.clear()
     adapter_mod._project_store = None
     adapter_mod._research_project_store = None
     adapter_mod._artifact_store = None
@@ -295,6 +302,410 @@ class TestChatEndpoint:
         assert data["choices"][0]["message"]["role"] == "assistant"
         assert data["usage"]["total_tokens"] == 8
 
+
+class TestGenerationOutcomeBoundary:
+    """Operational terminal states never cross into durable authored history."""
+
+    _make_mock_daemon = TestChatEndpoint._make_mock_daemon
+
+    @staticmethod
+    def _seed_session(client):
+        created = client.post(
+            "/sessions/", json={"title": "Boundary", "model": "test-model"}
+        ).json()
+        session_id = created["id"]
+        client.post(
+            f"/sessions/{session_id}/messages",
+            json={"role": "user", "content": "Existing prompt"},
+        )
+        client.post(
+            f"/sessions/{session_id}/messages",
+            json={
+                "role": "assistant",
+                "content": "Existing successful passage",
+                "model": "test-model",
+                "outcome": "authored",
+            },
+        )
+        return session_id, client.get(f"/sessions/{session_id}").json()
+
+    @staticmethod
+    def _request(session_id, before, prompt="Continue the passage"):
+        messages = [
+            {"role": item["role"], "content": item["content"]} for item in before["messages"]
+        ]
+        messages.append({"role": "user", "content": prompt})
+        return {
+            "model": "test-model",
+            "messages": messages,
+            "stream": False,
+            "session_id": session_id,
+            "project_id": "default",
+        }
+
+    @pytest.mark.parametrize(
+        ("error", "status", "failure_type"),
+        [
+            pytest.param("timeout", 504, "timeout", id="provider-timeout-without-waiting"),
+            pytest.param("cli_nonzero", 502, "provider_execution", id="cli-nonzero"),
+            pytest.param("rpc", 502, "provider_execution", id="rpc-error"),
+            pytest.param("transport", 502, "transport", id="transport-error"),
+        ],
+    )
+    def test_execution_failures_leave_history_unchanged_and_out_of_next_context(
+        self, client, error, status, failure_type
+    ) -> None:
+        import gov_webui.adapter as adapter_mod
+        from gov_webui.daemon_client import DaemonRPCError, DaemonTimeoutError
+
+        failures = {
+            "timeout": DaemonTimeoutError("injected provider deadline"),
+            "cli_nonzero": DaemonRPCError(-32000, "Codex CLI failed with exit status 1"),
+            "rpc": DaemonRPCError(-32603, "governor RPC execution failed"),
+            "transport": ConnectionError("daemon socket closed"),
+        }
+        session_id, before = self._seed_session(client)
+        mock = AsyncMock()
+        mock.chat_send = AsyncMock(side_effect=failures[error])
+        adapter_mod._governed_chat_adapter = mock
+
+        response = client.post("/v1/chat/completions", json=self._request(session_id, before))
+
+        assert response.status_code == status
+        assert response.json()["outcome"] == "failure"
+        assert response.json()["failure_type"] == failure_type
+        assert "choices" not in response.json()
+        assert client.get(f"/sessions/{session_id}").json() == before
+
+        healthy = fake_governed_chat(content="A clean continuation", model="test-model")
+        adapter_mod._governed_chat_adapter = healthy
+        next_response = client.post(
+            "/v1/chat/completions",
+            json=self._request(session_id, before, "Try a different continuation"),
+        )
+        assert next_response.status_code == 200
+        assert next_response.json()["outcome"] == "authored"
+        forwarded = healthy.chat_send.await_args.kwargs["messages"]
+        assert all(response.json()["message"] not in item["content"] for item in forwarded)
+
+    @pytest.mark.parametrize(
+        "bad_result",
+        [
+            pytest.param({"content": None}, id="missing-content"),
+            pytest.param({"content": "   "}, id="blank-content"),
+            pytest.param({"content": "partial", "usage": {"total_tokens": "many"}}, id="bad-usage"),
+        ],
+    )
+    def test_unusable_provider_result_is_failure_and_does_not_persist(
+        self, client, bad_result
+    ) -> None:
+        import gov_webui.adapter as adapter_mod
+
+        session_id, before = self._seed_session(client)
+        mock = AsyncMock()
+        mock.chat_send = AsyncMock(
+            return_value={
+                "model": "test-model",
+                "pending": None,
+                "receipt": authority_receipt(),
+                **bad_result,
+            }
+        )
+        adapter_mod._governed_chat_adapter = mock
+
+        response = client.post("/v1/chat/completions", json=self._request(session_id, before))
+
+        assert response.status_code == 502
+        assert response.json()["outcome"] == "failure"
+        assert response.json()["failure_type"] == "invalid_result"
+        assert "choices" not in response.json()
+        assert client.get(f"/sessions/{session_id}").json() == before
+
+    def test_cancelled_generation_propagates_without_persisting(self, client) -> None:
+        import gov_webui.adapter as adapter_mod
+
+        session_id, before = self._seed_session(client)
+        mock = AsyncMock()
+        mock.chat_send = AsyncMock(side_effect=asyncio.CancelledError())
+        adapter_mod._governed_chat_adapter = mock
+        request = adapter_mod.ChatCompletionRequest.model_validate(
+            self._request(session_id, before)
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(adapter_mod.chat_completions(request))
+        assert client.get(f"/sessions/{session_id}").json() == before
+
+    def test_stream_request_exposes_no_partial_output_before_provider_failure(self, client) -> None:
+        import gov_webui.adapter as adapter_mod
+        from gov_webui.daemon_client import DaemonRPCError
+
+        session_id, before = self._seed_session(client)
+        mock = AsyncMock()
+        mock.chat_send = AsyncMock(
+            side_effect=DaemonRPCError(-32000, "provider failed after producing tokens")
+        )
+        mock.chat_stream = MagicMock()
+        adapter_mod._governed_chat_adapter = mock
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Stream it"}],
+                "stream": True,
+            },
+        )
+
+        events = [
+            json.loads(line[6:])
+            for line in response.text.splitlines()
+            if line.startswith("data: {")
+        ]
+        assert [event["outcome"] for event in events] == ["failure"]
+        assert events[0]["failure_type"] == "provider_execution"
+        assert "choices" not in events[0]
+        mock.chat_stream.assert_not_called()
+        assert client.get(f"/sessions/{session_id}").json() == before
+
+    def test_success_persists_prompt_and_authored_output_once(self, client) -> None:
+        import gov_webui.adapter as adapter_mod
+
+        session_id, before = self._seed_session(client)
+        adapter_mod._governed_chat_adapter = fake_governed_chat(
+            content="The exact successful continuation", model="test-model"
+        )
+
+        response = client.post("/v1/chat/completions", json=self._request(session_id, before))
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["outcome"] == "authored"
+        assert len(data["committed_messages"]) == 2
+        after = client.get(f"/sessions/{session_id}").json()
+        assert after["messages"][:2] == before["messages"]
+        assert [item["content"] for item in after["messages"][2:]] == [
+            "Continue the passage",
+            "The exact successful continuation",
+        ]
+        assert after["message_count"] == before["message_count"] + 2
+        assert after["revision"] == before["revision"] + 1
+
+    @pytest.mark.asyncio
+    async def test_two_generations_from_one_revision_allow_exactly_one_commit(self, app) -> None:
+        import httpx
+        import gov_webui.adapter as adapter_mod
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            created = (
+                await http.post("/sessions/", json={"title": "Concurrent", "model": "test-model"})
+            ).json()
+            session_id = created["id"]
+            before = (await http.get(f"/sessions/{session_id}")).json()
+
+            arrived = 0
+            both_generating = asyncio.Event()
+            arrival_lock = asyncio.Lock()
+
+            async def concurrent_result(*, messages, model):
+                nonlocal arrived
+                async with arrival_lock:
+                    arrived += 1
+                    if arrived == 2:
+                        both_generating.set()
+                await both_generating.wait()
+                prompt = messages[-1]["content"]
+                return {
+                    "content": f"Result for {prompt}",
+                    "model": model,
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 2,
+                        "total_tokens": 3,
+                    },
+                    "receipt": authority_receipt(),
+                    "pending": None,
+                }
+
+            mock = MagicMock()
+            mock.chat_send = AsyncMock(side_effect=concurrent_result)
+            adapter_mod._governed_chat_adapter = mock
+
+            prompts = ("Tab A continuation", "Tab B continuation")
+            responses = await asyncio.gather(
+                *[
+                    http.post(
+                        "/v1/chat/completions",
+                        json=self._request(session_id, before, prompt),
+                    )
+                    for prompt in prompts
+                ]
+            )
+
+            assert sorted(response.status_code for response in responses) == [200, 409]
+            accepted = next(response for response in responses if response.status_code == 200)
+            rejected = next(response for response in responses if response.status_code == 409)
+            assert accepted.json()["outcome"] == "authored"
+            assert rejected.json()["outcome"] == "failure"
+            assert rejected.json()["failure_type"] == "stale_context"
+            assert "choices" not in rejected.json()
+
+            durable = (await http.get(f"/sessions/{session_id}")).json()
+            accepted_prompt = accepted.json()["committed_messages"][0]["content"]
+            rejected_prompt = next(prompt for prompt in prompts if prompt != accepted_prompt)
+            assert [item["content"] for item in durable["messages"]] == [
+                accepted_prompt,
+                f"Result for {accepted_prompt}",
+            ]
+            assert rejected_prompt not in [item["content"] for item in durable["messages"]]
+            assert f"Result for {rejected_prompt}" not in [
+                item["content"] for item in durable["messages"]
+            ]
+
+            adapter_mod._governed_chat_adapter = fake_governed_chat(
+                content="Fresh result", model="test-model"
+            )
+            fresh = await http.post(
+                "/v1/chat/completions",
+                json=self._request(session_id, durable, "Fresh continuation"),
+            )
+            assert fresh.status_code == 200
+            assert fresh.json()["outcome"] == "authored"
+            final = (await http.get(f"/sessions/{session_id}")).json()
+            assert [item["content"] for item in final["messages"][-2:]] == [
+                "Fresh continuation",
+                "Fresh result",
+            ]
+            assert rejected_prompt not in [item["content"] for item in final["messages"]]
+
+    @pytest.mark.asyncio
+    async def test_direct_import_during_generation_invalidates_the_commit(self, app) -> None:
+        import httpx
+        import gov_webui.adapter as adapter_mod
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            created = (
+                await http.post("/sessions/", json={"title": "Concurrent", "model": "test-model"})
+            ).json()
+            session_id = created["id"]
+            before = (await http.get(f"/sessions/{session_id}")).json()
+            generation_started = asyncio.Event()
+            finish_generation = asyncio.Event()
+
+            async def delayed_result(*, messages, model):
+                generation_started.set()
+                await finish_generation.wait()
+                return {
+                    "content": "Stale generated passage",
+                    "model": model,
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 2,
+                        "total_tokens": 3,
+                    },
+                    "receipt": authority_receipt(),
+                    "pending": None,
+                }
+
+            mock = MagicMock()
+            mock.chat_send = AsyncMock(side_effect=delayed_result)
+            adapter_mod._governed_chat_adapter = mock
+            in_flight = asyncio.create_task(
+                http.post(
+                    "/v1/chat/completions",
+                    json=self._request(session_id, before, "Stale prompt"),
+                )
+            )
+            await generation_started.wait()
+            imported = await http.post(
+                f"/sessions/{session_id}/messages",
+                json={"role": "user", "content": "Concurrent API import"},
+            )
+            assert imported.status_code == 200
+            finish_generation.set()
+            response = await in_flight
+
+            assert response.status_code == 409
+            assert response.json()["failure_type"] == "stale_context"
+            durable = (await http.get(f"/sessions/{session_id}")).json()
+            assert [item["content"] for item in durable["messages"]] == ["Concurrent API import"]
+
+    def test_request_from_an_already_stale_history_is_typed_and_not_executed(self, client) -> None:
+        import gov_webui.adapter as adapter_mod
+
+        session_id, before = self._seed_session(client)
+        imported = client.post(
+            f"/sessions/{session_id}/messages",
+            json={"role": "user", "content": "A newer writer arrived"},
+        )
+        assert imported.status_code == 200
+        durable = client.get(f"/sessions/{session_id}").json()
+        mock = MagicMock()
+        mock.chat_send = AsyncMock()
+        adapter_mod._governed_chat_adapter = mock
+
+        response = client.post(
+            "/v1/chat/completions", json=self._request(session_id, before, "Stale retry")
+        )
+
+        assert response.status_code == 409
+        assert response.json()["outcome"] == "failure"
+        assert response.json()["failure_type"] == "stale_context"
+        assert "choices" not in response.json()
+        mock.chat_send.assert_not_awaited()
+        assert client.get(f"/sessions/{session_id}").json() == durable
+
+    def test_failure_payload_is_safe_and_correlates_to_full_operator_log(
+        self, client, caplog
+    ) -> None:
+        import gov_webui.adapter as adapter_mod
+        from gov_webui.daemon_client import DaemonRPCError
+
+        raw_diagnostic = "stderr included SECRET_TOKEN=do-not-render and 8000 noisy bytes"
+        mock = AsyncMock()
+        mock.chat_send = AsyncMock(side_effect=DaemonRPCError(-32000, raw_diagnostic))
+        adapter_mod._governed_chat_adapter = mock
+
+        with caplog.at_level("WARNING", logger="gov_webui.adapter"):
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "Continue"}],
+                },
+            )
+
+        payload = response.json()
+        assert response.status_code == 502
+        assert payload["failure_type"] == "provider_execution"
+        assert payload["message"] == "The model provider could not complete the generation."
+        assert payload["incident_id"].startswith("gen-")
+        assert raw_diagnostic not in response.text
+        assert raw_diagnostic in caplog.text
+        assert payload["incident_id"] in caplog.text
+
+    def test_assistant_import_requires_explicit_authored_outcome(self, client) -> None:
+        session_id, before = self._seed_session(client)
+        rejected = client.post(
+            f"/sessions/{session_id}/messages",
+            json={"role": "assistant", "content": "Daemon error disguised as prose"},
+        )
+        assert rejected.status_code == 422
+        assert client.get(f"/sessions/{session_id}").json() == before
+
+    def test_ui_has_a_non_narrative_failure_renderer(self, client) -> None:
+        body = client.get("/").text
+        assert "dataset.generationOutcome = outcome" in body
+        assert 'renderGenerationNotice(\n          "failure"' in body
+        assert "I couldn't complete that response" not in body
+        assert 'renderMessage("assistant", `I couldn\'t' not in body
+        assert "failure?.incident_id" in body
+        assert "marginalia:draft:" in body
+        assert "persistPromptDraft(content);" in body
+        assert "clearPromptDraft();" in body
+        assert "failure?.retryable === false" in body
+
     def test_error_handling(self, client) -> None:
         """Daemon errors return 502."""
         import gov_webui.adapter as adapter_mod
@@ -369,8 +780,8 @@ class TestChatEndpoint:
         assert call_kwargs["messages"] == [{"role": "user", "content": "Hi"}]
         assert call_kwargs["model"] == "test-model"
 
-    def test_footer_appended_to_content(self, client) -> None:
-        """Governor footer from daemon is appended to response content."""
+    def test_footer_is_operational_metadata_not_authored_content(self, client) -> None:
+        """Governor status remains separate from authored response content."""
         import gov_webui.adapter as adapter_mod
 
         adapter_mod._governed_chat_adapter = self._make_mock_daemon(
@@ -386,7 +797,8 @@ class TestChatEndpoint:
             },
         )
         data = response.json()
-        assert "[Governor: OK]" in data["choices"][0]["message"]["content"]
+        assert data["choices"][0]["message"]["content"] == "Hello"
+        assert data["governor_status"] == "[Governor: OK]"
 
     def test_pending_violation_returns_prompt(self, client) -> None:
         """When daemon returns pending violation, format as violation prompt."""
@@ -412,9 +824,9 @@ class TestChatEndpoint:
         )
         assert response.status_code == 200
         data = response.json()
-        # Should contain violation prompt, not the original content
-        content = data["choices"][0]["message"]["content"]
-        assert content  # Not empty — violation prompt was generated
+        assert data["outcome"] == "blocked"
+        assert data["message"]
+        assert "choices" not in data
         assert data["model"] == "test-model"
 
 
@@ -607,25 +1019,19 @@ class TestStreamingResponse:
         """Streaming request returns SSE format."""
         import gov_webui.adapter as adapter_mod
 
-        async def mock_daemon_stream(*args, **kwargs):
-            yield ("Hello ", None)
-            yield ("world", None)
-            yield (
-                None,
-                {
-                    "content": "Hello world",
-                    "model": "test-model",
-                    "usage": {},
-                    "violations": [],
-                    "footer": None,
-                    "pending": None,
-                    "receipt": authority_receipt(),
-                },
-            )
-
         mock = AsyncMock()
-        mock.chat_stream = MagicMock(return_value=mock_daemon_stream())
-        mock.connect = AsyncMock()
+        mock.chat_send = AsyncMock(
+            return_value={
+                "content": "Hello world",
+                "model": "test-model",
+                "usage": {},
+                "violations": [],
+                "footer": None,
+                "pending": None,
+                "receipt": authority_receipt(),
+            }
+        )
+        mock.chat_stream = MagicMock()
         adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
@@ -642,6 +1048,9 @@ class TestStreamingResponse:
         # Parse SSE chunks
         content = response.text
         assert "data:" in content
+        assert '"outcome": "authored"' in content
+        assert '"content": "Hello world"' in content
+        mock.chat_stream.assert_not_called()
 
 
 # ============================================================================
@@ -984,8 +1393,8 @@ class TestGovernorUI:
 class TestGovernorFooterIntegration:
     """End-to-end tests for governor footer in chat responses (via daemon)."""
 
-    def test_non_streaming_governor_ok_footer(self, client) -> None:
-        """Non-streaming response includes [Governor] OK when daemon returns footer."""
+    def test_non_streaming_governor_status_is_not_authored(self, client) -> None:
+        """Non-streaming governor status stays outside authored content."""
         import gov_webui.adapter as adapter_mod
 
         mock = AsyncMock()
@@ -1013,30 +1422,26 @@ class TestGovernorFooterIntegration:
         assert response.status_code == 200
         data = response.json()
         content = data["choices"][0]["message"]["content"]
-        assert "[Governor] OK" in content
+        assert content == "Alice walked peacefully."
+        assert data["governor_status"] == "[Governor] OK — 0 anchors checked"
 
     def test_streaming_governor_footer_in_sse(self, client) -> None:
         """Streaming response includes governor feedback in SSE chunks."""
         import gov_webui.adapter as adapter_mod
 
-        async def mock_stream(*args, **kwargs):
-            yield ("She was the chosen one.", None)
-            yield (
-                None,
-                {
-                    "content": "She was the chosen one.",
-                    "model": "test-model",
-                    "usage": {},
-                    "violations": [],
-                    "footer": "[Governor] OK",
-                    "pending": None,
-                    "receipt": authority_receipt(),
-                },
-            )
-
         mock = AsyncMock()
-        mock.chat_stream = MagicMock(return_value=mock_stream())
-        mock.connect = AsyncMock()
+        mock.chat_send = AsyncMock(
+            return_value={
+                "content": "She was the chosen one.",
+                "model": "test-model",
+                "usage": {},
+                "violations": [],
+                "footer": "[Governor] OK",
+                "pending": None,
+                "receipt": authority_receipt(),
+            }
+        )
+        mock.chat_stream = MagicMock()
         adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
@@ -1053,6 +1458,8 @@ class TestGovernorFooterIntegration:
         # Parse SSE data to find governor feedback
         full_text = response.text
         assert "[Governor]" in full_text
+        assert '"governor_status": "[Governor] OK"' in full_text
+        mock.chat_stream.assert_not_called()
 
 
 # ============================================================================
@@ -1224,7 +1631,12 @@ class TestSessionEndpoints:
         client.post(f"/sessions/{session_id}/messages", json={"role": "user", "content": "First"})
         client.post(
             f"/sessions/{session_id}/messages",
-            json={"role": "assistant", "content": "Response", "model": "m1"},
+            json={
+                "role": "assistant",
+                "content": "Response",
+                "model": "m1",
+                "outcome": "authored",
+            },
         )
         client.post(f"/sessions/{session_id}/messages", json={"role": "user", "content": "Second"})
 
@@ -2968,25 +3380,19 @@ class TestReceipt:
         """No success receipt is fabricated before AG's final stream result."""
         import gov_webui.adapter as adapter_mod
 
-        async def mock_stream(*args, **kwargs):
-            yield ("Hello ", None)
-            yield ("world", None)
-            yield (
-                None,
-                {
-                    "content": "Hello world",
-                    "model": "test-model",
-                    "usage": {},
-                    "violations": [],
-                    "footer": None,
-                    "pending": None,
-                    "receipt": authority_receipt(),
-                },
-            )
-
         mock = AsyncMock()
-        mock.chat_stream = MagicMock(return_value=mock_stream())
-        mock.connect = AsyncMock()
+        mock.chat_send = AsyncMock(
+            return_value={
+                "content": "Hello world",
+                "model": "test-model",
+                "usage": {},
+                "violations": [],
+                "footer": None,
+                "pending": None,
+                "receipt": authority_receipt(),
+            }
+        )
+        mock.chat_stream = MagicMock()
         adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
@@ -3014,6 +3420,7 @@ class TestReceipt:
         assert receipt["receipt_role"] == "authority"
         assert receipt["gate"] == "chat_bridge"
         assert receipt["verdict"] == "pass"
+        mock.chat_stream.assert_not_called()
 
     def test_receipt_no_constraints_in_general_mode(self, client) -> None:
         """In general mode, constraints_hash is None, mode is 'general'."""

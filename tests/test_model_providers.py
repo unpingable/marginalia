@@ -45,6 +45,8 @@ def write_config(path: Path, *, default_model: str = "local-model") -> Path:
                                 "id": "local-model",
                                 "model": "upstream-local",
                                 "label": "Local model",
+                                "tokenizer_encoding": "cl100k_base",
+                                "token_safety_multiplier": 1.2,
                             }
                         ],
                     },
@@ -100,6 +102,8 @@ def test_configuration_is_explicit_and_preserves_provider_model_distinction(
     assert selected.provider_id == "local"
     assert selected.model_id == "upstream-local"
     assert selected.label == "Local model"
+    assert selected.tokenizer_encoding == "cl100k_base"
+    assert selected.token_safety_multiplier == 1.2
 
 
 @pytest.mark.parametrize(

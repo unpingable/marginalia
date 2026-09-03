@@ -190,3 +190,31 @@ executable and its provider-owned authentication state outside source control.
 
 Do not place deployment endpoints, credential values, enabled household models,
 or local defaults in source-controlled Compose files.
+
+## Token budgeting and maintenance model
+
+Configured model entries may declare `tokenizer_encoding` (default
+`o200k_base`) and `token_safety_multiplier` (default `1.0`, bounded from
+`1.0` to `2.0`). These values identify Marginalia's conservative preflight
+counter; they do not alter provider sampling or model selection.
+
+```json
+{
+  "id": "codex-default",
+  "label": "Codex",
+  "tokenizer_encoding": "o200k_base",
+  "token_safety_multiplier": 1.0
+}
+```
+
+`MARGINALIA_CONTEXT_MAINTENANCE_MODEL` names a configured model used only to
+derive long-session summaries. The household rollout uses
+`claude-sonnet-4-20250514` (provider `claude-code-local`, upstream
+`sonnet`). It must be explicitly available in the private provider catalog;
+Marginalia never substitutes it for the writer's selected model.
+
+Bounded context is disabled per project until an operator prebuilds and
+validates every required summary, then activates it. Maintenance calls use an
+isolated Agent Governor context and do not select, retry, or fail over the
+writing model. See [OPERATIONS.md](OPERATIONS.md) for rollout commands and
+[RELIABILITY.md](RELIABILITY.md) for the token and finality invariants.

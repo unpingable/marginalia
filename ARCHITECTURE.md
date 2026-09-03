@@ -28,7 +28,7 @@ NQ, Nightshift, Monitor, Maude, Desk, or qualification services.
 |---|---|
 | Validate capability and state root | `governor.hello` |
 | Discover provider/model | `chat.backend`, `chat.models` |
-| Send/stream governed response | `chat.send`, `chat.stream` |
+| Send governed response (including finality-gated SSE) | `chat.send` |
 | Observe context pending state | `commit.pending` + `context_id` |
 | Resolve in the same context | `commit.fix/revise/proceed` + `context_id` |
 | Verify authority evidence | `receipts.detail` |
@@ -36,8 +36,19 @@ NQ, Nightshift, Monitor, Maude, Desk, or qualification services.
 Every successful or blocked governed outcome must return a receipt that AG's
 receipt store confirms has `receipt_role=authority`. A successful resolution
 must link its evidence to both the pending ID and original blocking receipt.
-Streaming deltas are provisional; no receipt is exposed until AG returns its
-final governed outcome.
+Marginalia does not consume AG v1 partial deltas: its provider adapters can
+encode execution failures as ordinary chunk content. SSE responses therefore
+use `chat.send` transactionally and emit content only after a typed final
+outcome and authority receipt are validated.
+
+For session-backed generation, the session snapshot includes a persisted
+revision. The prompt and validated authored response are appended with one
+revision compare-and-swap while a per-session file lock is held. Every direct
+session mutation increments that revision. If the conversation changes or
+moves while provider work is in flight, the stale result is returned as an
+operational `stale_context` failure and neither its prompt nor response is
+written. Session replacement is atomic, and the lock is advisory across web
+processes rather than a process-global browser mutex.
 
 ## State layout
 
@@ -104,3 +115,45 @@ request → block/authority receipt → context pending on disk
         → correct-context resolution/authority receipt
         → original receipt linkage → pending cleared
 ```
+
+## Bounded fiction-context architecture
+
+Long-running projects retain every authored message. Provider input is a
+revision-bound projection rather than the session file itself:
+
+```text
+project direction + accepted canon
+                 +
+source-hashed summary of messages [0:k)
+                 +
+recent authored messages [k:n)
+                 +
+pending user prompt
+                 |
+          token preflight
+                 |
+       governed provider call
+                 |
+   validated authored terminal result
+                 |
+ session revision compare-and-swap
+```
+
+The summary is a rebuildable cache with covered message IDs, exact-prefix hash,
+observed revision, structured evidence citations, prompt-schema/model identity,
+usage, and authority receipts. Any edit, deletion, reorder, foreign citation,
+context mismatch, malformed result, or insufficient current coverage prevents
+use. Chunk work and final summaries live in
+`.governor/CONTEXT/marginalia/context/`, outside all narrative stores.
+
+The initial envelope is 32k application-controlled input tokens plus 16k
+reserved for AG/provider shaping, predicting at most 48k provider input. An
+additional 8k completion reserve is planning headroom. Counts use the selected
+model's configured real tokenizer and safety multiplier. No provider launches
+when mandatory input already exceeds its allocation.
+
+Maintenance uses a separate AG context and configured model. It may update only
+derived summary/work files. The writing provider remains the conversation's
+selected model. A successful result still commits only through the session
+revision CAS; maintenance, provider failure, block, cancellation, and conflict
+cannot mutate authored history.

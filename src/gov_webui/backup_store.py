@@ -16,6 +16,7 @@ from typing import Any
 from gov_webui.session_store import ChatSession
 
 from gov_webui.artifact_store import ArtifactStore
+from gov_webui.context_summary import ContextSummaryStore
 from gov_webui.canon_review_store import CanonReviewStore
 from gov_webui.creative_project import CreativeProjectStore
 from gov_webui.library_store import LibraryState, LibraryStore
@@ -401,8 +402,10 @@ class WorkspaceBackupManager:
             for project in state.projects.values():
                 context_root = target / ".governor" / project.context_id
                 sessions_dir = context_root / "sessions"
+                project_sessions: dict[str, ChatSession] = {}
                 for session_path in sessions_dir.glob("*.json"):
                     session = ChatSession.from_dict(json.loads(session_path.read_text()))
+                    project_sessions[session.id] = session
                     sessions += 1
                     messages += len(session.messages)
                     loaded_session_ids.add(session.id)
@@ -439,6 +442,14 @@ class WorkspaceBackupManager:
                     canon_reviews += len(
                         CanonReviewStore(review_path, project_id=project.id).list(status="all")
                     )
+                context_store = ContextSummaryStore(context_root)
+                if context_store.policy_path.exists():
+                    context_store.policy()
+                for session in project_sessions.values():
+                    if context_store.summary_path(session.id).exists():
+                        context_store.load(session)
+                    if context_store.work_path(session.id).exists():
+                        context_store.load_work(session.id)
                 project_path = context_root / "marginalia" / "project.json"
                 if project_path.exists():
                     CreativeProjectStore(context_root, project.context_id).get()

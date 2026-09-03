@@ -208,6 +208,24 @@
     .text-button { border: 0; background: none; padding: 3px 0; color: var(--muted); font-size: 11px; }
     .text-button:hover { color: var(--accent); }
     .thinking { color: var(--muted); font: italic 16px/1.5 var(--serif); }
+    .message.generation-failure, .message.generation-blocked, .message.generation-pending {
+      padding: 14px 16px;
+      border: 1px solid #d8b57f;
+      border-radius: 10px;
+      background: #fff8e9;
+    }
+    .message.generation-failure .message-role, .message.generation-blocked .message-role {
+      color: var(--warning);
+    }
+    .message.generation-pending { border-color: var(--line); background: var(--paper); }
+    .message.generation-failure .message-body,
+    .message.generation-blocked .message-body,
+    .message.generation-pending .message-body {
+      color: #59482f;
+      font: 13px/1.5 var(--sans);
+      white-space: pre-wrap;
+    }
+    .failure-kind { margin-top: 6px; color: var(--muted); font-size: 10px; }
 
     .pending-card {
       display: none;
@@ -642,12 +660,17 @@
       });
       if (!response.ok) {
         let detail = `${response.status} ${response.statusText}`;
+        let body = null;
         try {
-          const body = await response.json();
+          body = await response.json();
           detail = body.detail?.message || body.detail || detail;
+          if (body.outcome === "failure") detail = body.message || detail;
           if (typeof detail !== "string") detail = JSON.stringify(detail);
         } catch (_) {}
-        throw new Error(detail);
+        const error = new Error(detail);
+        error.payload = body;
+        error.status = response.status;
+        throw error;
       }
       return response.json();
     }
@@ -949,6 +972,7 @@
       state.activeArtifact = null;
       $("#artifact-editor").classList.remove("visible");
       renderConversation();
+      restorePromptDraft();
       await loadProjects();
       const results = await Promise.allSettled([
         loadProject(), loadSessions(), loadBible(), loadArtifacts().then(loadManuscript),
@@ -1080,11 +1104,44 @@
       });
     }
 
+    function draftKey(sessionId = state.activeSession?.id) {
+      const project = state.activeProjectId || "default";
+      return `marginalia:draft:${project}:${sessionId || "new"}`;
+    }
+
+    function persistPromptDraft(content = $("#prompt").value) {
+      try {
+        const key = draftKey();
+        if (content) localStorage.setItem(key, content);
+        else localStorage.removeItem(key);
+      } catch (_) {}
+    }
+
+    function restorePromptDraft() {
+      try {
+        $("#prompt").value = localStorage.getItem(draftKey()) || "";
+      } catch (_) {
+        $("#prompt").value = "";
+      }
+    }
+
+    function clearPromptDraft() {
+      try { localStorage.removeItem(draftKey()); } catch (_) {}
+    }
+
+
     async function createSession(title = "New conversation") {
+      const pendingDraft = $("#prompt").value;
       const session = await api("/sessions/", {
         method: "POST", body: JSON.stringify({model: state.model, title, project_id: state.activeProjectId}),
       });
       state.activeSession = session;
+      if (pendingDraft) {
+        try {
+          localStorage.setItem(draftKey(session.id), pendingDraft);
+          localStorage.removeItem(draftKey(null));
+        } catch (_) {}
+      }
       renderConversation();
       await loadSessions();
       $("#prompt").focus();
@@ -1097,6 +1154,7 @@
       syncModelPicker();
       state.selectedMessageIds.clear();
       renderConversation();
+      restorePromptDraft();
       await loadSessions();
     }
 
@@ -1266,6 +1324,53 @@
       return wrapper;
     }
 
+    function renderGenerationNotice(
+      outcome, message, failureType = "", retryContent = "", incidentId = ""
+    ) {
+      const wrapper = document.createElement("article");
+      wrapper.className = `message generation-${outcome}`;
+      wrapper.dataset.generationOutcome = outcome;
+      wrapper.setAttribute("role", outcome === "failure" ? "alert" : "status");
+      const label = document.createElement("div");
+      label.className = "message-role";
+      label.textContent = outcome === "failure" ? "Generation failed"
+        : outcome === "blocked" ? "Generation blocked" : "Generating";
+      const body = document.createElement("div");
+      body.className = "message-body";
+      body.textContent = message;
+      wrapper.append(label, body);
+      if (failureType) {
+        const kind = document.createElement("div");
+        kind.className = "failure-kind";
+        kind.textContent = `Operational status: ${failureType.replaceAll("_", " ")}`;
+        wrapper.append(kind);
+      }
+      if (incidentId) {
+        const incident = document.createElement("div");
+        incident.className = "failure-kind";
+        incident.textContent = `Incident: ${incidentId}`;
+        wrapper.append(incident);
+      }
+      if (outcome === "failure" && retryContent) {
+        const actions = document.createElement("div");
+        actions.className = "message-actions";
+        const retry = document.createElement("button");
+        retry.className = "text-button";
+        retry.textContent = "Try again";
+        retry.addEventListener("click", () => {
+          wrapper.remove();
+          $("#prompt").value = retryContent;
+          persistPromptDraft(retryContent);
+          $("#composer").requestSubmit();
+        });
+        actions.append(retry);
+        wrapper.append(actions);
+      }
+      $("#messages").append(wrapper);
+      $("#messages").scrollTop = $("#messages").scrollHeight;
+      return wrapper;
+    }
+
     async function renderAssistantMarkdown(body, content) {
       try {
         const rendered = await api("/v1/markdown", {
@@ -1278,33 +1383,65 @@
       }
     }
 
-    async function appendSessionMessage(role, content, provenance = null) {
-      const message = await api(`/sessions/${state.activeSession.id}/messages`, {
-        method: "POST", body: JSON.stringify({
-          role, content,
-          model: provenance?.model || null,
-          provider_id: provenance?.provider_id || null,
-          model_id: provenance?.model_id || null,
-        }),
-      });
-      state.activeSession.messages.push(message);
-      state.activeSession.message_count = state.activeSession.messages.length;
-      return message;
-    }
-
     async function sendMessage(event) {
       event.preventDefault();
       const prompt = $("#prompt");
       const content = prompt.value.trim();
+      persistPromptDraft(content);
       if (!content || state.busy) return;
       state.busy = true;
       $("#send").disabled = true;
+      let userDraft = null;
+      let generationCommitted = false;
       try {
         if (!state.activeSession) await createSession();
         const firstMessage = state.activeSession.messages.length === 0;
-        const userMessage = await appendSessionMessage("user", content);
-        renderMessage("user", content, userMessage.id);
+        userDraft = renderMessage("user", content);
         prompt.value = "";
+
+        const waiting = renderGenerationNotice("pending", "Thinking with your project in view…");
+        waiting.querySelector(".message-body").classList.add("thinking");
+        const messages = state.activeSession.messages
+          .map(({role, content: text}) => ({role, content: text}))
+          .concat({role: "user", content});
+        const response = await api("/v1/chat/completions", {
+          method: "POST",
+          body: JSON.stringify({
+            model: state.model,
+            messages,
+            stream: false,
+            project_id: state.activeProjectId,
+            session_id: state.activeSession.id,
+          }),
+        });
+        waiting.remove();
+        userDraft.remove();
+        userDraft = null;
+        if (response.outcome === "blocked") {
+          prompt.value = content;
+          renderGenerationNotice("blocked", response.message);
+          await refreshPending();
+          return;
+        }
+        if (response.outcome !== "authored" || response.committed_messages?.length !== 2) {
+          const boundaryError = new Error("Generation returned no committed authored result.");
+          boundaryError.payload = {
+            outcome: "failure", failure_type: "invalid_result", retryable: true,
+          };
+          throw boundaryError;
+        }
+        const [userMessage, assistantMessage] = response.committed_messages;
+        clearPromptDraft();
+        state.activeSession.messages.push(userMessage, assistantMessage);
+        state.activeSession.message_count = state.activeSession.messages.length;
+        generationCommitted = true;
+        renderMessage("user", userMessage.content, userMessage.id, userMessage);
+        const answer = assistantMessage.content;
+        if (state.pendingOutlineNodeId) {
+          state.outlineMessageTargets.set(assistantMessage.id, state.pendingOutlineNodeId);
+          state.pendingOutlineNodeId = null;
+        }
+        renderMessage("assistant", answer, assistantMessage.id, assistantMessage);
         if (firstMessage && state.activeSession.title === "New conversation") {
           const title = content.replace(/\s+/g, " ").slice(0, 52);
           state.activeSession = await api(`/sessions/${state.activeSession.id}`, {
@@ -1313,31 +1450,24 @@
           $("#conversation-title").textContent = title;
           await loadSessions();
         }
-
-        const waiting = renderMessage("assistant", "Thinking with your project in view…");
-        waiting.querySelector(".message-body").classList.add("thinking");
-        const messages = state.activeSession.messages.map(({role, content: text}) => ({role, content: text}));
-        const response = await api("/v1/chat/completions", {
-          method: "POST",
-          body: JSON.stringify({model: state.model, messages, stream: false, project_id: state.activeProjectId}),
-        });
-        waiting.remove();
-        const answer = response.choices?.[0]?.message?.content || "";
-        const assistantMessage = await appendSessionMessage("assistant", answer, {
-          model: response.model || state.model,
-          provider_id: response.provider_id,
-          model_id: response.model_id,
-        });
-        if (state.pendingOutlineNodeId) {
-          state.outlineMessageTargets.set(assistantMessage.id, state.pendingOutlineNodeId);
-          state.pendingOutlineNodeId = null;
-        }
-        renderMessage("assistant", answer, assistantMessage.id, assistantMessage);
         await Promise.all([refreshPending(), scanForCanon(answer, assistantMessage.id)]);
       } catch (error) {
         state.pendingOutlineNodeId = null;
+        if (generationCommitted) {
+          toast(`The passage was saved, but the page refresh failed: ${error.message}`);
+          return;
+        }
+        userDraft?.remove();
+        if (!prompt.value) prompt.value = content;
         $$(".thinking").forEach((node) => node.closest(".message")?.remove());
-        renderMessage("assistant", `I couldn't complete that response. ${error.message}`);
+        const failure = error.payload?.outcome === "failure" ? error.payload : null;
+        renderGenerationNotice(
+          "failure",
+          failure?.message || error.message,
+          failure?.failure_type || "request_failure",
+          failure?.retryable === false ? "" : content,
+          failure?.incident_id || "",
+        );
       } finally {
         state.busy = false;
         $("#send").disabled = false;
@@ -2223,6 +2353,7 @@
           toast(error.message);
         }
       });
+        persistPromptDraft(event.target.value);
       $("#composer").addEventListener("submit", sendMessage);
       $("#prompt").addEventListener("keydown", (event) => {
         if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); $("#composer").requestSubmit(); }

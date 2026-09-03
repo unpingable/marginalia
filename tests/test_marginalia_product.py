@@ -12,6 +12,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from support import fake_governed_chat
+from gov_webui.context_summary import (
+    ContextPolicy,
+    ContextSummary,
+    SummaryFact,
+    SummaryGenerator,
+    SummarySections,
+    source_for,
+    utc_now,
+)
+from gov_webui.session_store import SessionMessage
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +63,9 @@ def product_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     adapter._canon_review_stores.clear()
     adapter._manuscript_stores.clear()
     adapter._snapshot_stores.clear()
+    adapter._context_summary_stores.clear()
+    adapter._context_maintenance_adapters.clear()
+    adapter._context_maintenance_tasks.clear()
     adapter._governed_chat_adapter = fake_governed_chat(
         content="The governed project response.",
         model="fiction-model",
@@ -74,6 +87,9 @@ def product_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     adapter._canon_review_stores.clear()
     adapter._manuscript_stores.clear()
     adapter._snapshot_stores.clear()
+    adapter._context_summary_stores.clear()
+    adapter._context_maintenance_adapters.clear()
+    adapter._context_maintenance_tasks.clear()
     adapter._governed_chat_adapter = None
     adapter._pending_captures.clear()
 
@@ -280,6 +296,33 @@ def test_runtime_entrypoint_refuses_nonfiction_mode(tmp_path: Path) -> None:
     assert not (tmp_path / "data").exists()
 
 
+def test_runtime_entrypoint_rejects_relative_provider_workdir(tmp_path: Path) -> None:
+    environment = os.environ.copy()
+    environment.pop("MARGINALIA_ENABLE_DONOR_ROUTES", None)
+    environment.update(
+        {
+            "GOVERNOR_MODE": "fiction",
+            "MARGINALIA_DATA_ROOT": str(tmp_path / "data"),
+            "BACKEND_TYPE": "codex",
+            "CODEX_PATH": "/app/codex-provider.sh",
+            "CLAUDE_COMMAND_WORKDIR": "relative/provider-work",
+        }
+    )
+
+    result = subprocess.run(
+        [str(REPO_ROOT / "entrypoint.sh")],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "CLAUDE_COMMAND_WORKDIR must be an absolute path" in result.stderr
+
+
 def test_project_settings_persist_and_reach_every_governed_fiction_request(
     product_client,
 ) -> None:
@@ -387,7 +430,6 @@ def test_writer_export_contains_project_bible_conversations_and_drafts(
     )
 
     exported = client.get("/v1/project/export")
-
     assert exported.status_code == 200
     payload = exported.json()
     assert payload["schema"] == "marginalia.creative-project-export/v1"
@@ -396,3 +438,177 @@ def test_writer_export_contains_project_bible_conversations_and_drafts(
     assert payload["conversations"][0]["messages"][0]["content"] == "Begin at dusk."
     assert payload["artifacts"][0]["revisions"][0]["content"] == "The bell stopped."
     assert "receipt" not in str(payload).lower()
+
+
+class ProductWordCounter:
+    def count_text(self, text):
+        return len(text.split())
+
+    def count_messages(self, messages):
+        return sum(len(item["content"].split()) + 1 for item in messages)
+
+
+def _seed_long_product_session(client, adapter):
+    created = client.post(
+        "/sessions/",
+        json={"title": "Long story", "model": "fiction-model", "project_id": "default"},
+    ).json()
+    store = adapter._get_session_store("default")
+    messages = []
+    for index in range(3):
+        messages.extend(
+            [
+                SessionMessage.create("user", " ".join([f"user{index}"] * 900)),
+                SessionMessage.create("assistant", " ".join([f"passage{index}"] * 900)),
+            ]
+        )
+    assert store.append_messages(created["id"], messages)
+    return store.get(created["id"])
+
+
+def _enable_test_budget(adapter, monkeypatch):
+    context_store = adapter._get_context_summary_store("default")
+    context_store.save_policy(
+        ContextPolicy(
+            enabled=True,
+            target_provider_input_tokens=8_000,
+            provider_overhead_tokens=4_000,
+            output_reserve_tokens=1_000,
+            summary_max_tokens=1_000,
+            summary_chunk_tokens=2_000,
+            updated_at=utc_now(),
+        )
+    )
+    monkeypatch.setattr(
+        adapter,
+        "TiktokenCounter",
+        lambda *args, **kwargs: ProductWordCounter(),
+    )
+    return context_store
+
+
+def test_context_maintenance_failure_preserves_story_and_never_reenters_context(
+    product_client,
+    monkeypatch,
+) -> None:
+    client, adapter = product_client
+    session = _seed_long_product_session(client, adapter)
+    context_store = _enable_test_budget(adapter, monkeypatch)
+    scheduled = []
+    monkeypatch.setattr(
+        adapter,
+        "_schedule_context_maintenance",
+        lambda **kwargs: scheduled.append(kwargs),
+    )
+    before = session.to_dict()
+    prompt = "Continue without forgetting the station."
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "fiction-model",
+            "project_id": "default",
+            "session_id": session.id,
+            "messages": [
+                *[{"role": item.role, "content": item.content} for item in session.messages],
+                {"role": "user", "content": prompt},
+            ],
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["outcome"] == "failure"
+    assert response.json()["failure_type"] == "context_maintenance"
+    assert adapter._get_session_store("default").get(session.id).to_dict() == before
+    assert adapter._governed_chat_adapter.chat_send.await_count == 0
+    assert scheduled == []
+
+    # A later successful turn receives durable story only, never the operational message.
+    context_store.set_enabled(False)
+    retry = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "fiction-model",
+            "project_id": "default",
+            "session_id": session.id,
+            "messages": [
+                *[{"role": item.role, "content": item.content} for item in session.messages],
+                {"role": "user", "content": prompt},
+            ],
+        },
+    )
+    assert retry.status_code == 200
+    forwarded = adapter._governed_chat_adapter.chat_send.await_args.kwargs["messages"]
+    assert "Preparing the story context ran into trouble" not in str(forwarded)
+    durable = adapter._get_session_store("default").get(session.id)
+    assert len(durable.messages) == len(session.messages) + 2
+
+
+def test_valid_summary_bounds_provider_context_and_success_commits_once(
+    product_client,
+    monkeypatch,
+) -> None:
+    client, adapter = product_client
+    session = _seed_long_product_session(client, adapter)
+    context_store = _enable_test_budget(adapter, monkeypatch)
+    scheduled = []
+    monkeypatch.setattr(
+        adapter,
+        "_schedule_context_maintenance",
+        lambda **kwargs: scheduled.append(kwargs),
+    )
+    prefix = session.messages[:4]
+    summary = ContextSummary(
+        source=source_for(session, prefix),
+        generator=SummaryGenerator(
+            configured_model="claude-sonnet-4-20250514",
+            provider_id="claude-code-local",
+            model_id="sonnet",
+            receipt_ids=["summary-receipt"],
+        ),
+        created_at=utc_now(),
+        sections=SummarySections(
+            narrative_recap=[
+                SummaryFact(
+                    text="Earlier events are represented as derived context.",
+                    evidence_message_ids=[prefix[0].id],
+                )
+            ]
+        ),
+    )
+    context_store.save(summary)
+    prompt = "Write the next beat."
+    before_count = len(session.messages)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "fiction-model",
+            "project_id": "default",
+            "session_id": session.id,
+            "messages": [
+                *[{"role": item.role, "content": item.content} for item in session.messages],
+                {"role": "user", "content": prompt},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["outcome"] == "authored"
+    assert scheduled == [
+        {
+            "project_id": "default",
+            "session_id": session.id,
+            "writing_model": None,
+        }
+    ]
+    forwarded = adapter._governed_chat_adapter.chat_send.await_args.kwargs["messages"]
+    assert "[MARGINALIA_DERIVED_CONTEXT_V1]" in str(forwarded)
+    assert prefix[0].content not in str(forwarded)
+    assert session.messages[4].content in str(forwarded)
+    durable = adapter._get_session_store("default").get(session.id)
+    assert len(durable.messages) == before_count + 2
+    assert [item.content for item in durable.messages[-2:]] == [
+        prompt,
+        "The governed project response.",
+    ]

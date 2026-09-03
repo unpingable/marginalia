@@ -88,6 +88,8 @@ class ConfiguredModel:
     timeout_seconds: float
     command_model: str | None = None
     command: CommandConfiguration | None = None
+    tokenizer_encoding: str = "o200k_base"
+    token_safety_multiplier: float = 1.0
 
     def availability_error(self, environ: Mapping[str, str] | None = None) -> str | None:
         env = os.environ if environ is None else environ
@@ -387,12 +389,33 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
         for model_index, model_value in enumerate(provider_models):
             model_location = f"{location}.models[{model_index}]"
             model = _require_object(model_value, model_location)
-            _reject_unknown(model, {"id", "model", "label"}, model_location)
+            _reject_unknown(
+                model,
+                {"id", "model", "label", "tokenizer_encoding", "token_safety_multiplier"},
+                model_location,
+            )
             configured_id = _identifier(model.get("id"), f"{model_location}.id")
             if configured_id in configured_ids:
                 raise ProviderConfigurationError(f"duplicate configured model id {configured_id!r}")
             configured_ids.add(configured_id)
             label = _required_string(model.get("label"), f"{model_location}.label")
+            tokenizer_encoding = model.get("tokenizer_encoding", "o200k_base")
+            if not isinstance(tokenizer_encoding, str) or not re.fullmatch(
+                r"[A-Za-z0-9_.-]{1,80}", tokenizer_encoding
+            ):
+                raise ProviderConfigurationError(
+                    f"{model_location}.tokenizer_encoding must be a bounded encoding name"
+                )
+            raw_multiplier = model.get("token_safety_multiplier", 1.0)
+            if isinstance(raw_multiplier, bool) or not isinstance(raw_multiplier, (int, float)):
+                raise ProviderConfigurationError(
+                    f"{model_location}.token_safety_multiplier must be between 1 and 2"
+                )
+            token_safety_multiplier = float(raw_multiplier)
+            if not 1.0 <= token_safety_multiplier <= 2.0:
+                raise ProviderConfigurationError(
+                    f"{model_location}.token_safety_multiplier must be between 1 and 2"
+                )
 
             raw_model_id = model.get("model")
             command_model: str | None = None
@@ -425,6 +448,8 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                     timeout_seconds=timeout_seconds,
                     command_model=command_model,
                     command=command,
+                    tokenizer_encoding=tokenizer_encoding,
+                    token_safety_multiplier=token_safety_multiplier,
                 )
             )
 
@@ -573,13 +598,16 @@ class LocalCommandTransport:
         assert self.model.command is not None
         return "Claude Code" if self.model.command.adapter == "claude-code" else "Kimi Code"
 
-    def _error_from_exit(self, returncode: int, stderr: str) -> ProviderError:
+    def _error_from_exit(self, returncode: int, diagnostic: str) -> ProviderError:
         command_label = self._command_label()
-        normalized = stderr.casefold()
-        if "usage limit" in normalized or "quota" in normalized:
+        normalized = diagnostic.casefold()
+        if any(
+            marker in normalized
+            for marker in ("usage limit", "session limit", "rate limit", "rate_limit", "quota")
+        ):
             code = "usage_limit"
             message = f"{command_label} usage window is exhausted"
-            status_code = 403
+            status_code = 429
         elif (
             "auth" in normalized
             or "403" in normalized
@@ -604,6 +632,21 @@ class LocalCommandTransport:
             model_id=self.model.model_id,
             status_code=status_code,
         )
+
+    def _structured_claude_exit_error(self, stdout: str, returncode: int) -> ProviderError | None:
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(data, list):
+            data = next(
+                (item for item in data if isinstance(item, dict) and item.get("type") == "result"),
+                None,
+            )
+        if not isinstance(data, dict) or data.get("is_error") is not True:
+            return None
+        detail = data.get("result", "")
+        return self._error_from_exit(returncode, detail if isinstance(detail, str) else "")
 
     def _parse_kimi_response(self, stdout: str) -> ProviderResponse:
         assistant_messages: list[str] = []
@@ -746,7 +789,13 @@ class LocalCommandTransport:
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")[-8192:]
         if process.returncode != 0:
-            raise self._error_from_exit(process.returncode or 1, stderr)
+            returncode = process.returncode or 1
+            assert self.model.command is not None
+            if self.model.command.adapter == "claude-code":
+                structured = self._structured_claude_exit_error(stdout, returncode)
+                if structured is not None:
+                    raise structured
+            raise self._error_from_exit(returncode, stderr)
         return self._parse_response(stdout)
 
 

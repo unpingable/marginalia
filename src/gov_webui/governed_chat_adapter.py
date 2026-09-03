@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
 from gov_webui.daemon_client import DaemonChatClient
+from gov_webui.generation_outcome import AuthoredGeneration, classify_daemon_result
 
 
 class GovernedChatContractError(RuntimeError):
@@ -131,22 +132,12 @@ class GovernedChatAdapter:
         messages: list[dict[str, str]],
         model: str = "",
     ) -> AsyncIterator[tuple[str | None, dict[str, Any] | None]]:
-        """Stream deltas, validating the authoritative receipt before finality."""
-        await self._ensure_contract()
-        before = await self.pending()
-        saw_final = False
-        async for delta, final in self._client.chat_stream(
-            messages=messages,
-            model=model,
-            context_id=self.context_id,
-        ):
-            if final is not None:
-                detail = await self._validate_chat_result(final)
-                await self._validate_chat_resolution_transition(before, detail)
-                saw_final = True
-            yield delta, final
-        if not saw_final:
-            raise GovernedChatContractError("AG stream ended without a final governed outcome")
+        """Preserve the iterator API while withholding untyped partial deltas."""
+        result = await self.chat_send(messages=messages, model=model)
+        outcome = classify_daemon_result(result, model)
+        if isinstance(outcome, AuthoredGeneration):
+            yield outcome.content, None
+        yield None, result
 
     async def resolve_pending(
         self,

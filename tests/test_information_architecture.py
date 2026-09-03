@@ -27,6 +27,9 @@ def _reset(adapter) -> None:
     adapter._canon_review_stores.clear()
     adapter._manuscript_stores.clear()
     adapter._snapshot_stores.clear()
+    adapter._context_summary_stores.clear()
+    adapter._context_maintenance_adapters.clear()
+    adapter._context_maintenance_tasks.clear()
     adapter._pending_captures.clear()
 
 
@@ -133,7 +136,11 @@ async def test_fork_project_move_artifact_provenance_and_canon_isolation(
     second = (
         await client.post(
             f"/sessions/{original['id']}/messages",
-            json={"role": "assistant", "content": "Elena puts out the lantern."},
+            json={
+                "role": "assistant",
+                "content": "Elena puts out the lantern.",
+                "outcome": "authored",
+            },
         )
     ).json()
     await client.post(
@@ -504,6 +511,9 @@ async def test_project_bundle_and_named_snapshot_are_complete(library_client) ->
         "manuscript_nodes": 1,
     }
     adapter._snapshot_stores.clear()
+    adapter._context_summary_stores.clear()
+    adapter._context_maintenance_adapters.clear()
+    adapter._context_maintenance_tasks.clear()
     listed = (await client.get("/v1/project/snapshots")).json()["snapshots"]
     assert [item["id"] for item in listed] == [snapshot["id"]]
     restored = (await client.get(f"/v1/project/snapshots/{snapshot['id']}")).json()
@@ -606,7 +616,11 @@ async def test_unified_search_backlinks_and_editable_canon_review(library_client
     source_message = (
         await client.post(
             f"/sessions/{conversation['id']}/messages",
-            json={"role": "assistant", "content": "Elena watches the lighthouse beam."},
+            json={
+                "role": "assistant",
+                "content": "Elena watches the lighthouse beam.",
+                "outcome": "authored",
+            },
         )
     ).json()
     artifact = (

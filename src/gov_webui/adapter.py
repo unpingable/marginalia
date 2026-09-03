@@ -42,7 +42,7 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Literal
 from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import FastAPI, HTTPException, Request
@@ -50,10 +50,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from gov_webui.context_budget import (
+    TiktokenCounter,
+    build_generation_context,
+    choose_summary_prefix,
+)
+from gov_webui.context_maintenance import ContextMaintainer, SummaryModelResult
+from gov_webui.context_summary import (
+    ContextMaintenanceRequired,
+    ContextSummaryError,
+    ContextSummaryStore,
+    ContextTooLarge,
+)
 from gov_webui.backup_store import BackupError, WorkspaceBackupManager
 from gov_webui.daemon_client import (
     DaemonAuthError,
     DaemonChatClient,
+    DaemonRPCError,
     DaemonTimeoutError,
     default_socket_path,
 )
@@ -71,6 +84,15 @@ from gov_webui.canon_review_store import (
     CanonReviewStoreError,
 )
 from gov_webui.governed_chat_adapter import GovernedChatAdapter
+from gov_webui.generation_outcome import (
+    AuthoredGeneration,
+    BlockedGeneration,
+    FailedGeneration,
+    GenerationFailureKind,
+    InvalidGenerationResult,
+    ModelMismatchGenerationResult,
+    classify_daemon_result,
+)
 from gov_webui.library_store import (
     ConversationLifecycle,
     ConversationLifecycleNotFoundError,
@@ -101,10 +123,16 @@ from gov_webui.snapshot_store import (
     SnapshotNotFoundError,
     SnapshotStoreError,
 )
-from gov_webui.session_store import ChatSession, SessionMessage, SessionStore
+from gov_webui.session_store import (
+    ChatSession,
+    SessionMessage,
+    SessionStore,
+    SessionWriteResult,
+)
 from governor.context_manager import GovernorContextManager
 
 logger = logging.getLogger(__name__)
+telemetry_logger = logging.getLogger("uvicorn.error")
 
 # ============================================================================
 # Configuration from environment
@@ -140,6 +168,9 @@ MARGINALIA_BACKUP_REQUIRE_REMOTE = os.environ.get(
     "MARGINALIA_BACKUP_REQUIRE_REMOTE", "false"
 ).lower() in {"true", "1", "yes"}
 MARGINALIA_MODEL_CONFIG = os.environ.get("MARGINALIA_MODEL_CONFIG", "").strip()
+MARGINALIA_CONTEXT_MAINTENANCE_MODEL = os.environ.get(
+    "MARGINALIA_CONTEXT_MAINTENANCE_MODEL", "claude-sonnet-4-20250514"
+).strip()
 
 if GOVERNOR_MODE != "fiction" and not MARGINALIA_ENABLE_DONOR_ROUTES:
     raise RuntimeError(
@@ -301,6 +332,7 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: float = 0.0
     user: str | None = None
     project_id: str | None = None
+    session_id: str | None = None
 
 
 class ChatCompletionChoice(BaseModel):
@@ -316,6 +348,7 @@ class Usage(BaseModel):
 
 
 class ChatCompletionResponse(BaseModel):
+    outcome: Literal["authored"] = "authored"
     id: str
     object: str = "chat.completion"
     created: int
@@ -325,6 +358,23 @@ class ChatCompletionResponse(BaseModel):
     choices: list[ChatCompletionChoice]
     usage: Usage | None = None
     receipt: dict
+    governor_status: str | None = None
+    committed_messages: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class BlockedGenerationResponse(BaseModel):
+    outcome: Literal["blocked"] = "blocked"
+    message: str
+    model: str
+    receipt: dict[str, Any]
+
+
+class GenerationFailureResponse(BaseModel):
+    outcome: Literal["failure"] = "failure"
+    failure_type: GenerationFailureKind
+    message: str
+    retryable: bool
+    incident_id: str
 
 
 class SyntheticGovernorRequest(BaseModel):
@@ -447,6 +497,9 @@ _library_store: LibraryStore | None = None
 _session_stores: dict[str, SessionStore] = {}
 _governed_chat_adapters: dict[str, GovernedChatAdapter] = {}
 _creative_project_stores: dict[str, CreativeProjectStore] = {}
+_context_summary_stores: dict[str, ContextSummaryStore] = {}
+_context_maintenance_adapters: dict[str, GovernedChatAdapter] = {}
+_context_maintenance_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
 _artifact_stores: dict[str, Any] = {}
 _canon_review_stores: dict[str, CanonReviewStore] = {}
 _manuscript_stores: dict[str, ManuscriptStore] = {}
@@ -670,6 +723,74 @@ def _project_payload(config: CreativeProjectConfig) -> dict[str, Any]:
     payload = config.model_dump(mode="json")
     payload["has_guidance"] = config.has_guidance
     return payload
+
+
+def _get_context_summary_store(
+    project_id: str | None = None,
+) -> ContextSummaryStore:
+    project = _project_record(project_id)
+    if project.context_id not in _context_summary_stores:
+        context = _get_context_manager().get_or_create(project.context_id, mode="fiction")
+        _context_summary_stores[project.context_id] = ContextSummaryStore(context.root)
+    return _context_summary_stores[project.context_id]
+
+
+def _get_context_maintenance_adapter(
+    project_id: str | None = None,
+) -> GovernedChatAdapter:
+    project = _project_record(project_id)
+    maintenance_id = f"{project.context_id[:116]}-maintenance"
+    if maintenance_id not in _context_maintenance_adapters:
+        socket_path = os.environ.get("GOVERNOR_SOCKET", "")
+        if not socket_path:
+            socket_path = str(default_socket_path(Path(GOVERNOR_DAEMON_DIR)))
+        _context_maintenance_adapters[maintenance_id] = GovernedChatAdapter(
+            DaemonChatClient(socket_path),
+            context_id=maintenance_id,
+            expected_governor_dir=GOVERNOR_DAEMON_DIR,
+        )
+    return _context_maintenance_adapters[maintenance_id]
+
+
+def _build_fiction_canon_context_message(
+    project_id: str | None = None,
+) -> dict[str, str] | None:
+    """Render accepted canon as counted generation input, never derived summary."""
+    if GOVERNOR_MODE != "fiction":
+        return None
+    from governor.continuity import AnchorType, create_registry
+
+    project = _project_record(project_id)
+    context = _get_context_manager().get_or_create(project.context_id, mode="fiction")
+    anchors = create_registry(context.governor_dir).all()
+    accepted = []
+    for anchor in anchors:
+        if anchor.anchor_type not in {
+            AnchorType.CANON,
+            AnchorType.DEFINITION,
+            AnchorType.PROHIBITION,
+        }:
+            continue
+        item = {
+            "id": anchor.id,
+            "kind": anchor.anchor_type.value,
+            "description": anchor.description,
+        }
+        patterns = getattr(anchor, "forbidden_patterns", None)
+        if patterns:
+            item["forbidden_patterns"] = list(patterns)
+        accepted.append(item)
+    if not accepted:
+        return None
+    return {
+        "role": "system",
+        "content": (
+            "The following accepted Story Bible entries are authoritative for continuity.\n"
+            "[MARGINALIA_ACCEPTED_CANON_V1]\n"
+            + json.dumps(accepted, ensure_ascii=False, separators=(",", ":"))
+            + "\n[/MARGINALIA_ACCEPTED_CANON_V1]"
+        ),
+    }
 
 
 def _build_project_context_message(project_id: str | None = None) -> dict[str, str] | None:
@@ -1930,10 +2051,442 @@ def _build_constraints_message() -> tuple[dict[str, str] | None, dict]:
     return None, _meta_base
 
 
+class StaleSessionRevisionError(RuntimeError):
+    """A generation completed after its durable session snapshot changed."""
+
+
+def _generation_failure(exc: BaseException) -> FailedGeneration:
+    """Classify an exception, expose a safe summary, and log full diagnostics."""
+    incident_id = f"gen-{uuid.uuid4().hex[:12]}"
+    if isinstance(exc, DaemonAuthError):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.AUTHENTICATION,
+            message=(
+                "Claude Code is not logged in. "
+                "Run `claude /login` in a terminal to re-authenticate."
+            ),
+            retryable=False,
+            incident_id=incident_id,
+        )
+    elif isinstance(exc, DaemonTimeoutError):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.TIMEOUT,
+            message="Generation timed out before a validated response was available.",
+            retryable=True,
+            incident_id=incident_id,
+        )
+    elif isinstance(exc, ContextTooLarge):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.CONTEXT_TOO_LARGE,
+            message="The required story context is too large for a safe generation.",
+            retryable=False,
+            incident_id=incident_id,
+        )
+    elif isinstance(exc, (ContextMaintenanceRequired, ContextSummaryError)):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.CONTEXT_MAINTENANCE,
+            message=(
+                "Preparing the story context ran into trouble. "
+                "Your prompt is still available to retry."
+            ),
+            retryable=True,
+            incident_id=incident_id,
+        )
+    elif isinstance(exc, DaemonRPCError):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.PROVIDER_EXECUTION,
+            message="The model provider could not complete the generation.",
+            retryable=True,
+            incident_id=incident_id,
+        )
+    elif isinstance(exc, (ConnectionError, OSError)):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.TRANSPORT,
+            message="The generation service is temporarily unavailable.",
+            retryable=True,
+            incident_id=incident_id,
+        )
+    elif isinstance(exc, ModelMismatchGenerationResult):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.INVALID_RESULT,
+            message="The generation service returned a different model than requested.",
+            retryable=False,
+            incident_id=incident_id,
+        )
+    elif isinstance(exc, InvalidGenerationResult):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.INVALID_RESULT,
+            message="The model provider returned an unusable response.",
+            retryable=True,
+            incident_id=incident_id,
+        )
+    elif isinstance(exc, StaleSessionRevisionError):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.STALE_CONTEXT,
+            message=(
+                "This conversation changed while generation was in progress. "
+                "Retry from the latest version."
+            ),
+            retryable=True,
+            incident_id=incident_id,
+        )
+    else:
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.INTERNAL,
+            message="Generation failed before a validated response was available.",
+            retryable=True,
+            incident_id=incident_id,
+        )
+    logger.warning(
+        "Generation incident %s classified as %s: %s",
+        incident_id,
+        failure.kind.value,
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    return failure
+
+
+def _failure_response(failure: FailedGeneration) -> JSONResponse:
+    status = {
+        GenerationFailureKind.AUTHENTICATION: 401,
+        GenerationFailureKind.TIMEOUT: 504,
+        GenerationFailureKind.STALE_CONTEXT: 409,
+        GenerationFailureKind.CONTEXT_MAINTENANCE: 503,
+        GenerationFailureKind.CONTEXT_TOO_LARGE: 422,
+    }.get(failure.kind, 502)
+    payload = GenerationFailureResponse(
+        failure_type=failure.kind,
+        message=failure.message,
+        retryable=failure.retryable,
+        incident_id=failure.incident_id,
+    )
+    return JSONResponse(status_code=status, content=payload.model_dump(mode="json"))
+
+
+def _prepare_generation_commit(
+    request: ChatCompletionRequest,
+) -> tuple[SessionStore, ChatSession, ChatMessage] | None:
+    """Validate that a UI turn extends exactly the current durable history."""
+    if request.session_id is None:
+        return None
+    if request.stream:
+        raise HTTPException(
+            status_code=422,
+            detail="session-backed generation does not support streaming",
+        )
+    lifecycle, store, session = _conversation_location(request.session_id)
+    if request.project_id is not None and lifecycle.project_id != request.project_id:
+        raise HTTPException(status_code=409, detail="conversation belongs to another project")
+
+    expected = [(message.role, message.content) for message in session.messages]
+    supplied = [(message.role, message.content) for message in request.messages]
+    if not request.messages or supplied[:-1] != expected:
+        raise StaleSessionRevisionError(
+            f"request history does not match session {session.id} revision {session.revision}"
+        )
+    pending_user = request.messages[-1]
+    if pending_user.role != "user" or not pending_user.content.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="session-backed generation requires one new user message",
+        )
+    return store, session, pending_user
+
+
+def _commit_authored_turn(
+    target: tuple[SessionStore, ChatSession, ChatMessage],
+    outcome: AuthoredGeneration,
+    model_identity: ConfiguredModel | None,
+) -> list[dict[str, Any]]:
+    """Persist the prompt and authored result together, only after success."""
+    store, session, pending_user = target
+    user_message = SessionMessage.create(role="user", content=pending_user.content)
+    assistant_message = SessionMessage.create(
+        role="assistant",
+        content=outcome.content,
+        model=outcome.model,
+        usage=outcome.usage,
+        provider_id=model_identity.provider_id if model_identity else None,
+        model_id=model_identity.model_id if model_identity else None,
+    )
+    committed = [user_message, assistant_message]
+    result = store.append_messages_if_revision(session.id, session.revision, committed)
+    if result is SessionWriteResult.CONFLICT:
+        raise StaleSessionRevisionError(
+            f"session {session.id} changed from expected revision {session.revision}"
+        )
+    if result is SessionWriteResult.NOT_FOUND:
+        raise StaleSessionRevisionError(
+            f"session {session.id} disappeared after revision {session.revision} was read"
+        )
+    return [message.to_dict() for message in committed]
+
+
+async def _generate_context_summary(
+    *,
+    project_id: str | None,
+    messages: list[dict[str, str]],
+    configured_model: str,
+    model_identity: ConfiguredModel,
+) -> SummaryModelResult:
+    """Run maintenance in an isolated governor context and return no narrative type."""
+    raw = await _get_context_maintenance_adapter(project_id).chat_send(
+        messages=messages,
+        model=configured_model,
+    )
+    outcome = classify_daemon_result(raw, configured_model)
+    if isinstance(outcome, BlockedGeneration):
+        raise ContextSummaryError("context-maintenance output was blocked")
+    if not isinstance(outcome, AuthoredGeneration):
+        raise ContextSummaryError("context-maintenance model returned no usable result")
+    if outcome.model != configured_model:
+        raise ContextSummaryError("context-maintenance model identity changed during execution")
+    return SummaryModelResult(
+        content=outcome.content,
+        usage=outcome.usage,
+        receipt_id=outcome.receipt["receipt_id"],
+        provider_id=model_identity.provider_id,
+        model_id=model_identity.model_id,
+    )
+
+
+async def _opportunistic_context_maintenance(
+    *,
+    project_id: str | None,
+    session_id: str,
+    writing_model: ConfiguredModel | None,
+) -> None:
+    """Refresh derived context after commit without delaying or mutating the story."""
+    try:
+        store = _get_context_summary_store(project_id)
+        policy = store.policy()
+        if not policy.enabled:
+            return
+        session = _get_session_store(project_id).get(session_id)
+        if session is None:
+            return
+        encoding = writing_model.tokenizer_encoding if writing_model else policy.tokenizer_encoding
+        multiplier = (
+            writing_model.token_safety_multiplier
+            if writing_model
+            else policy.token_safety_multiplier
+        )
+        counter = TiktokenCounter(encoding, multiplier)
+        history_tokens = counter.count_messages(
+            [{"role": item.role, "content": item.content} for item in session.messages]
+        )
+        if history_tokens < int(policy.application_tokens * policy.maintenance_watermark):
+            return
+        source_messages = choose_summary_prefix(
+            session,
+            [],
+            "Continue the story.",
+            policy,
+            counter,
+            additional_reserve_tokens=5_000,
+        )
+        if not source_messages:
+            return
+        try:
+            existing = store.load(session)
+        except ContextSummaryError:
+            existing = None
+        if existing is not None and len(existing.source.covered_message_ids) >= len(
+            source_messages
+        ):
+            return
+        catalog = _configured_provider_catalog()
+        if catalog is None:
+            raise ContextSummaryError("context maintenance requires configured model providers")
+        maintenance_model = catalog.require_available(MARGINALIA_CONTEXT_MAINTENANCE_MODEL)
+
+        async def generate(
+            prompt: list[dict[str, str]], configured_model: str
+        ) -> SummaryModelResult:
+            return await _generate_context_summary(
+                project_id=project_id,
+                messages=prompt,
+                configured_model=configured_model,
+                model_identity=maintenance_model,
+            )
+
+        maintainer = ContextMaintainer(
+            store=store,
+            policy=policy,
+            counter=counter,
+            configured_model=maintenance_model.id,
+            provider_id=maintenance_model.provider_id,
+            model_id=maintenance_model.model_id,
+            generate=generate,
+        )
+        summary = await maintainer.maintain(session, source_messages)
+        telemetry_logger.info(
+            "context_maintenance completed session=%s revision=%s covered_messages=%s",
+            session.id,
+            session.revision,
+            len(summary.source.covered_message_ids),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning(
+            "Opportunistic context maintenance failed session=%s",
+            session_id,
+            exc_info=True,
+        )
+
+
+def _schedule_context_maintenance(
+    *,
+    project_id: str | None,
+    session_id: str,
+    writing_model: ConfiguredModel | None,
+) -> None:
+    key = (project_id or "default", session_id)
+    try:
+        if not _get_context_summary_store(project_id).policy().enabled:
+            return
+    except Exception:
+        logger.warning("Could not inspect context-maintenance policy", exc_info=True)
+        return
+    active = _context_maintenance_tasks.get(key)
+    if active is not None and not active.done():
+        return
+    task = asyncio.create_task(
+        _opportunistic_context_maintenance(
+            project_id=project_id,
+            session_id=session_id,
+            writing_model=writing_model,
+        )
+    )
+    _context_maintenance_tasks[key] = task
+
+    def finished(completed: asyncio.Task[None]) -> None:
+        if _context_maintenance_tasks.get(key) is completed:
+            _context_maintenance_tasks.pop(key, None)
+
+    task.add_done_callback(finished)
+
+
+async def _bounded_session_messages(
+    *,
+    request: ChatCompletionRequest,
+    target: tuple[SessionStore, ChatSession, ChatMessage],
+    fixed_messages: list[dict[str, str]],
+    writing_model: ConfiguredModel | None,
+) -> list[dict[str, str]]:
+    """Build or maintain one bounded context from the durable session snapshot."""
+    _, session, pending_user = target
+    store = _get_context_summary_store(request.project_id)
+    policy = store.policy()
+    if not policy.enabled:
+        durable = [{"role": item.role, "content": item.content} for item in session.messages]
+        return [*fixed_messages, *durable, {"role": "user", "content": pending_user.content}]
+
+    encoding = writing_model.tokenizer_encoding if writing_model else policy.tokenizer_encoding
+    multiplier = (
+        writing_model.token_safety_multiplier if writing_model else policy.token_safety_multiplier
+    )
+    counter = TiktokenCounter(encoding, multiplier)
+    try:
+        summary = store.load(session)
+    except ContextSummaryError:
+        logger.warning(
+            "Context summary invalid for session %s revision %s; rebuilding",
+            session.id,
+            session.revision,
+            exc_info=True,
+        )
+        summary = None
+
+    try:
+        built = build_generation_context(
+            session=session,
+            pending_user=pending_user.content,
+            fixed_messages=fixed_messages,
+            policy=policy,
+            counter=counter,
+            summary=summary,
+        )
+    except ContextMaintenanceRequired:
+        source_messages = choose_summary_prefix(
+            session,
+            fixed_messages,
+            pending_user.content,
+            policy,
+            counter,
+        )
+        if not source_messages:
+            raise ContextTooLarge("no old story prefix is available to summarize")
+        catalog = _configured_provider_catalog()
+        if catalog is None:
+            raise ContextSummaryError("context maintenance requires configured model providers")
+        try:
+            maintenance_model = catalog.require_available(MARGINALIA_CONTEXT_MAINTENANCE_MODEL)
+        except (ProviderConfigurationError, ProviderError) as exc:
+            raise ContextSummaryError("context-maintenance model is unavailable") from exc
+
+        async def generate(
+            prompt: list[dict[str, str]], configured_model: str
+        ) -> SummaryModelResult:
+            return await _generate_context_summary(
+                project_id=request.project_id,
+                messages=prompt,
+                configured_model=configured_model,
+                model_identity=maintenance_model,
+            )
+
+        maintainer = ContextMaintainer(
+            store=store,
+            policy=policy,
+            counter=counter,
+            configured_model=maintenance_model.id,
+            provider_id=maintenance_model.provider_id,
+            model_id=maintenance_model.model_id,
+            generate=generate,
+        )
+        summary = await maintainer.maintain(session, source_messages)
+        built = build_generation_context(
+            session=session,
+            pending_user=pending_user.content,
+            fixed_messages=fixed_messages,
+            policy=policy,
+            counter=counter,
+            summary=summary,
+        )
+
+    telemetry_logger.info(
+        "context_allocation session=%s revision=%s predicted_provider_tokens=%s "
+        "application_tokens=%s full_history_tokens=%s components=%s compacted=%s "
+        "recent_messages=%s summarized_messages=%s",
+        session.id,
+        session.revision,
+        built.metrics.predicted_provider_tokens,
+        built.metrics.application_tokens,
+        built.metrics.full_history_tokens,
+        built.metrics.component_tokens,
+        built.metrics.compacted,
+        built.metrics.recent_message_count,
+        built.metrics.summarized_message_count,
+    )
+    return built.messages
+
+
 @app.post("/v1/chat/completions", response_model=None)
 async def chat_completions(
     request: ChatCompletionRequest,
-) -> ChatCompletionResponse | StreamingResponse:
+) -> ChatCompletionResponse | BlockedGenerationResponse | StreamingResponse | JSONResponse:
     """OpenAI-compatible chat completions endpoint.
 
     Delegates to the governor daemon for the full governed pipeline:
@@ -1942,29 +2495,66 @@ async def chat_completions(
     selected_model, model_identity = _resolve_configured_model(request.model)
     governed_chat = _get_governed_chat_adapter(request.project_id)
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    try:
+        commit_target = _prepare_generation_commit(request)
+    except StaleSessionRevisionError as exc:
+        return _failure_response(_generation_failure(exc))
 
-    # Persistent creative direction is part of the same message list AG governs;
-    # it is not a parallel prompt or an ungoverned provider call.
+    # These application-owned system blocks are counted before provider launch.
+    fixed_messages: list[dict[str, str]] = []
     try:
         project_context = _build_project_context_message(request.project_id)
+        canon_context = _build_fiction_canon_context_message(request.project_id)
     except CreativeProjectError as exc:
         raise HTTPException(status_code=500, detail=f"Project state error: {exc}")
     if project_context:
-        insert_idx = 0
-        for i, message in enumerate(messages):
-            if message["role"] == "system":
-                insert_idx = i + 1
-        messages.insert(insert_idx, project_context)
+        fixed_messages.append(project_context)
+    if canon_context:
+        fixed_messages.append(canon_context)
 
     # Retained donor constraint blocks are relevant only when explicitly
     # running old code/research tests; normal Marginalia is fiction-only.
     constraints_msg, contract_meta = _build_constraints_message()
     if constraints_msg:
-        insert_idx = 0
-        for i, m in enumerate(messages):
-            if m["role"] == "system":
-                insert_idx = i + 1
-        messages.insert(insert_idx, constraints_msg)
+        fixed_messages.append(constraints_msg)
+
+    try:
+        if commit_target is not None:
+            messages = await _bounded_session_messages(
+                request=request,
+                target=commit_target,
+                fixed_messages=fixed_messages,
+                writing_model=model_identity,
+            )
+        else:
+            insert_idx = 0
+            for index, message in enumerate(messages):
+                if message["role"] == "system":
+                    insert_idx = index + 1
+            for fixed in fixed_messages:
+                messages.insert(insert_idx, fixed)
+                insert_idx += 1
+            policy = _get_context_summary_store(request.project_id).policy()
+            if policy.enabled:
+                encoding = (
+                    model_identity.tokenizer_encoding
+                    if model_identity
+                    else policy.tokenizer_encoding
+                )
+                multiplier = (
+                    model_identity.token_safety_multiplier
+                    if model_identity
+                    else policy.token_safety_multiplier
+                )
+                counter = TiktokenCounter(encoding, multiplier)
+                if counter.count_messages(messages) > policy.application_tokens:
+                    raise ContextTooLarge(
+                        "stateless generation context exceeds the configured token budget"
+                    )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        return _failure_response(_generation_failure(exc))
 
     if request.stream:
         return StreamingResponse(
@@ -1978,51 +2568,64 @@ async def chat_completions(
             messages=messages,
             model=selected_model,
         )
-        governor_progress.succeeded(execution)
-    except DaemonAuthError as e:
-        governor_progress.failed(execution, "authentication")
-        raise HTTPException(
-            status_code=401,
-            detail=(
-                "Claude Code is not logged in. "
-                "Run `claude /login` in a terminal to re-authenticate."
-            ),
-        )
-    except DaemonTimeoutError as e:
-        governor_progress.failed(execution, "governor_timeout", capacity_uncertain=True)
-        raise HTTPException(status_code=504, detail=str(e))
+        outcome = classify_daemon_result(result, selected_model)
     except asyncio.CancelledError:
         governor_progress.failed(execution, "cancelled")
         raise
-    except Exception as e:
-        governor_progress.failed(execution, type(e).__name__)
-        raise HTTPException(status_code=502, detail=f"Daemon error: {e}")
+    except Exception as exc:
+        failure = _generation_failure(exc)
+        governor_progress.failed(
+            execution,
+            failure.kind.value,
+            capacity_uncertain=failure.kind is GenerationFailureKind.TIMEOUT,
+        )
+        return _failure_response(failure)
 
-    # If daemon returned a pending violation, format as violation prompt
-    if result.get("pending"):
-        return _format_violation_pending_response(
-            result,
-            result.get("model") or selected_model,
-            model_identity,
+    if isinstance(outcome, BlockedGeneration):
+        governor_progress.succeeded(execution)
+        return BlockedGenerationResponse(
+            message=GovernedChatAdapter.format_pending_message(outcome.pending),
+            model=outcome.model,
+            receipt=outcome.receipt,
         )
 
-    # Build content with optional governor footer
-    content = result.get("content", "")
-    footer = result.get("footer")
-    if footer:
-        content = f"{content}\n\n{footer}"
+    if not isinstance(outcome, AuthoredGeneration):
+        failure = _generation_failure(
+            InvalidGenerationResult("generation ended without a terminal outcome")
+        )
+        governor_progress.failed(execution, failure.kind.value)
+        return _failure_response(failure)
 
     # AG's final authority receipt is the only governed-execution receipt.
-    resolved_model = result.get("model", selected_model)
+    resolved_model = outcome.model
     if model_identity is not None and resolved_model != selected_model:
-        raise HTTPException(
-            status_code=502,
-            detail="daemon returned a different model than the explicit selection",
+        failure = _generation_failure(
+            ModelMismatchGenerationResult(
+                "daemon returned a different model than the explicit selection"
+            )
         )
+        governor_progress.failed(execution, failure.kind.value)
+        return _failure_response(failure)
     request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-    receipt = result["receipt"]
-
-    usage_data = result.get("usage") or {}
+    try:
+        committed_messages = (
+            _commit_authored_turn(commit_target, outcome, model_identity) if commit_target else []
+        )
+    except StaleSessionRevisionError as exc:
+        failure = _generation_failure(exc)
+        governor_progress.failed(execution, failure.kind.value)
+        return _failure_response(failure)
+    except Exception as exc:
+        failure = _generation_failure(exc)
+        governor_progress.failed(execution, "persistence")
+        return _failure_response(failure)
+    governor_progress.succeeded(execution)
+    if commit_target and committed_messages:
+        _schedule_context_maintenance(
+            project_id=request.project_id,
+            session_id=commit_target[1].id,
+            writing_model=model_identity,
+        )
     return ChatCompletionResponse(
         id=request_id,
         created=int(time.time()),
@@ -2032,16 +2635,18 @@ async def chat_completions(
         choices=[
             ChatCompletionChoice(
                 index=0,
-                message=ChatMessage(role="assistant", content=content),
+                message=ChatMessage(role="assistant", content=outcome.content),
                 finish_reason="stop",
             )
         ],
         usage=Usage(
-            prompt_tokens=usage_data.get("prompt_tokens", 0),
-            completion_tokens=usage_data.get("completion_tokens", 0),
-            total_tokens=usage_data.get("total_tokens", 0),
+            prompt_tokens=outcome.usage["prompt_tokens"],
+            completion_tokens=outcome.usage["completion_tokens"],
+            total_tokens=outcome.usage["total_tokens"],
         ),
-        receipt=receipt,
+        receipt=outcome.receipt,
+        governor_status=outcome.footer,
+        committed_messages=committed_messages,
     )
 
 
@@ -2092,85 +2697,66 @@ async def _stream_via_daemon(
     model: str,
     model_identity: ConfiguredModel | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Stream response via daemon in OpenAI SSE format."""
+    """Emit SSE only after a typed final outcome is known.
+
+    AG contract v1 permits provider failures to appear as content chunks, so
+    Marginalia deliberately uses the transactional chat.send path here.  This
+    preserves the SSE response shape without exposing untyped partial output.
+    """
     request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-    final_result: dict | None = None
     turn_id = f"turn-{uuid.uuid4().hex[:12]}"
     execution = governor_progress.begin(model_identity.provider_id if model_identity else "codex")
 
     try:
-        async for delta, final in governed_chat.chat_stream(messages=messages, model=model):
-            if delta:
-                sse_chunk = {
-                    "id": request_id,
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": model,
-                    "provider_id": model_identity.provider_id if model_identity else None,
-                    "model_id": model_identity.model_id if model_identity else None,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": delta},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(sse_chunk)}\n\n"
-            if final is not None:
-                final_result = final
+        result = await governed_chat.chat_send(messages=messages, model=model)
+        outcome = classify_daemon_result(result, model)
 
-        if final_result is None:
-            raise RuntimeError("AG stream ended without a final governed outcome")
-        governor_progress.succeeded(execution)
-
-        resolved_model = final_result.get("model") or model
+        resolved_model = outcome.model
         if model_identity is not None and resolved_model != model:
-            raise RuntimeError("daemon returned a different model than the explicit selection")
-        receipt = final_result["receipt"]
+            raise InvalidGenerationResult(
+                "daemon returned a different model than the explicit selection"
+            )
 
-        # If daemon returned a pending violation, emit it as a final chunk
-        if final_result and final_result.get("pending"):
-            pending = final_result["pending"]
-            prompt = governed_chat.format_pending_message(pending)
-            sse_chunk = {
+        if isinstance(outcome, BlockedGeneration):
+            blocked_chunk = {
+                "outcome": "blocked",
                 "id": request_id,
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": resolved_model,
                 "provider_id": model_identity.provider_id if model_identity else None,
                 "model_id": model_identity.model_id if model_identity else None,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": f"\n\n{prompt}"},
-                        "finish_reason": None,
-                    }
-                ],
+                "message": GovernedChatAdapter.format_pending_message(outcome.pending),
+                "receipt": outcome.receipt,
             }
-            yield f"data: {json.dumps(sse_chunk)}\n\n"
+            governor_progress.succeeded(execution)
+            yield f"data: {json.dumps(blocked_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
 
-        # If daemon returned a footer, emit it
-        if final_result and final_result.get("footer"):
-            sse_chunk = {
-                "id": request_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": resolved_model,
-                "provider_id": model_identity.provider_id if model_identity else None,
-                "model_id": model_identity.model_id if model_identity else None,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": f"\n\n{final_result['footer']}"},
-                        "finish_reason": None,
-                    }
-                ],
-            }
-            yield f"data: {json.dumps(sse_chunk)}\n\n"
+        if not isinstance(outcome, AuthoredGeneration):
+            raise InvalidGenerationResult("stream ended without authored output")
 
-        # Final done chunk carries AG's authoritative linkage for API clients.
+        content_chunk = {
+            "outcome": "authored",
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": resolved_model,
+            "provider_id": model_identity.provider_id if model_identity else None,
+            "model_id": model_identity.model_id if model_identity else None,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": outcome.content},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        yield f"data: {json.dumps(content_chunk)}\n\n"
+
         done_chunk = {
+            "outcome": "authored",
             "id": request_id,
             "object": "chat.completion.chunk",
             "created": int(time.time()),
@@ -2185,65 +2771,35 @@ async def _stream_via_daemon(
                 }
             ],
             "turn_id": turn_id,
-            "receipt": receipt,
+            "receipt": outcome.receipt,
+            "governor_status": outcome.footer,
         }
+        governor_progress.succeeded(execution)
         yield f"data: {json.dumps(done_chunk)}\n\n"
         yield "data: [DONE]\n\n"
 
-    except DaemonAuthError:
-        governor_progress.failed(execution, "authentication")
-        error_chunk = {
-            "error": {
-                "message": (
-                    "Claude Code is not logged in. "
-                    "Run `claude /login` in a terminal to re-authenticate."
-                ),
-                "type": "auth_error",
-            }
-        }
-        yield f"data: {json.dumps(error_chunk)}\n\n"
-    except DaemonTimeoutError as e:
-        governor_progress.failed(execution, "governor_timeout", capacity_uncertain=True)
-        error_chunk = {"error": {"message": str(e), "type": "timeout"}}
-        yield f"data: {json.dumps(error_chunk)}\n\n"
     except asyncio.CancelledError:
         governor_progress.failed(execution, "cancelled")
         raise
-    except Exception as e:
-        governor_progress.failed(execution, type(e).__name__)
-        error_chunk = {"error": {"message": str(e), "type": "server_error"}}
+    except Exception as exc:
+        failure = _generation_failure(exc)
+        governor_progress.failed(
+            execution,
+            failure.kind.value,
+            capacity_uncertain=failure.kind is GenerationFailureKind.TIMEOUT,
+        )
+        error_chunk = {
+            "outcome": "failure",
+            "failure_type": failure.kind.value,
+            "message": failure.message,
+            "retryable": failure.retryable,
+            "incident_id": failure.incident_id,
+            "error": {
+                "message": failure.message,
+                "type": failure.kind.value,
+            },
+        }
         yield f"data: {json.dumps(error_chunk)}\n\n"
-
-
-def _format_violation_pending_response(
-    pending: dict[str, Any],
-    model: str,
-    model_identity: ConfiguredModel | None = None,
-) -> ChatCompletionResponse:
-    """Format a pending violation as a ChatCompletionResponse.
-
-    The response carries AG's blocking authority receipt but renders only the
-    ordinary-user resolution prompt.
-    """
-    p = pending.get("pending", pending)
-    prompt_text = GovernedChatAdapter.format_pending_message(p)
-
-    return ChatCompletionResponse(
-        id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
-        created=int(time.time()),
-        model=model,
-        provider_id=model_identity.provider_id if model_identity else None,
-        model_id=model_identity.model_id if model_identity else None,
-        choices=[
-            ChatCompletionChoice(
-                index=0,
-                message=ChatMessage(role="assistant", content=prompt_text),
-                finish_reason="stop",
-            )
-        ],
-        usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
-        receipt=pending["receipt"],
-    )
 
 
 # ============================================================================
@@ -2274,6 +2830,7 @@ class ForkSessionRequest(BaseModel):
 class AppendMessageRequest(BaseModel):
     role: str
     content: str
+    outcome: Literal["authored"] | None = None
     model: str | None = None
     provider_id: str | None = None
     model_id: str | None = None
@@ -2489,15 +3046,29 @@ async def update_session(session_id: str, request: UpdateSessionRequest) -> dict
     if request.project_id is not None and request.project_id != lifecycle.project_id:
         target_project = _project_record(request.project_id)
         target_store = _get_session_store(target_project.id)
-        session.context_id = target_project.context_id
-        target_store._write_session(session)
-        lifecycle = _get_library_store().update_conversation(
+        moved_lifecycle: ConversationLifecycle | None = None
+
+        def commit_lifecycle_move() -> None:
+            nonlocal moved_lifecycle
+            moved_lifecycle = _get_library_store().update_conversation(
+                session_id,
+                project_id=target_project.id,
+                archived=request.archived,
+                pinned=request.pinned,
+            )
+
+        moved_session = store.move_to(
             session_id,
-            project_id=target_project.id,
-            archived=request.archived,
-            pinned=request.pinned,
+            target_store,
+            target_project.context_id,
+            commit_lifecycle_move,
         )
-        store.delete(session_id)
+        if moved_session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if moved_lifecycle is None:
+            raise HTTPException(status_code=500, detail="conversation move was not committed")
+        session = moved_session
+        lifecycle = moved_lifecycle
     else:
         lifecycle = _get_library_store().update_conversation(
             session_id,
@@ -2556,6 +3127,13 @@ async def fork_session(
 async def append_message(session_id: str, request: AppendMessageRequest) -> dict[str, Any]:
     """Append a message to a session (write-through target)."""
     _, store, _ = _conversation_location(session_id)
+    if request.role == "assistant" and request.outcome != "authored":
+        raise HTTPException(
+            status_code=422,
+            detail="assistant messages require an explicit authored outcome",
+        )
+    if request.role not in {"user", "assistant", "system"}:
+        raise HTTPException(status_code=422, detail="unsupported conversation role")
     if (request.provider_id is None) != (request.model_id is None):
         raise HTTPException(
             status_code=422,

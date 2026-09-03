@@ -60,6 +60,15 @@ jobs:
       - name: Check formatting
         run: make fmt-check
 
+      - name: Check browser JavaScript syntax
+        run: >-
+          node -e
+          'const fs=require("fs");
+          const html=fs.readFileSync("src/gov_webui/static/index.html","utf8");
+          const parts=html.split("<script>");
+          if(parts.length<2) throw new Error("inline script not found");
+          new Function(parts[1].split("</script>")[0]);'
+
       - name: Build Python distributions
         run: make build
 

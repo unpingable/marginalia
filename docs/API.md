@@ -33,7 +33,7 @@ context also fails closed. Existing conversations are enrolled into the
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/v1/chat/completions` | POST | Send or stream an OpenAI-compatible governed fiction response |
+| `/v1/chat/completions` | POST | Generate a governed fiction response with a typed terminal outcome |
 | `/v1/models` | GET | Discover models advertised by AG's configured provider |
 | `/v1/backends` | GET | Report the provider that actually owns governed execution |
 | `/v1/backends/switch` | POST | Always returns `409`; provider configuration belongs to AG |
@@ -43,19 +43,43 @@ context also fails closed. Existing conversations are enrolled into the
 Authority receipts remain part of the application/AG correctness contract but
 are not presented as ordinary writing UI.
 
+Terminal outcomes are explicitly `authored`, `blocked`, or `failure`.
+Failures use a non-2xx response with `failure_type`, a safe `message`,
+`retryable`, and an `incident_id` that correlates with full server logs; they
+never contain `choices`. A session-backed request supplies `session_id`
+and exactly one new user message. Marginalia commits that prompt and the
+validated authored response together only on `authored`; all other outcomes
+leave durable conversation history unchanged. The final append is a durable
+revision compare-and-swap. If another tab or API writer changes the session
+first, Marginalia returns a `409` failure with `failure_type=stale_context`.
+`stream=true` retains SSE
+framing but waits for the transactional `chat.send` result before emitting
+content because AG contract v1 does not type provider failures in partial
+chunks.
+
+Clients must inspect `outcome` before reading `choices`. Only `authored`
+responses carry assistant choices. Blocked and failure payloads are operational
+states, and SSE clients receive the same outcome discriminator after terminal
+validation rather than incremental provider deltas.
+
 ## Conversations
 
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/sessions/` | GET / POST | Search, filter, sort, or create conversations in a project |
 | `/sessions/{id}` | GET / PATCH / DELETE | Read, rename, pin, archive, move, or remove one conversation |
-| `/sessions/{id}/messages` | POST | Persist one conversation message |
+| `/sessions/{id}/messages` | POST | Import one message; assistant text requires `outcome=authored` |
 | `/sessions/{id}/fork` | POST | Fork through `message_id`, retaining explicit parent metadata |
 | `/v1/conversations/tree` | GET | Read explicit parent/child branch structure |
 
 `GET /sessions/` supports `view=active|archived|pinned|all`, `q`, and
 `sort=updated_desc|updated_asc|title`. Deletes are immediate at the API layer;
 the writing-room UI requires confirmation.
+
+Session payloads include a monotonically increasing `revision`. Direct message
+imports, title/model updates, project moves, and successful generated turns
+advance it. Assistant imports require `outcome=authored`; operational strings
+cannot be imported through that role without the explicit authored assertion.
 
 ## Story bible and canon capture
 
@@ -127,3 +151,23 @@ administration routes remain in source only to keep their historical tests
 available during staged deletion. They return `404` in a normal Marginalia
 runtime and are omitted from `/api/info`. The test-only
 `MARGINALIA_ENABLE_DONOR_ROUTES=1` switch is not a supported product mode.
+
+## Long-session generation outcomes
+
+When a project has bounded context enabled, preflight may add these operational
+failures:
+
+| HTTP | `failure_type` | Meaning |
+|---|---|---|
+| 503 | `context_maintenance` | A required source-valid summary could not be prepared or loaded |
+| 422 | `context_too_large` | Mandatory project/canon/prompt or recent context cannot fit the configured allocation |
+
+Both payloads retain the normal typed failure shape and contain no `choices`.
+They commit neither the pending user prompt nor assistant text. The writer's
+draft stays in browser draft state for retry.
+
+Session-backed `stream=true` requests are rejected because transactional
+session commit and typed finality cannot safely expose partial output under the
+current AG contract. Stateless streaming remains terminally gated. Clients
+must not treat an HTTP success code, an SSE data frame, or locally rendered
+status prose as authored content without `outcome=authored`.

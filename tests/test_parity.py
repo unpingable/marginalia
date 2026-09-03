@@ -79,27 +79,21 @@ class TestChatDelegatesToDaemon:
         call_kwargs = mock.chat_send.call_args[1]
         assert call_kwargs["messages"] == [{"role": "user", "content": "test"}]
 
-    def test_streaming_calls_daemon_chat_stream(self, client, adapter_mod):
-        """POST /v1/chat/completions (stream=true) calls daemon chat.stream."""
-
-        async def mock_stream(*args, **kwargs):
-            yield ("chunk", None)
-            yield (
-                None,
-                {
-                    "content": "chunk",
-                    "model": "m",
-                    "usage": {},
-                    "violations": [],
-                    "footer": None,
-                    "pending": None,
-                    "receipt": authority_receipt(),
-                },
-            )
-
+    def test_streaming_uses_transactional_daemon_send(self, client, adapter_mod):
+        """SSE waits for typed chat.send finality instead of unsafe partial chunks."""
         mock = AsyncMock()
-        mock.chat_stream = MagicMock(return_value=mock_stream())
-        mock.connect = AsyncMock()
+        mock.chat_send = AsyncMock(
+            return_value={
+                "content": "chunk",
+                "model": "m",
+                "usage": {},
+                "violations": [],
+                "footer": None,
+                "pending": None,
+                "receipt": authority_receipt(),
+            }
+        )
+        mock.chat_stream = MagicMock()
         adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
@@ -111,8 +105,9 @@ class TestChatDelegatesToDaemon:
             },
         )
         assert response.status_code == 200
-        # Daemon chat_stream was called (via the MagicMock)
-        mock.chat_stream.assert_called_once()
+        mock.chat_send.assert_awaited_once()
+        mock.chat_stream.assert_not_called()
+        assert '"outcome": "authored"' in response.text
 
     def test_violations_from_daemon_are_surfaced(self, client, adapter_mod):
         """Daemon violations are included in the response."""
@@ -144,13 +139,13 @@ class TestChatDelegatesToDaemon:
             },
         )
         assert response.status_code == 200
-        # Response should contain violation prompt, not empty content
         data = response.json()
-        content = data["choices"][0]["message"]["content"]
-        assert content  # Violation prompt was generated
+        assert data["outcome"] == "blocked"
+        assert data["message"]
+        assert "choices" not in data
 
-    def test_footer_from_daemon_appended(self, client, adapter_mod):
-        """Daemon footer is appended to response content."""
+    def test_footer_from_daemon_is_operational_metadata(self, client, adapter_mod):
+        """Daemon footer cannot become authored content."""
         mock = AsyncMock()
         mock.chat_send = AsyncMock(
             return_value={
@@ -175,8 +170,8 @@ class TestChatDelegatesToDaemon:
         )
         data = response.json()
         content = data["choices"][0]["message"]["content"]
-        assert "Hello" in content
-        assert "[Governor] OK" in content
+        assert content == "Hello"
+        assert data["governor_status"] == "[Governor] OK — 3 anchors checked"
 
     def test_bridge_not_used_for_chat(self, client, adapter_mod):
         """ChatBridge is NOT called when chat endpoint is hit."""
@@ -231,7 +226,9 @@ class TestAuthErrorHandling:
             },
         )
         assert response.status_code == 401
-        assert "claude /login" in response.json()["detail"].lower()
+        assert response.json()["outcome"] == "failure"
+        assert response.json()["failure_type"] == "authentication"
+        assert "claude /login" in response.json()["message"].lower()
 
     def test_non_streaming_generic_error_returns_502(self, client, adapter_mod):
         """Non-auth errors still produce HTTP 502."""
@@ -253,13 +250,9 @@ class TestAuthErrorHandling:
         """DaemonAuthError on chat.stream emits an auth_error SSE event."""
         from gov_webui.daemon_client import DaemonAuthError
 
-        async def mock_stream(*args, **kwargs):
-            raise DaemonAuthError("not logged in")
-            yield  # pragma: no cover — makes this an async generator
-
         mock = AsyncMock()
-        mock.chat_stream = MagicMock(return_value=mock_stream())
-        mock.connect = AsyncMock()
+        mock.chat_send = AsyncMock(side_effect=DaemonAuthError("not logged in"))
+        mock.chat_stream = MagicMock()
         adapter_mod._governed_chat_adapter = mock
 
         response = client.post(
@@ -272,7 +265,8 @@ class TestAuthErrorHandling:
         )
         assert response.status_code == 200  # SSE always starts 200
         body = response.text
-        assert "auth_error" in body
+        assert '"outcome": "failure"' in body
+        assert '"failure_type": "authentication"' in body
         assert "claude /login" in body.lower()
 
 

@@ -24,7 +24,7 @@ those legacy dependency paths bypass Marginalia's lifecycle boundary.
 | Ollama / OpenAI / Kimi API | OpenAI-compatible HTTP/SSE | Separate connect, read-idle, and total execution timeouts; async cancellation closes response/client | HTTP response and owned client are closed | Classified connect/read/transport/total-deadline error | Same serialized path; readiness reports old in-flight work |
 | Anthropic API | Native Messages HTTP/SSE | Same layered HTTP timeout semantics | HTTP response and owned client are closed | Same classified visible failures | Same serialized path; readiness reports old in-flight work |
 | Provider wrapper | Supervised Python subprocess around every row above | `MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS`; independent hard envelope | Enumerates descendants, TERM, bounded grace, KILL, reaps direct child | Visible hard-deadline error | Guarantees Agent Governor's backend await returns |
-| Marginalia↔AG RPC | Framed Unix socket with one client lock | Ordinary and chat RPC deadlines include queue wait, connect, write, and reply | Timeout/cancellation closes stale framing; lock is always released | HTTP 504 for governor timeout; stream error chunk for streaming | Prevents a caller-side lock/socket wedge; cannot cancel arbitrary AG internals by itself |
+| Marginalia↔AG RPC | Framed Unix socket with one client lock | Ordinary and chat RPC deadlines include queue wait, connect, write, and reply | Timeout/cancellation closes stale framing; lock is always released | Typed HTTP failure or typed SSE failure event; never authored content | Prevents a caller-side lock/socket wedge; finality-gated SSE avoids AG v1 error-as-delta ambiguity |
 
 Agent Governor's direct backend classes remain in the pinned dependency for
 other Agent Governor applications, but are not a supported Marginalia runtime
@@ -51,6 +51,27 @@ Cancellation closes network streams and stale RPC framing. Local command and
 native subprocess cancellation also terminates their process groups. A
 provider failure never creates, deletes, or rewrites a Marginalia session or
 message; persistence remains an explicit application operation.
+
+## Narrative commit concurrency
+
+A session-backed request is generated from one persisted session revision. Its
+prompt and validated authored response commit together only if a file-locked
+compare-and-swap finds that same revision. Direct imports, title/model changes,
+project moves, and other successful session writes advance the revision. A
+conflict returns typed `stale_context` operational state and preserves the
+newer durable history exactly. Session files are replaced atomically so readers
+cannot observe partial JSON.
+
+Provider, RPC, validation, and persistence exceptions receive a short incident
+ID. The browser receives a bounded failure-class summary and that ID; full raw
+CLI/RPC/stderr diagnostics remain in server logs under the same ID.
+
+Marginalia does not yet offer durable request-attempt idempotency. If a server
+commit succeeds but its HTTP response is lost, a client that reloads current
+history can safely continue, but an automatic replay of the old delivery cannot
+recover the original response by attempt ID. Correct duplicate-in-flight and
+post-commit replay semantics require durable, session-scoped attempt claims and
+terminal records; a request field alone would not provide the guarantee.
 
 ## Health semantics
 
@@ -97,3 +118,56 @@ The recommended initial production matrix is:
 
 The worker persists last-attempt timestamps in the same JSONL record, so a
 container restart does not cause an immediate duplicate probe burst.
+
+## Bounded long-fiction context
+
+Durable session history remains complete. When a project's bounded-context
+policy is enabled, Marginalia constructs provider input from counted components:
+
+1. project direction and accepted Story Bible constraints;
+2. a source-bound derived summary of an exact older message prefix, when needed;
+3. the unsummarized recent authored suffix;
+4. the pending user prompt.
+
+The initial policy targets at most 48,000 predicted provider-input tokens:
+32,000 application-controlled tokens plus a conservative 16,000-token
+Agent Governor/provider allowance. A separate 8,000-token output reserve is
+recorded for end-to-end context-window planning. Agent Governor contract v1
+does not accept a native output cap on `chat.send`, so that reserve is planning
+headroom rather than a provider-enforced completion limit.
+
+Counts use a real configured tokenizer (`o200k_base` by default), optional
+model-specific safety multiplication, and message framing overhead. Marginalia
+preflights before launching either the writing provider or context-maintenance
+provider. Mandatory project/canon/prompt input that cannot fit returns typed
+`context_too_large`; unavailable or invalid maintenance returns typed
+`context_maintenance`. Neither outcome mutates narrative history.
+
+A summary is derived cache state, never canon or authored prose. It records the
+session/context, observed revision, every covered message ID, a SHA-256 digest
+of the exact covered prefix, configured/provider/upstream model identity,
+prompt-schema version, usage, and authority receipt IDs. Structured sections
+separate narrative recap, character state, observed facts, unresolved threads,
+time/location state, and uncertainties. Every item cites covered source message
+IDs. A source edit, reorder, deletion, context mismatch, malformed schema,
+foreign evidence citation, or oversized result invalidates the summary.
+
+Maintenance runs in a dedicated `<context>-maintenance` AG context. Chunk work and bounded pairwise merge work are atomically persisted outside
+sessions so interrupted prebuilds can resume and later prefix expansion can
+reuse unchanged inputs. Merge outputs have hard structured compaction limits. It may leave a `.work.json`
+operational trace after failure; this is never included in story history,
+search, forks, canon capture, manuscript operations, or provider context.
+Completed summaries are also derived files and can be rebuilt from durable
+history.
+
+Projects are activated independently only after required summaries validate.
+After activation, successful authored commits schedule a nonblocking refresh at
+75% of the application budget. A generation that reaches the hard budget first
+performs finality-gated maintenance before provider launch. Exactly zero
+narrative mutation occurs until a validated authored result wins the existing
+session-revision compare-and-swap.
+
+This release does not automatically retry or switch writing models. Those
+remain a future attempt-orchestration layer and must preserve one logical
+attempt ID, the same CAS boundary, and the rule that blocks, cancellations,
+conflicts, and invalid state are not silently retried.
