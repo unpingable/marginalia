@@ -584,6 +584,11 @@ class LocalCommandTransport:
                     "--verbose",
                     "--model",
                     self.model.model_id,
+                    "--tools",
+                    "",
+                    "--no-session-persistence",
+                    "--disable-slash-commands",
+                    "--safe-mode",
                 ],
                 prompt.encode("utf-8"),
             )

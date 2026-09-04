@@ -129,7 +129,9 @@ deployment-local. The Kimi Code adapter invokes
 one explicit model in noninteractive `stream-json` mode and uses the final
 assistant message. The Claude Code adapter invokes `claude --print` with JSON
 output, passes the governed prompt over standard input, and returns the result
-plus reported token usage. Both adapters apply the configured timeout,
+plus reported token usage. It disables tools, slash commands, project/user
+customizations, and session persistence so a text completion cannot turn into
+an ambient coding-agent workflow. Both adapters apply the configured timeout,
 terminate their process group on timeout/cancellation, and normalize command
 failures without exposing raw stderr. Local commands currently emit whole
 assistant messages rather than token deltas, so Marginalia receives a bounded

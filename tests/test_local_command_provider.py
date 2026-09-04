@@ -223,6 +223,11 @@ print(json.dumps({
         "--verbose",
         "--model",
         "sonnet",
+        "--tools",
+        "",
+        "--no-session-persistence",
+        "--disable-slash-commands",
+        "--safe-mode",
     ]
     assert result["prompt"] == "Keep the voice spare."
     assert response.model_id == "sonnet"
