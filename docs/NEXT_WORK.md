@@ -14,16 +14,27 @@ work file contains eight chunks and seven merges. Multiple Claude maintenance
 calls, including a reduced single-child merge, reached the fixed 240-second
 CLI deadline. A harmless control completed in about three seconds, proving the
 route was reachable; its content-free status event reported 92% utilization of
-the current five-hour allowance. That is operational evidence, not proof that
-rate-window utilization caused the summary latency.
+the current five-hour allowance.
+
+The allowance reset at 15:20 EDT. A post-reset control reported 0–1%
+utilization and completed in about two seconds. The unchanged checkpointed
+summary request was then retried once and again timed out at 240 seconds with no
+checkpoint progress. Capacity-window utilization is therefore not a supported
+root cause. The remaining defect is specific to the structured summary request
+or the Claude Code adapter mode used for it.
 
 The authoritative story remains untouched: preflight reports one workspace,
 two projects, seven sessions, and 718 messages. `context-validate` correctly
 reports `ready: false`, coverage 51, required coverage 62. The valid 51-message
 summary and all checkpointed work remain available. Do not delete either.
 
-Resume recovery only when the Claude maintenance route is expected to have
-capacity, using:
+Do not keep rerunning the unchanged live request. First reproduce the failing
+summary shape in an isolated/test context and qualify a pure-completion Claude
+invocation. The current adapter launches `claude --print` with the general
+Claude Code environment; the installed CLI supports tool-free, non-persistent,
+safe-mode flags, but those must be regression-tested across configured Claude
+writing routes before changing the shared adapter. Once a bounded correction is
+qualified, resume the existing checkpoint using:
 
 ```bash
 docker exec marginalia python3 -m gov_webui.ops \
@@ -44,9 +55,9 @@ Then require all of the following before removing maintenance mode:
 
 Only then remove `/data/marginalia/maintenance.txt` and confirm `/v1/system`
 reports maintenance inactive. Do not use Erin's next prompt as a control. If
-small derived-summary calls continue to time out after provider capacity is no
-longer suspect, stop and design a separately reviewed maintenance-provider job
-boundary; do not raise the timeout or silently switch models.
+derived-summary calls still time out after a qualified adapter correction, stop
+and design a separately reviewed maintenance-provider job boundary; do not
+raise the timeout or silently switch models.
 
 After recovery, freeze this baseline long enough to collect real usage evidence
 before starting another broad reliability campaign. Writer reports and
