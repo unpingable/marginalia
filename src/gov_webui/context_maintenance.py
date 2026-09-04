@@ -42,17 +42,32 @@ class SummaryModelResult:
 MERGED_SUMMARY_MAX_FACTS = 60
 MERGED_SUMMARY_MAX_TEXT_CHARS = 300
 MERGED_SUMMARY_MAX_EVIDENCE_IDS = 4
+DENSE_CHILD_TARGET_FACTS = 28
+DENSE_CHILD_MAX_FACTS = 32
+DENSE_CHILD_MAX_TEXT_CHARS = 240
+DENSE_CHILD_MAX_EVIDENCE_IDS = 3
 
 
 def _validate_merged_sections(sections: SummarySections) -> None:
+    _validate_sections_with_limits(
+        sections,
+        max_facts=MERGED_SUMMARY_MAX_FACTS,
+        max_text_chars=MERGED_SUMMARY_MAX_TEXT_CHARS,
+        max_evidence_ids=MERGED_SUMMARY_MAX_EVIDENCE_IDS,
+    )
+
+
+def _validate_sections_with_limits(
+    sections: SummarySections,
+    *,
+    max_facts: int,
+    max_text_chars: int,
+    max_evidence_ids: int,
+) -> None:
     items = [item for name in sections.__class__.model_fields for item in getattr(sections, name)]
     longest_text = max((len(item.text) for item in items), default=0)
     most_evidence = max((len(item.evidence_message_ids) for item in items), default=0)
-    if (
-        len(items) > MERGED_SUMMARY_MAX_FACTS
-        or longest_text > MERGED_SUMMARY_MAX_TEXT_CHARS
-        or most_evidence > MERGED_SUMMARY_MAX_EVIDENCE_IDS
-    ):
+    if len(items) > max_facts or longest_text > max_text_chars or most_evidence > max_evidence_ids:
         raise ContextSummaryError(
             "merged context summary exceeds structured compaction limits "
             f"(items={len(items)}, longest_text={longest_text}, "
@@ -92,6 +107,7 @@ def _merge_prompt(
     *,
     repair: bool = False,
     aggressive: bool = False,
+    rebalance: bool = False,
 ) -> list[dict[str, str]]:
     schema = SummarySections.model_json_schema()
     payload = [
@@ -101,11 +117,27 @@ def _merge_prompt(
         }
         for chunk in chunks
     ]
-    strict = repair or aggressive
-    fact_limit = 45 if strict else MERGED_SUMMARY_MAX_FACTS
-    text_limit = 240 if strict else MERGED_SUMMARY_MAX_TEXT_CHARS
-    evidence_limit = 3 if strict else MERGED_SUMMARY_MAX_EVIDENCE_IDS
-    if repair:
+    strict = repair or aggressive or rebalance
+    fact_limit = (
+        DENSE_CHILD_TARGET_FACTS if rebalance else 45 if strict else MERGED_SUMMARY_MAX_FACTS
+    )
+    text_limit = (
+        DENSE_CHILD_MAX_TEXT_CHARS
+        if rebalance
+        else 240
+        if strict
+        else MERGED_SUMMARY_MAX_TEXT_CHARS
+    )
+    evidence_limit = (
+        DENSE_CHILD_MAX_EVIDENCE_IDS
+        if rebalance
+        else 3
+        if strict
+        else MERGED_SUMMARY_MAX_EVIDENCE_IDS
+    )
+    if rebalance:
+        repair_note = "This input is too dense for a bounded parent merge; compact it first. "
+    elif repair:
         repair_note = "A previous merge was unusable; compact more aggressively. "
     elif aggressive:
         repair_note = "The inputs are dense; compact aggressively. "
@@ -254,6 +286,89 @@ class ContextMaintainer:
                         used_merges.append(cached)
                         next_level.append(cached)
                         continue
+                    input_facts = sum(
+                        len(getattr(item.sections, name))
+                        for item in group
+                        for name in item.sections.__class__.model_fields
+                    )
+                    if input_facts > MERGED_SUMMARY_MAX_FACTS:
+                        balanced_group: list[SummaryWorkChunk] = []
+                        for child in group:
+                            child_fact_count = sum(
+                                len(getattr(child.sections, name))
+                                for name in child.sections.__class__.model_fields
+                            )
+                            if child_fact_count <= DENSE_CHILD_MAX_FACTS:
+                                balanced_group.append(child)
+                                continue
+                            child_digest = hashlib.sha256(
+                                f"dense-child-v1:{child.source_sha256}".encode("ascii")
+                            ).hexdigest()
+                            cached_child = completed_merges.get(child_digest)
+                            if (
+                                cached_child is not None
+                                and cached_child.message_ids == child.message_ids
+                            ):
+                                if cached_child.sections.evidence_ids() - set(child.message_ids):
+                                    raise ContextSummaryError(
+                                        "cached dense child cited messages outside its source"
+                                    )
+                                used_merges.append(cached_child)
+                                balanced_group.append(cached_child)
+                                continue
+                            prompt = _merge_prompt([child], rebalance=True)
+                            if self.counter.count_messages(prompt) > self.policy.application_tokens:
+                                raise ContextTooLarge(
+                                    "context-maintenance dense-child merge exceeds its input budget"
+                                )
+                            reduced = await self.generate(prompt, self.configured_model)
+                            if (
+                                self.counter.count_text(reduced.content)
+                                > self.policy.summary_max_tokens
+                            ):
+                                raise ContextTooLarge(
+                                    "dense-child context summary exceeds the summary budget"
+                                )
+                            reduced_sections = parse_summary_sections(reduced.content)
+                            _validate_sections_with_limits(
+                                reduced_sections,
+                                max_facts=DENSE_CHILD_MAX_FACTS,
+                                max_text_chars=DENSE_CHILD_MAX_TEXT_CHARS,
+                                max_evidence_ids=DENSE_CHILD_MAX_EVIDENCE_IDS,
+                            )
+                            if reduced_sections.evidence_ids() - set(child.message_ids):
+                                raise ContextSummaryError(
+                                    "dense-child context summary cited messages outside its source"
+                                )
+                            reduced_item = SummaryWorkChunk(
+                                source_sha256=child_digest,
+                                message_ids=child.message_ids,
+                                sections=reduced_sections,
+                                usage=reduced.usage,
+                                receipt_id=reduced.receipt_id,
+                                provider_id=reduced.provider_id,
+                                model_id=reduced.model_id,
+                            )
+                            completed_merges[child_digest] = reduced_item
+                            saved_merges.append(reduced_item)
+                            used_merges.append(reduced_item)
+                            balanced_group.append(reduced_item)
+                            work = work.model_copy(
+                                update={"merges": saved_merges, "updated_at": utc_now()}
+                            )
+                            self.store.save_work(work)
+                        group = balanced_group
+                        digest_payload = "".join(item.source_sha256 for item in group)
+                        digest = hashlib.sha256(digest_payload.encode("ascii")).hexdigest()
+                        cached = completed_merges.get(digest)
+                        if cached is not None and cached.message_ids == message_ids:
+                            if cached.sections.evidence_ids() - set(message_ids):
+                                raise ContextSummaryError(
+                                    "cached balanced merge cited messages outside its source group"
+                                )
+                            used_merges.append(cached)
+                            next_level.append(cached)
+                            continue
                     merged: SummaryModelResult | None = None
                     merged_sections: SummarySections | None = None
                     input_facts = sum(

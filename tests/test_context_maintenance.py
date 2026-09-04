@@ -396,7 +396,7 @@ async def test_many_chunks_merge_with_bounded_hierarchical_fan_in(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_dense_merge_compacts_aggressively_on_first_provider_call(
+async def test_dense_merge_rebalances_children_before_parent_provider_call(
     tmp_path: Path,
 ) -> None:
     session = make_session()
@@ -405,15 +405,16 @@ async def test_dense_merge_compacts_aggressively_on_first_provider_call(
         SessionMessage.create("assistant", words(1_100, "second")),
     ]
     session.message_count = len(session.messages)
-    saw_dense_merge = False
+    rebalance_calls = 0
 
     async def generate(messages, model):
-        nonlocal saw_dense_merge
+        nonlocal rebalance_calls
         payload = json.loads(messages[-1]["content"])
         if payload and "source_message_ids" in payload[0]:
-            assert "The inputs are dense" in messages[0]["content"]
-            assert "no more than 45 items total" in messages[0]["content"]
-            saw_dense_merge = True
+            if len(payload) == 1:
+                assert "too dense for a bounded parent merge" in messages[0]["content"]
+                assert "no more than 28 items total" in messages[0]["content"]
+                rebalance_calls += 1
             return result_for(messages, 99)
         ids = ids_from_prompt(messages)
         sections = SummarySections(
@@ -442,7 +443,82 @@ async def test_dense_merge_compacts_aggressively_on_first_provider_call(
     )
 
     await maintainer.maintain(session, session.messages)
-    assert saw_dense_merge is True
+    assert rebalance_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_interrupted_dense_rebalance_resumes_from_child_checkpoint(
+    tmp_path: Path,
+) -> None:
+    session = make_session()
+    session.messages = [
+        SessionMessage.create("user", words(1_100, "first")),
+        SessionMessage.create("assistant", words(1_100, "second")),
+    ]
+    session.message_count = len(session.messages)
+    store = ContextSummaryStore(tmp_path)
+    rebalance_calls = 0
+
+    async def interrupted(messages, model):
+        nonlocal rebalance_calls
+        payload = json.loads(messages[-1]["content"])
+        if payload and "source_message_ids" in payload[0]:
+            rebalance_calls += 1
+            if rebalance_calls == 2:
+                raise RuntimeError("dense child interrupted")
+            return result_for(messages, 90 + rebalance_calls)
+        ids = ids_from_prompt(messages)
+        sections = SummarySections(
+            observed_facts=[
+                SummaryFact(text=f"Dense fact {index}", evidence_message_ids=[ids[0]])
+                for index in range(35)
+            ]
+        )
+        return SummaryModelResult(
+            content=sections.model_dump_json(),
+            usage={},
+            receipt_id=f"leaf-{ids[0]}",
+        )
+
+    first = ContextMaintainer(
+        store=store,
+        policy=maintenance_policy(),
+        counter=WordCounter(),
+        configured_model="claude",
+        provider_id="claude-local",
+        model_id="sonnet",
+        generate=interrupted,
+    )
+    with pytest.raises(RuntimeError, match="dense child interrupted"):
+        await first.maintain(session, session.messages)
+
+    checkpoint = store.load_work(session.id)
+    assert checkpoint is not None
+    assert len(checkpoint.chunks) == 2
+    assert len(checkpoint.merges) == 1
+    assert store.load(session) is None
+
+    resumed_calls = 0
+
+    async def resume(messages, model):
+        nonlocal resumed_calls
+        resumed_calls += 1
+        return result_for(messages, 100 + resumed_calls)
+
+    second = ContextMaintainer(
+        store=store,
+        policy=maintenance_policy(),
+        counter=WordCounter(),
+        configured_model="claude",
+        provider_id="claude-local",
+        model_id="sonnet",
+        generate=resume,
+    )
+    summary = await second.maintain(session, session.messages)
+
+    assert resumed_calls == 2
+    assert len(store.load_work(session.id).merges) == 3
+    assert len(summary.source.covered_message_ids) == 2
 
 
 @pytest.mark.asyncio
