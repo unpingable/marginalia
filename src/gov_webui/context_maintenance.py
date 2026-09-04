@@ -46,7 +46,8 @@ DENSE_CHILD_TARGET_FACTS = 28
 DENSE_CHILD_MAX_FACTS = 32
 DENSE_CHILD_TARGET_TEXT_CHARS = 240
 DENSE_CHILD_MAX_TEXT_CHARS = 300
-DENSE_CHILD_MAX_EVIDENCE_IDS = 3
+DENSE_CHILD_TARGET_EVIDENCE_IDS = 3
+DENSE_CHILD_MAX_EVIDENCE_IDS = 4
 
 
 def _validate_merged_sections(sections: SummarySections) -> None:
@@ -130,7 +131,7 @@ def _merge_prompt(
         else MERGED_SUMMARY_MAX_TEXT_CHARS
     )
     evidence_limit = (
-        DENSE_CHILD_MAX_EVIDENCE_IDS
+        DENSE_CHILD_TARGET_EVIDENCE_IDS
         if rebalance
         else 3
         if strict

@@ -417,7 +417,7 @@ async def test_dense_merge_rebalances_children_before_parent_provider_call(
                 rebalance_calls += 1
                 ids = ids_from_prompt(messages)
                 sections = SummarySections(
-                    observed_facts=[SummaryFact(text="x" * 252, evidence_message_ids=[ids[0]])]
+                    observed_facts=[SummaryFact(text="x" * 298, evidence_message_ids=ids[:4])]
                 )
                 return SummaryModelResult(
                     content=sections.model_dump_json(),
