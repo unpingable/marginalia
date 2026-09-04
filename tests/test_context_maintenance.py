@@ -415,6 +415,15 @@ async def test_dense_merge_rebalances_children_before_parent_provider_call(
                 assert "too dense for a bounded parent merge" in messages[0]["content"]
                 assert "no more than 28 items total" in messages[0]["content"]
                 rebalance_calls += 1
+                ids = ids_from_prompt(messages)
+                sections = SummarySections(
+                    observed_facts=[SummaryFact(text="x" * 252, evidence_message_ids=[ids[0]])]
+                )
+                return SummaryModelResult(
+                    content=sections.model_dump_json(),
+                    usage={},
+                    receipt_id=f"dense-child-{rebalance_calls}",
+                )
             return result_for(messages, 99)
         ids = ids_from_prompt(messages)
         sections = SummarySections(
