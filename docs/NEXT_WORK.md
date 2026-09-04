@@ -1,67 +1,38 @@
 # Next work
 
-## Live recovery hold — 2026-09-04
+## Context-maintenance incident resolved — 2026-09-04
 
-The generation-boundary and interactive-liveness repair is deployed, but the
-live appliance is intentionally in operator maintenance mode and Erin must not
-resume yet. Build `187a41861b1f63225491145821e70657f666bb9b` is healthy. The
-maintenance file is `/data/marginalia/maintenance.txt`.
+The generation-boundary and interactive-liveness repair is deployed. Live build
+`ee1cad83de6b84045be23e697527f2ac101632ba` is healthy, context readiness is
+`ready`, and operator maintenance mode is inactive.
 
-Session `78fc7d45675f4a21` in project `fc3b21be00c3` remains at revision 18
-with 90 messages and 90,922 counted history tokens. Its valid summary still
-covers 51 messages; the proactive lookahead target requires 62. The resumable
-work file contains eight chunks and seven merges. Multiple Claude maintenance
-calls, including a reduced single-child merge, reached the fixed 240-second
-CLI deadline. A harmless control completed in about three seconds, proving the
-route was reachable; its content-free status event reported 92% utilization of
-the current five-hour allowance.
+The incident involved session `78fc7d45675f4a21` in project
+`fc3b21be00c3`: revision 18, 90 messages, and 90,922 counted history tokens.
+Its valid summary covered 51 messages while proactive lookahead required 62.
+Repeated Claude Code maintenance calls timed out at 240 seconds, including
+after the five-hour utilization window reset from 92% to 0%. Capacity-window
+utilization was therefore ruled out.
 
-The allowance reset at 15:20 EDT. A post-reset control reported 0–1%
-utilization and completed in about two seconds. The unchanged checkpointed
-summary request was then retried once and again timed out at 240 seconds with no
-checkpoint progress. Capacity-window utilization is therefore not a supported
-root cause. The remaining defect is specific to the structured summary request
-or the Claude Code adapter mode used for it.
+A story-free synthetic reproduction used the same schema and a comparable
+56-fact dense input. The old general-agent Claude invocation exceeded a
+75-second test ceiling. The identical prompt completed with valid structured
+output in 24.5 seconds when tools, slash commands, customizations, and session
+persistence were disabled. The shared Claude local-command adapter now enforces
+that pure-completion mode. Dense-child prompts retain tighter targets while
+their acceptance bounds match the unchanged final 32-fact, 300-character, and
+four-evidence maxima.
 
-The authoritative story remains untouched: preflight reports one workspace,
-two projects, seven sessions, and 718 messages. `context-validate` correctly
-reports `ready: false`, coverage 51, required coverage 62. The valid 51-message
-summary and all checkpointed work remain available. Do not delete either.
+The existing eight chunks and seven merges were reused. Five additional
+derived reductions/merges checkpointed successfully, followed by the final
+source-bound summary. `context-validate` passed at 62/62 coverage. The isolated
+governed Claude synthetic passed with an authority receipt. Preflight remained
+one workspace, two projects, seven sessions, and 718 messages throughout;
+narrative state was unchanged. Maintenance mode was removed only after every
+release check passed.
 
-Do not keep rerunning the unchanged live request. First reproduce the failing
-summary shape in an isolated/test context and qualify a pure-completion Claude
-invocation. The current adapter launches `claude --print` with the general
-Claude Code environment; the installed CLI supports tool-free, non-persistent,
-safe-mode flags, but those must be regression-tested across configured Claude
-writing routes before changing the shared adapter. Once a bounded correction is
-qualified, resume the existing checkpoint using:
-
-```bash
-docker exec marginalia python3 -m gov_webui.ops \
-  --data-root /data --context-id erin-writing \
-  --model-config /run/marginalia/providers.json \
-  --maintenance-model claude-sonnet-4-20250514 \
-  context-build --project-id fc3b21be00c3 \
-  --session-id 78fc7d45675f4a21
-```
-
-Then require all of the following before removing maintenance mode:
-
-1. `context-validate` reports ready with at least 62 covered messages;
-2. `/health/ready` reports `context_preparation.status` as `ready`;
-3. preflight still reports 718 messages and no schema errors;
-4. the deployed image remains the intended qualified SHA;
-5. a provider-safe, non-narrative control succeeds.
-
-Only then remove `/data/marginalia/maintenance.txt` and confirm `/v1/system`
-reports maintenance inactive. Do not use Erin's next prompt as a control. If
-derived-summary calls still time out after a qualified adapter correction, stop
-and design a separately reviewed maintenance-provider job boundary; do not
-raise the timeout or silently switch models.
-
-After recovery, freeze this baseline long enough to collect real usage evidence
-before starting another broad reliability campaign. Writer reports and
-content-free telemetry should determine which item below moves first.
+Freeze this baseline long enough to collect real usage evidence before starting
+another broad reliability campaign. Writer reports and content-free telemetry
+should determine which item below moves first.
 
 ## Qualified baseline
 
