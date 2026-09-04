@@ -396,6 +396,56 @@ async def test_many_chunks_merge_with_bounded_hierarchical_fan_in(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_dense_merge_compacts_aggressively_on_first_provider_call(
+    tmp_path: Path,
+) -> None:
+    session = make_session()
+    session.messages = [
+        SessionMessage.create("user", words(1_100, "first")),
+        SessionMessage.create("assistant", words(1_100, "second")),
+    ]
+    session.message_count = len(session.messages)
+    saw_dense_merge = False
+
+    async def generate(messages, model):
+        nonlocal saw_dense_merge
+        payload = json.loads(messages[-1]["content"])
+        if payload and "source_message_ids" in payload[0]:
+            assert "The inputs are dense" in messages[0]["content"]
+            assert "no more than 45 items total" in messages[0]["content"]
+            saw_dense_merge = True
+            return result_for(messages, 99)
+        ids = ids_from_prompt(messages)
+        sections = SummarySections(
+            observed_facts=[
+                SummaryFact(
+                    text=f"Dense fact {index}",
+                    evidence_message_ids=[ids[0]],
+                )
+                for index in range(35)
+            ]
+        )
+        return SummaryModelResult(
+            content=sections.model_dump_json(),
+            usage={},
+            receipt_id=f"leaf-{ids[0]}",
+        )
+
+    maintainer = ContextMaintainer(
+        store=ContextSummaryStore(tmp_path),
+        policy=maintenance_policy(),
+        counter=WordCounter(),
+        configured_model="claude",
+        provider_id="claude-local",
+        model_id="sonnet",
+        generate=generate,
+    )
+
+    await maintainer.maintain(session, session.messages)
+    assert saw_dense_merge is True
+
+
+@pytest.mark.asyncio
 async def test_verbose_merge_is_rejected_before_summary_persistence(tmp_path: Path) -> None:
     session = make_session()
     store = ContextSummaryStore(tmp_path)

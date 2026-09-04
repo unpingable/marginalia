@@ -639,6 +639,15 @@
     <div class="dialog-body" id="canon-comparison-results"></div>
   </dialog>
 
+  <dialog id="maintenance-dialog" aria-labelledby="maintenance-title">
+    <div class="dialog-header"><h2 id="maintenance-title">Marginalia is under maintenance</h2></div>
+    <div class="dialog-body">
+      <div class="ia-note" id="maintenance-message">Writing is temporarily paused while Marginalia is being checked.</div>
+      <div class="save-state">Your existing projects and story remain available and unchanged.</div>
+    </div>
+    <div class="dialog-footer"><span class="save-state">You can refresh to check whether maintenance is complete.</span><button type="button" class="primary-button" id="maintenance-reload">Refresh</button></div>
+  </dialog>
+
   <div class="toast" id="toast" role="status"></div>
 
   <script>
@@ -769,8 +778,21 @@
       select.title = current?.unavailable_reason || "Model for future responses in this conversation";
     }
 
+    function applyMaintenanceState() {
+      const maintenance = state.system?.maintenance;
+      const active = maintenance?.active === true;
+      const dialog = $("#maintenance-dialog");
+      $("#maintenance-message").textContent = maintenance?.message
+        || "Writing is temporarily paused while Marginalia is being checked.";
+      $("#prompt").disabled = active;
+      $("#send").disabled = active || state.busy;
+      if (active && !dialog.open) dialog.showModal();
+      if (!active && dialog.open) dialog.close();
+    }
+
     async function loadSystem() {
       state.system = await api("/v1/system");
+      applyMaintenanceState();
       const deployment = state.system.deployment || {};
       const revision = deployment.build_sha && deployment.build_sha !== "unknown"
         ? ` · ${deployment.build_sha.slice(0, 8)}` : "";
@@ -980,6 +1002,7 @@
       ]);
       const failure = results.find((result) => result.status === "rejected");
       if (failure) toast(failure.reason?.message || "Some project state could not be loaded");
+      applyMaintenanceState();
     }
 
     async function createProject() {
@@ -1388,6 +1411,10 @@
       const prompt = $("#prompt");
       const content = prompt.value.trim();
       persistPromptDraft(content);
+      if (state.system?.maintenance?.active) {
+        applyMaintenanceState();
+        return toast("Marginalia is under maintenance; your prompt is still here.");
+      }
       if (!content || state.busy) return;
       state.busy = true;
       $("#send").disabled = true;
@@ -2307,6 +2334,7 @@
       $("#rename-workspace").addEventListener("click", renameWorkspace);
       $("#workspace-backups").addEventListener("click", openWorkspaceBackups);
       $("#close-backups").addEventListener("click", () => $("#backup-dialog").close());
+      $("#maintenance-reload").addEventListener("click", () => window.location.reload());
       $("#backup-form").addEventListener("submit", saveBackupPolicy);
       $("#backup-now").addEventListener("click", createBackupNow);
       $("#new-project").addEventListener("click", createProject);
@@ -2459,6 +2487,7 @@
       const results = await Promise.allSettled(tasks);
       const failure = results.find((result) => result.status === "rejected");
       if (failure) toast(failure.reason?.message || "Some project state could not be loaded");
+      applyMaintenanceState();
     }
     start();
   </script>

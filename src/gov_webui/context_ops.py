@@ -13,6 +13,7 @@ from gov_webui.context_budget import (
     TiktokenCounter,
     as_messages,
     choose_summary_prefix,
+    maintenance_lookahead_tokens,
 )
 from gov_webui.context_maintenance import ContextMaintainer, SummaryModelResult
 from gov_webui.context_summary import (
@@ -29,13 +30,6 @@ from gov_webui.governed_chat_adapter import GovernedChatAdapter
 from gov_webui.library_store import LibraryStore, ProjectRecord
 from gov_webui.model_providers import ConfiguredModel, load_provider_catalog
 from gov_webui.session_store import ChatSession, SessionStore
-
-
-MIGRATION_FIXED_RESERVE_TOKENS = 5_000
-
-
-def _migration_reserve(policy: Any) -> int:
-    return min(MIGRATION_FIXED_RESERVE_TOKENS, policy.application_tokens // 4)
 
 
 def _safe_ref(value: str) -> str:
@@ -128,8 +122,25 @@ class ContextOperations:
             counter = self._counter(policy)
             for session in self._sessions(project, session_id=session_id):
                 history_tokens = counter.count_messages(as_messages(session.messages))
+                if not policy.enabled:
+                    reports.append(
+                        {
+                            "project_id": project.id,
+                            "session_ref": _safe_ref(session.id),
+                            "revision": session.revision,
+                            "message_count": len(session.messages),
+                            "history_tokens": history_tokens,
+                            "needs_summary": False,
+                            "summary_valid": False,
+                            "summary_ready": True,
+                            "covered_messages": 0,
+                            "required_covered_messages": 0,
+                            "error": None,
+                        }
+                    )
+                    continue
                 threshold = int(
-                    (policy.application_tokens - _migration_reserve(policy))
+                    (policy.application_tokens - maintenance_lookahead_tokens(policy))
                     * policy.maintenance_watermark
                 )
                 needs_summary = False
@@ -154,7 +165,7 @@ class ContextOperations:
                                 "Continue the story.",
                                 policy,
                                 counter,
-                                additional_reserve_tokens=_migration_reserve(policy),
+                                additional_reserve_tokens=maintenance_lookahead_tokens(policy),
                             )
                         )
                 except ContextSummaryError as exc:
@@ -230,7 +241,7 @@ class ContextOperations:
                 for session in self._sessions(project, session_id=session_id):
                     history_tokens = counter.count_messages(as_messages(session.messages))
                     threshold = int(
-                        (policy.application_tokens - _migration_reserve(policy))
+                        (policy.application_tokens - maintenance_lookahead_tokens(policy))
                         * policy.maintenance_watermark
                     )
                     if history_tokens < threshold:
@@ -252,7 +263,7 @@ class ContextOperations:
                         "Continue the story.",
                         policy,
                         counter,
-                        additional_reserve_tokens=_migration_reserve(policy),
+                        additional_reserve_tokens=maintenance_lookahead_tokens(policy),
                     )
                     if not source:
                         reports.append(

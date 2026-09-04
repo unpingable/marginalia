@@ -71,6 +71,7 @@ def test_plan_and_deactivation_do_not_require_a_provider(tmp_path: Path) -> None
 
     plan = operations.plan(project_id=project.id)
     deactivated = operations.activate(enabled=False, project_id=project.id)
+    inactive_plan = operations.plan(project_id=project.id)
 
     assert plan["ready"] is False
     assert plan["sessions"][0]["needs_summary"] is True
@@ -81,6 +82,8 @@ def test_plan_and_deactivation_do_not_require_a_provider(tmp_path: Path) -> None
         "projects": [{"project_id": project.id, "enabled": False}],
     }
     assert store.policy().enabled is False
+    assert inactive_plan["ready"] is True
+    assert inactive_plan["sessions"][0]["summary_ready"] is True
 
 
 def test_plan_rejects_valid_summary_that_covers_too_little_history(tmp_path: Path) -> None:
@@ -88,6 +91,7 @@ def test_plan_rejects_valid_summary_that_covers_too_little_history(tmp_path: Pat
     store = ContextSummaryStore(data_root / ".governor" / project.context_id)
     store.save_policy(
         ContextPolicy(
+            enabled=True,
             target_provider_input_tokens=10_000,
             provider_overhead_tokens=4_000,
             output_reserve_tokens=1_000,

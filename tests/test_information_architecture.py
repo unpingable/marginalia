@@ -335,6 +335,7 @@ async def test_workspace_backup_api_and_operational_provenance(
 
     system = (await client.get("/v1/system")).json()
     assert system["service"] == "marginalia"
+    assert system["maintenance"] == {"active": False, "message": None}
     assert system["schemas"]["library"] == 2
     assert system["migration"]["ready"] is True
     assert system["deployment"]["version"]

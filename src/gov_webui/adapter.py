@@ -54,7 +54,9 @@ from gov_webui.context_budget import (
     TiktokenCounter,
     build_generation_context,
     choose_summary_prefix,
+    maintenance_lookahead_tokens,
 )
+from gov_webui.context_ops import ContextOperations
 from gov_webui.context_maintenance import ContextMaintainer, SummaryModelResult
 from gov_webui.context_summary import (
     ContextMaintenanceRequired,
@@ -139,6 +141,10 @@ telemetry_logger = logging.getLogger("uvicorn.error")
 # ============================================================================
 
 MARGINALIA_DATA_ROOT = os.environ.get("MARGINALIA_DATA_ROOT", str(Path.home() / ".marginalia"))
+MARGINALIA_MAINTENANCE_FILE = os.environ.get(
+    "MARGINALIA_MAINTENANCE_FILE",
+    str(Path(MARGINALIA_DATA_ROOT) / "marginalia" / "maintenance.txt"),
+)
 GOVERNOR_DAEMON_DIR = os.environ.get(
     "GOVERNOR_DAEMON_DIR", str(Path(MARGINALIA_DATA_ROOT) / ".governor")
 )
@@ -171,6 +177,7 @@ MARGINALIA_MODEL_CONFIG = os.environ.get("MARGINALIA_MODEL_CONFIG", "").strip()
 MARGINALIA_CONTEXT_MAINTENANCE_MODEL = os.environ.get(
     "MARGINALIA_CONTEXT_MAINTENANCE_MODEL", "claude-sonnet-4-20250514"
 ).strip()
+CONTEXT_MAINTENANCE_RETRY_DELAYS_SECONDS = (15.0, 60.0, 180.0)
 
 if GOVERNOR_MODE != "fiction" and not MARGINALIA_ENABLE_DONOR_ROUTES:
     raise RuntimeError(
@@ -2055,6 +2062,22 @@ class StaleSessionRevisionError(RuntimeError):
     """A generation completed after its durable session snapshot changed."""
 
 
+class ServiceMaintenanceError(RuntimeError):
+    """An operator has temporarily paused authored generation."""
+
+
+def _maintenance_message() -> str | None:
+    path = Path(MARGINALIA_MAINTENANCE_FILE)
+    try:
+        if not path.is_file():
+            return None
+        message = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        logger.warning("Could not read the Marginalia maintenance notice", exc_info=True)
+        message = ""
+    return message[:500] or "Marginalia is under maintenance. Please try again shortly."
+
+
 def _generation_failure(exc: BaseException) -> FailedGeneration:
     """Classify an exception, expose a safe summary, and log full diagnostics."""
     incident_id = f"gen-{uuid.uuid4().hex[:12]}"
@@ -2085,13 +2108,20 @@ def _generation_failure(exc: BaseException) -> FailedGeneration:
             retryable=False,
             incident_id=incident_id,
         )
+    elif isinstance(exc, ServiceMaintenanceError):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.SERVICE_MAINTENANCE,
+            message=str(exc),
+            retryable=True,
+            incident_id=incident_id,
+        )
     elif isinstance(exc, (ContextMaintenanceRequired, ContextSummaryError)):
         failure = FailedGeneration(
             outcome="failure",
             kind=GenerationFailureKind.CONTEXT_MAINTENANCE,
             message=(
-                "Preparing the story context ran into trouble. "
-                "Your prompt is still available to retry."
+                "The story context is being prepared. Your prompt is still available to retry."
             ),
             retryable=True,
             incident_id=incident_id,
@@ -2164,6 +2194,7 @@ def _failure_response(failure: FailedGeneration) -> JSONResponse:
         GenerationFailureKind.STALE_CONTEXT: 409,
         GenerationFailureKind.CONTEXT_MAINTENANCE: 503,
         GenerationFailureKind.CONTEXT_TOO_LARGE: 422,
+        GenerationFailureKind.SERVICE_MAINTENANCE: 503,
     }.get(failure.kind, 502)
     payload = GenerationFailureResponse(
         failure_type=failure.kind,
@@ -2261,13 +2292,13 @@ async def _generate_context_summary(
     )
 
 
-async def _opportunistic_context_maintenance(
+async def _perform_context_maintenance_once(
     *,
     project_id: str | None,
     session_id: str,
     writing_model: ConfiguredModel | None,
 ) -> None:
-    """Refresh derived context after commit without delaying or mutating the story."""
+    """Perform one resumable context refresh outside the authored request path."""
     try:
         store = _get_context_summary_store(project_id)
         policy = store.policy()
@@ -2286,7 +2317,11 @@ async def _opportunistic_context_maintenance(
         history_tokens = counter.count_messages(
             [{"role": item.role, "content": item.content} for item in session.messages]
         )
-        if history_tokens < int(policy.application_tokens * policy.maintenance_watermark):
+        threshold = int(
+            (policy.application_tokens - maintenance_lookahead_tokens(policy))
+            * policy.maintenance_watermark
+        )
+        if history_tokens < threshold:
             return
         source_messages = choose_summary_prefix(
             session,
@@ -2294,7 +2329,7 @@ async def _opportunistic_context_maintenance(
             "Continue the story.",
             policy,
             counter,
-            additional_reserve_tokens=5_000,
+            additional_reserve_tokens=maintenance_lookahead_tokens(policy),
         )
         if not source_messages:
             return
@@ -2341,10 +2376,41 @@ async def _opportunistic_context_maintenance(
         raise
     except Exception:
         logger.warning(
-            "Opportunistic context maintenance failed session=%s",
+            "Context maintenance attempt failed session=%s",
             session_id,
             exc_info=True,
         )
+        raise
+
+
+async def _opportunistic_context_maintenance(
+    *,
+    project_id: str | None,
+    session_id: str,
+    writing_model: ConfiguredModel | None,
+) -> None:
+    """Retry resumable derived maintenance without delaying the writer."""
+    attempts = len(CONTEXT_MAINTENANCE_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(attempts):
+        try:
+            await _perform_context_maintenance_once(
+                project_id=project_id,
+                session_id=session_id,
+                writing_model=writing_model,
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Context maintenance will retry session=%s attempt=%s/%s",
+                session_id,
+                attempt + 1,
+                attempts,
+            )
+            if attempt >= len(CONTEXT_MAINTENANCE_RETRY_DELAYS_SECONDS):
+                return
+            await asyncio.sleep(CONTEXT_MAINTENANCE_RETRY_DELAYS_SECONDS[attempt])
 
 
 def _schedule_context_maintenance(
@@ -2386,7 +2452,7 @@ async def _bounded_session_messages(
     fixed_messages: list[dict[str, str]],
     writing_model: ConfiguredModel | None,
 ) -> list[dict[str, str]]:
-    """Build or maintain one bounded context from the durable session snapshot."""
+    """Build bounded context without awaiting remote maintenance."""
     _, session, pending_user = target
     store = _get_context_summary_store(request.project_id)
     policy = store.policy()
@@ -2420,51 +2486,12 @@ async def _bounded_session_messages(
             summary=summary,
         )
     except ContextMaintenanceRequired:
-        source_messages = choose_summary_prefix(
-            session,
-            fixed_messages,
-            pending_user.content,
-            policy,
-            counter,
+        _schedule_context_maintenance(
+            project_id=request.project_id,
+            session_id=session.id,
+            writing_model=writing_model,
         )
-        if not source_messages:
-            raise ContextTooLarge("no old story prefix is available to summarize")
-        catalog = _configured_provider_catalog()
-        if catalog is None:
-            raise ContextSummaryError("context maintenance requires configured model providers")
-        try:
-            maintenance_model = catalog.require_available(MARGINALIA_CONTEXT_MAINTENANCE_MODEL)
-        except (ProviderConfigurationError, ProviderError) as exc:
-            raise ContextSummaryError("context-maintenance model is unavailable") from exc
-
-        async def generate(
-            prompt: list[dict[str, str]], configured_model: str
-        ) -> SummaryModelResult:
-            return await _generate_context_summary(
-                project_id=request.project_id,
-                messages=prompt,
-                configured_model=configured_model,
-                model_identity=maintenance_model,
-            )
-
-        maintainer = ContextMaintainer(
-            store=store,
-            policy=policy,
-            counter=counter,
-            configured_model=maintenance_model.id,
-            provider_id=maintenance_model.provider_id,
-            model_id=maintenance_model.model_id,
-            generate=generate,
-        )
-        summary = await maintainer.maintain(session, source_messages)
-        built = build_generation_context(
-            session=session,
-            pending_user=pending_user.content,
-            fixed_messages=fixed_messages,
-            policy=policy,
-            counter=counter,
-            summary=summary,
-        )
+        raise ContextMaintenanceRequired("story context preparation is in progress") from None
 
     telemetry_logger.info(
         "context_allocation session=%s revision=%s predicted_provider_tokens=%s "
@@ -2492,6 +2519,10 @@ async def chat_completions(
     Delegates to the governor daemon for the full governed pipeline:
     pending check → augment → generate → check → receipt.
     """
+    maintenance = _maintenance_message()
+    if maintenance is not None:
+        return _failure_response(_generation_failure(ServiceMaintenanceError(maintenance)))
+
     selected_model, model_identity = _resolve_configured_model(request.model)
     governed_chat = _get_governed_chat_adapter(request.project_id)
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
@@ -5382,6 +5413,36 @@ async def health() -> dict[str, Any]:
     }
 
 
+def _context_preparation_health() -> dict[str, Any]:
+    """Report derived-context readiness without changing service health."""
+    try:
+        operations = ContextOperations(
+            data_root=Path(MARGINALIA_DATA_ROOT),
+            default_context_id=GOVERNOR_CONTEXT_ID,
+            model_config=(Path(MARGINALIA_MODEL_CONFIG) if MARGINALIA_MODEL_CONFIG else None),
+            maintenance_model=MARGINALIA_CONTEXT_MAINTENANCE_MODEL,
+        )
+        plan = operations.plan()
+    except Exception:
+        logger.warning("Could not inspect context-preparation readiness", exc_info=True)
+        return {
+            "status": "unknown",
+            "ready": False,
+            "sessions_requiring_preparation": None,
+            "active_tasks": sum(not task.done() for task in _context_maintenance_tasks.values()),
+        }
+
+    pending = sum(not item["summary_ready"] for item in plan["sessions"])
+    active = sum(not task.done() for task in _context_maintenance_tasks.values())
+    status = "in_progress" if active else ("required" if pending else "ready")
+    return {
+        "status": status,
+        "ready": pending == 0,
+        "sessions_requiring_preparation": pending,
+        "active_tasks": active,
+    }
+
+
 @app.get("/health/ready", response_model=None)
 async def health_ready() -> JSONResponse:
     """Readiness includes bounded daemon checks, schemas, and governor progress."""
@@ -5391,6 +5452,7 @@ async def health_ready() -> JSONResponse:
         default_context_id=GOVERNOR_CONTEXT_ID,
         apply_migrations=False,
     )
+    context_preparation = _context_preparation_health()
     ready = runtime["status"] == "healthy" and bool(preflight["ready"])
     return JSONResponse(
         status_code=200 if ready else 503,
@@ -5398,6 +5460,7 @@ async def health_ready() -> JSONResponse:
             "status": "ready" if ready else "not_ready",
             "runtime": runtime,
             "migration": preflight,
+            "context_preparation": context_preparation,
             "deployment": deployment_metadata(),
         },
     )
@@ -5406,7 +5469,9 @@ async def health_ready() -> JSONResponse:
 @app.get("/v1/system")
 async def system_status() -> dict[str, Any]:
     """Expose operational provenance without changing application state."""
+    maintenance = _maintenance_message()
     return {
+        "maintenance": {"active": maintenance is not None, "message": maintenance},
         "service": "marginalia",
         "deployment": deployment_metadata(),
         "schemas": schema_versions(),

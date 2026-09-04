@@ -87,7 +87,12 @@ def _chunks(
     return chunks
 
 
-def _merge_prompt(chunks: list[SummaryWorkChunk], *, repair: bool = False) -> list[dict[str, str]]:
+def _merge_prompt(
+    chunks: list[SummaryWorkChunk],
+    *,
+    repair: bool = False,
+    aggressive: bool = False,
+) -> list[dict[str, str]]:
     schema = SummarySections.model_json_schema()
     payload = [
         {
@@ -96,10 +101,16 @@ def _merge_prompt(chunks: list[SummaryWorkChunk], *, repair: bool = False) -> li
         }
         for chunk in chunks
     ]
-    fact_limit = 45 if repair else MERGED_SUMMARY_MAX_FACTS
-    text_limit = 240 if repair else MERGED_SUMMARY_MAX_TEXT_CHARS
-    evidence_limit = 3 if repair else MERGED_SUMMARY_MAX_EVIDENCE_IDS
-    repair_note = "A previous merge was unusable; compact more aggressively. " if repair else ""
+    strict = repair or aggressive
+    fact_limit = 45 if strict else MERGED_SUMMARY_MAX_FACTS
+    text_limit = 240 if strict else MERGED_SUMMARY_MAX_TEXT_CHARS
+    evidence_limit = 3 if strict else MERGED_SUMMARY_MAX_EVIDENCE_IDS
+    if repair:
+        repair_note = "A previous merge was unusable; compact more aggressively. "
+    elif aggressive:
+        repair_note = "The inputs are dense; compact aggressively. "
+    else:
+        repair_note = ""
     return [
         {
             "role": "system",
@@ -245,8 +256,15 @@ class ContextMaintainer:
                         continue
                     merged: SummaryModelResult | None = None
                     merged_sections: SummarySections | None = None
-                    for repair in (False, True):
-                        prompt = _merge_prompt(group, repair=repair)
+                    input_facts = sum(
+                        len(getattr(item.sections, name))
+                        for item in group
+                        for name in item.sections.__class__.model_fields
+                    )
+                    aggressive = input_facts > MERGED_SUMMARY_MAX_FACTS
+                    merge_modes = (False,) if aggressive else (False, True)
+                    for repair in merge_modes:
+                        prompt = _merge_prompt(group, repair=repair, aggressive=aggressive)
                         if self.counter.count_messages(prompt) > self.policy.application_tokens:
                             raise ContextTooLarge(
                                 "context-maintenance merge exceeds its input budget"
@@ -267,9 +285,9 @@ class ContextMaintainer:
                                     "merged context summary cited messages outside its source group"
                                 )
                         except ContextSummaryError:
-                            if not repair:
-                                continue
-                            raise
+                            if repair or aggressive:
+                                raise
+                            continue
                         merged = candidate
                         merged_sections = candidate_sections
                         break

@@ -19,6 +19,7 @@ class GenerationFailureKind(StrEnum):
     STALE_CONTEXT = "stale_context"
     CONTEXT_MAINTENANCE = "context_maintenance"
     CONTEXT_TOO_LARGE = "context_too_large"
+    SERVICE_MAINTENANCE = "service_maintenance"
     INTERNAL = "internal"
 
 

@@ -521,7 +521,13 @@ def test_context_maintenance_failure_preserves_story_and_never_reenters_context(
     assert response.json()["failure_type"] == "context_maintenance"
     assert adapter._get_session_store("default").get(session.id).to_dict() == before
     assert adapter._governed_chat_adapter.chat_send.await_count == 0
-    assert scheduled == []
+    assert scheduled == [
+        {
+            "project_id": "default",
+            "session_id": session.id,
+            "writing_model": None,
+        }
+    ]
 
     # A later successful turn receives durable story only, never the operational message.
     context_store.set_enabled(False)
@@ -539,9 +545,41 @@ def test_context_maintenance_failure_preserves_story_and_never_reenters_context(
     )
     assert retry.status_code == 200
     forwarded = adapter._governed_chat_adapter.chat_send.await_args.kwargs["messages"]
-    assert "Preparing the story context ran into trouble" not in str(forwarded)
+    assert "The story context is being prepared" not in str(forwarded)
     durable = adapter._get_session_store("default").get(session.id)
     assert len(durable.messages) == len(session.messages) + 2
+
+
+@pytest.mark.asyncio
+async def test_context_maintenance_retries_resumable_work_off_request(
+    monkeypatch,
+) -> None:
+    import gov_webui.adapter as adapter
+
+    calls = 0
+    delays = []
+
+    async def fail_twice(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise RuntimeError("temporary maintenance failure")
+
+    async def no_wait(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(adapter, "_perform_context_maintenance_once", fail_twice)
+    monkeypatch.setattr(adapter, "CONTEXT_MAINTENANCE_RETRY_DELAYS_SECONDS", (1.0, 2.0))
+    monkeypatch.setattr(adapter.asyncio, "sleep", no_wait)
+
+    await adapter._opportunistic_context_maintenance(
+        project_id="default",
+        session_id="session",
+        writing_model=None,
+    )
+
+    assert calls == 3
+    assert delays == [1.0, 2.0]
 
 
 def test_valid_summary_bounds_provider_context_and_success_commits_once(

@@ -109,6 +109,11 @@ def choose_summary_prefix(
     raise ContextTooLarge("recent authored context cannot fit the input budget")
 
 
+def maintenance_lookahead_tokens(policy: ContextPolicy) -> int:
+    """Reserve meaningful growth so maintenance stays ahead of interactive use."""
+    return min(12_000, policy.application_tokens // 3)
+
+
 def build_generation_context(
     *,
     session: ChatSession,

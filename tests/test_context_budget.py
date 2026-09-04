@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from gov_webui.context_budget import build_generation_context, choose_summary_prefix
+from gov_webui.context_budget import (
+    build_generation_context,
+    choose_summary_prefix,
+    maintenance_lookahead_tokens,
+)
 from gov_webui.context_summary import (
     ContextMaintenanceRequired,
     ContextPolicy,
@@ -176,3 +180,80 @@ def test_policy_activation_is_reversible_and_separate_from_summary(tmp_path: Pat
     assert store.policy().enabled is False
     assert store.set_enabled(True).enabled is True
     assert store.set_enabled(False).enabled is False
+
+
+def test_observed_51_covered_58_required_shape_fails_closed_until_ready() -> None:
+    messages = [
+        SessionMessage.create("assistant", words(90, f"passage-{index}")) for index in range(90)
+    ]
+    session = ChatSession(
+        id="incident-session",
+        context_id="story",
+        title="Long story",
+        created_at=utc_now(),
+        updated_at=utc_now(),
+        model="codex-default",
+        revision=18,
+        message_count=len(messages),
+        messages=messages,
+    )
+    incident_policy = policy()
+    counter = WordCounter()
+    required = choose_summary_prefix(
+        session,
+        [],
+        "Continue.",
+        incident_policy,
+        counter,
+    )
+    assert len(required) == 58
+
+    stale = ContextSummary(
+        source=source_for(session, session.messages[:51]),
+        generator=SummaryGenerator(configured_model="claude"),
+        created_at=utc_now(),
+        sections=SummarySections(
+            narrative_recap=[
+                SummaryFact(
+                    text=words(500, "s"),
+                    evidence_message_ids=[session.messages[0].id],
+                )
+            ]
+        ),
+    )
+    with pytest.raises(ContextMaintenanceRequired, match="does not cover enough"):
+        build_generation_context(
+            session=session,
+            pending_user="Continue.",
+            fixed_messages=[],
+            policy=incident_policy,
+            counter=counter,
+            summary=stale,
+        )
+
+    ready = stale.model_copy(update={"source": source_for(session, session.messages[:58])})
+    built = build_generation_context(
+        session=session,
+        pending_user="Continue.",
+        fixed_messages=[],
+        policy=incident_policy,
+        counter=counter,
+        summary=ready,
+    )
+    assert built.metrics.summarized_message_count == 58
+
+
+def test_proactive_lookahead_covers_more_than_the_immediate_minimum() -> None:
+    session = session_with_pairs(3)
+    incident_policy = policy()
+    immediate = choose_summary_prefix(session, [], "Continue.", incident_policy, WordCounter())
+    proactive = choose_summary_prefix(
+        session,
+        [],
+        "Continue.",
+        incident_policy,
+        WordCounter(),
+        additional_reserve_tokens=maintenance_lookahead_tokens(incident_policy),
+    )
+
+    assert len(proactive) > len(immediate)

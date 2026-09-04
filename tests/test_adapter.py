@@ -200,6 +200,27 @@ class TestHealthEndpoint:
         assert response.json()["status"] == "alive"
         assert "backend" not in response.json()
 
+    def test_readiness_reports_context_preparation_separately(self, client, monkeypatch) -> None:
+        import gov_webui.adapter as adapter_mod
+
+        async def healthy_runtime():
+            return {"status": "healthy"}
+
+        monkeypatch.setattr(adapter_mod, "health", healthy_runtime)
+        monkeypatch.setattr(adapter_mod, "migration_preflight", lambda **kwargs: {"ready": True})
+        preparing = {
+            "status": "in_progress",
+            "ready": False,
+            "sessions_requiring_preparation": 1,
+            "active_tasks": 1,
+        }
+        monkeypatch.setattr(adapter_mod, "_context_preparation_health", lambda: preparing)
+
+        response = client.get("/health/ready")
+
+        assert response.status_code == 200
+        assert response.json()["context_preparation"] == preparing
+
 
 def test_synthetic_governor_uses_isolated_context_and_preserves_sessions(
     client, tmp_contexts_dir
@@ -685,6 +706,31 @@ class TestGenerationOutcomeBoundary:
         assert raw_diagnostic in caplog.text
         assert payload["incident_id"] in caplog.text
 
+    def test_operator_maintenance_is_typed_and_never_calls_generation(
+        self, client, monkeypatch
+    ) -> None:
+        import gov_webui.adapter as adapter_mod
+
+        monkeypatch.setattr(
+            adapter_mod,
+            "_maintenance_message",
+            lambda: "Marginalia is being checked. Please try again shortly.",
+        )
+        before_calls = adapter_mod._governed_chat_adapter.chat_send.await_count
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Keep this prompt safe"}],
+            },
+        )
+
+        assert response.status_code == 503
+        assert response.json()["failure_type"] == "service_maintenance"
+        assert response.json()["retryable"] is True
+        assert adapter_mod._governed_chat_adapter.chat_send.await_count == before_calls
+
     def test_assistant_import_requires_explicit_authored_outcome(self, client) -> None:
         session_id, before = self._seed_session(client)
         rejected = client.post(
@@ -705,6 +751,9 @@ class TestGenerationOutcomeBoundary:
         assert "persistPromptDraft(content);" in body
         assert "clearPromptDraft();" in body
         assert "failure?.retryable === false" in body
+        assert "maintenance-dialog" in body
+        assert "applyMaintenanceState" in body
+        assert "your prompt is still here" in body
 
     def test_error_handling(self, client) -> None:
         """Daemon errors return 502."""
