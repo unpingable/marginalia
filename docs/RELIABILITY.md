@@ -138,10 +138,12 @@ headroom rather than a provider-enforced completion limit.
 
 Counts use a real configured tokenizer (`o200k_base` by default), optional
 model-specific safety multiplication, and message framing overhead. Marginalia
-preflights before launching either the writing provider or context-maintenance
-provider. Mandatory project/canon/prompt input that cannot fit returns typed
-`context_too_large`; unavailable or invalid maintenance returns typed
-`context_maintenance`. Neither outcome mutates narrative history.
+preflights before launching the writing provider. Mandatory
+project/canon/prompt input that cannot fit returns typed `context_too_large`.
+If a valid summary is not sufficiently far ahead, the interactive request
+schedules resumable maintenance outside the request and returns typed
+`context_maintenance` immediately. It never launches the remote maintenance
+provider inline. Neither outcome mutates narrative history.
 
 A summary is derived cache state, never canon or authored prose. It records the
 session/context, observed revision, every covered message ID, a SHA-256 digest
@@ -161,13 +163,15 @@ Completed summaries are also derived files and can be rebuilt from durable
 history.
 
 Projects are activated independently only after required summaries validate.
-After activation, successful authored commits schedule a nonblocking refresh at
-75% of the application budget. A generation that reaches the hard budget first
-performs finality-gated maintenance before provider launch. Exactly zero
-narrative mutation occurs until a validated authored result wins the existing
-session-revision compare-and-swap.
+After activation, successful authored commits schedule a nonblocking refresh
+before the hard budget, with a bounded lookahead target and retry delays for
+resumable maintenance. If maintenance nevertheless falls behind, interactive
+generation fails quickly with a safe preparation message while the prompt
+remains in the browser. Exactly zero narrative mutation occurs until a validated
+authored result wins the existing session-revision compare-and-swap.
 
-This release does not automatically retry or switch writing models. Those
-remain a future attempt-orchestration layer and must preserve one logical
-attempt ID, the same CAS boundary, and the rule that blocks, cancellations,
-conflicts, and invalid state are not silently retried.
+Background context maintenance retries checkpointed work. This release does not
+automatically retry or switch writing models. That remains a future
+attempt-orchestration layer and must preserve one logical attempt ID, the same
+CAS boundary, and the rule that blocks, cancellations, conflicts, and invalid
+state are not silently retried.

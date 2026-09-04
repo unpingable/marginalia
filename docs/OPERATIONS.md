@@ -75,7 +75,10 @@ docker compose exec -T marginalia \
 
 - `/health/live` proves the web process is alive.
 - `/health/ready` requires the AG contract/provider, governor progress, and
-  durable records to be ready; it returns HTTP 503 otherwise.
+  durable records to be ready; it returns HTTP 503 otherwise. Its separate
+  `context_preparation` field reports whether long-fiction derived context is
+  ready, required, or currently running without declaring the whole appliance
+  unhealthy while resumable preparation is pending.
 - `/health` retains the concise runtime/provider report.
 - `/v1/system` reports application version, image/build/deployment identity,
   supported schemas, preflight results, and backup destination state.
@@ -93,6 +96,14 @@ quiet update window, confirm `execution.in_flight` is zero in
 `/health/ready`, take and verify a backup, and then perform the replacement.
 The zero count is a preflight signal, not a drain lock; there is currently no
 zero-downtime handoff.
+
+For an announced maintenance window, create
+`/data/marginalia/maintenance.txt` in the application volume. Its first 500
+characters become a non-dismissible, non-narrative browser notice; generation
+returns typed retryable `service_maintenance` without calling a provider, while
+read-only browsing and backup remain available. Remove the file after health,
+context validation, and deployment checks pass. The browser preserves an
+unsubmitted prompt across the notice and refresh.
 
 Full generation diagnostics are written to container logs while the writer sees
 only a safe incident ID and failure class. Docker removes those logs when it
@@ -214,9 +225,13 @@ docker compose exec -T marginalia python3 -m gov_webui.ops \
 
 The report uses hashed session references and token/message counts, never story
 text. Build work is resumable and idempotent: rerunning reuses source-identical
-chunks, validated pairwise merges, and already-valid summaries. Activation fails closed unless every
-session that currently needs compaction has a source-valid summary covering at
-least the required prefix.
+chunks, validated pairwise merges, dense-child reductions, and already-valid
+summaries. Proactive builds target a bounded lookahead beyond the next immediate
+request. Interactive generation never performs remote summary maintenance
+inline; when coverage is behind it returns a fast typed preparation outcome and
+schedules checkpointed work outside the request. Activation fails closed unless
+every session that currently needs compaction has a source-valid summary
+covering at least the required prefix.
 
 Derived files live under:
 
