@@ -1,34 +1,56 @@
 # Next work
 
-## Context-maintenance incident resolved — 2026-09-04
+## Context liveness incidents resolved — 2026-09-04/05
 
-The generation-boundary and interactive-liveness repair is deployed. Live build
-`ee1cad83de6b84045be23e697527f2ac101632ba` is healthy, context readiness is
-`ready`, and operator maintenance mode is inactive.
+Live build `70a6c9f9f4674c60d842c44e63e1617d3ebf6218` is healthy on image
+`marginalia:context-alias-70a6c9f` (`sha256:cf447b10cb400a4370ab87678c4d714b505c996e95abc74f63feaf28ae826cc9`).
+Operator maintenance mode is inactive, `/health/ready` reports context
+preparation `ready`, and the affected session validates at 80/80 summary
+coverage.
 
-The incident involved session `78fc7d45675f4a21` in project
-`fc3b21be00c3`: revision 18, 90 messages, and 90,922 counted history tokens.
+The first liveness incident involved session `78fc7d45675f4a21` in project
+`fc3b21be00c3` at revision 18: 90 messages and 90,922 counted history tokens.
 Its valid summary covered 51 messages while proactive lookahead required 62.
-Repeated Claude Code maintenance calls timed out at 240 seconds, including
-after the five-hour utilization window reset from 92% to 0%. Capacity-window
-utilization was therefore ruled out.
+Interactive generation synchronously encountered remote Claude maintenance and
+waited for its 240-second timeout before the writing model could run. The
+interactive path no longer awaits remote maintenance; it returns typed
+`context_maintenance` immediately and schedules resumable background work.
 
-A story-free synthetic reproduction used the same schema and a comparable
-56-fact dense input. The old general-agent Claude invocation exceeded a
-75-second test ceiling. The identical prompt completed with valid structured
-output in 24.5 seconds when tools, slash commands, customizations, and session
-persistence were disabled. The shared Claude local-command adapter now enforces
-that pure-completion mode. Dense-child prompts retain tighter targets while
-their acceptance bounds match the unchanged final 32-fact, 300-character, and
-four-evidence maxima.
+A second organic incident, `gen-f101733f5580`, occurred after six successful
+turns at revision 24 / 102 messages. The summary covered 62 while proactive
+lookahead required 80, but interactive admission used only the hard 32k
+application budget and launched a 42,349-token predicted Codex request. Codex
+timed out at 240 seconds. Interactive admission now retains the same 10,666-token
+lookahead as the prebuilder, so the default provider-launch ceiling is about
+37,334 predicted tokens. After recovery, a read-only real-compiler plan measured
+35,147 predicted tokens with 80 summarized and 22 recent messages.
 
-The existing eight chunks and seven merges were reused. Five additional
-derived reductions/merges checkpointed successfully, followed by the final
-source-bound summary. `context-validate` passed at 62/62 coverage. The isolated
-governed Claude synthetic passed with an authority receipt. Preflight remained
-one workspace, two projects, seven sessions, and 718 messages throughout;
-narrative state was unchanged. Maintenance mode was removed only after every
-release check passed.
+Claude summary maintenance now uses a typed internal model purpose, hidden and
+rejected at writer-facing model APIs. Only that internal route receives Claude's
+native `--json-schema` constraint; ordinary Claude writing remains unchanged.
+A story-free 56-fact / 25,165-character dense reproduction completed in 62.5
+seconds under a 120-second qualification bound and passed Marginalia's unchanged
+fact, text, evidence, and source validation. One live constrained result cited
+an out-of-scope evidence ID and was correctly rejected; the bounded retry then
+completed. Validation was not weakened.
+
+Changing the configured maintenance alias initially made legacy checkpoint work
+appear incompatible. The rebuild was stopped, and only the derived `.work.json`
+was restored from the verified backup. Checkpoint alias reuse is now permitted
+only for catalog entries with identical protocol, provider, and upstream model,
+with the existing prompt-version and exact source-prefix checks still required.
+The recovered work was reused and the final summary is bound to the new internal
+alias.
+
+The final qualification is 682 passing tests plus Ruff, formatting, browser
+startup smoke, exact Agent Governor contract qualification, image import smoke,
+and an isolated governed Codex PASS with an authority receipt. The fresh backup
+is `/backups/erin/marginalia-erin-20260905T000357579442Z.zip`, SHA-256
+`1d0c383e704a4af8a63831b91917ba3b63770279c740e3441d77b23324ecda1d`;
+it was independently verified and restore-tested with all 730 messages and 114
+canon reviews. Preflight remained one workspace, two projects, seven sessions,
+and 730 messages throughout final recovery. No failed prompt, error text, or
+maintenance output entered narrative state.
 
 Freeze this baseline long enough to collect real usage evidence before starting
 another broad reliability campaign. Writer reports and content-free telemetry
@@ -45,7 +67,7 @@ The current invariant is:
 
 The deterministic suite covers the typed outcome boundary, revision
 compare-and-swap, failure persistence, bounded context, source-linked summaries,
-backups, and restore rehearsal. The completed campaign qualified 676 tests
+backups, and restore rehearsal. The completed campaign qualified 682 tests
 against the exact Agent Governor contract commit in `AG_CONTRACT_COMMIT`.
 
 Context summaries have prefix semantics. `observed_revision` records provenance;

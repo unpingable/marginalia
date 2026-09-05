@@ -172,6 +172,13 @@ search, forks, canon capture, manuscript operations, or provider context.
 Completed summaries are also derived files and can be rebuilt from durable
 history.
 
+A deployment may rename a configured maintenance model without discarding
+validated checkpoint work only when the current provider catalog proves that
+the old and new IDs resolve to the identical protocol, provider, and upstream
+model. Prompt-version and exact source-prefix validation still apply. A changed
+provider/model identity or an alias absent from the catalog fails closed and
+starts independent work rather than silently reusing it.
+
 Projects are activated independently only after required summaries validate.
 After activation, successful authored commits schedule a nonblocking refresh
 before the hard budget, with a bounded lookahead target and retry delays for
