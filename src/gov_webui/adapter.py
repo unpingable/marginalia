@@ -2484,6 +2484,7 @@ async def _bounded_session_messages(
             policy=policy,
             counter=counter,
             summary=summary,
+            additional_reserve_tokens=maintenance_lookahead_tokens(policy),
         )
     except ContextMaintenanceRequired:
         _schedule_context_maintenance(

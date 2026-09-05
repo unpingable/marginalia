@@ -122,13 +122,18 @@ def build_generation_context(
     policy: ContextPolicy,
     counter: TokenCounter,
     summary: ContextSummary | None,
+    additional_reserve_tokens: int = 0,
 ) -> BoundedGenerationContext:
     durable = as_messages(session.messages)
     pending = {"role": "user", "content": pending_user}
     full = [*fixed_messages, *durable, pending]
     full_tokens = counter.count_messages(full)
 
-    if full_tokens <= policy.application_tokens:
+    application_limit = policy.application_tokens - additional_reserve_tokens
+    if application_limit < 0:
+        raise ContextTooLarge("additional context reserve exceeds the application budget")
+
+    if full_tokens <= application_limit:
         components = {
             "fixed": counter.count_messages(fixed_messages),
             "summary": 0,
@@ -149,14 +154,24 @@ def build_generation_context(
             source_revision=session.revision,
         )
 
+    required_prefix = choose_summary_prefix(
+        session,
+        fixed_messages,
+        pending_user,
+        policy,
+        counter,
+        additional_reserve_tokens=additional_reserve_tokens,
+    )
     if summary is None:
         raise ContextMaintenanceRequired("long conversation has no valid derived summary")
     covered = len(summary.source.covered_message_ids)
+    if covered < len(required_prefix):
+        raise ContextMaintenanceRequired("derived summary does not cover enough older history")
     recent = durable[covered:]
     summary_message = render_summary(summary)
     bounded = [*fixed_messages, summary_message, *recent, pending]
     application_tokens = counter.count_messages(bounded)
-    if application_tokens > policy.application_tokens:
+    if application_tokens > application_limit:
         raise ContextMaintenanceRequired("derived summary does not cover enough older history")
     components = {
         "fixed": counter.count_messages(fixed_messages),

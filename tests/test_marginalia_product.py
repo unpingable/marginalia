@@ -595,7 +595,7 @@ def test_valid_summary_bounds_provider_context_and_success_commits_once(
         "_schedule_context_maintenance",
         lambda **kwargs: scheduled.append(kwargs),
     )
-    prefix = session.messages[:4]
+    prefix = session.messages
     summary = ContextSummary(
         source=source_for(session, prefix),
         generator=SummaryGenerator(
@@ -643,10 +643,57 @@ def test_valid_summary_bounds_provider_context_and_success_commits_once(
     forwarded = adapter._governed_chat_adapter.chat_send.await_args.kwargs["messages"]
     assert "[MARGINALIA_DERIVED_CONTEXT_V1]" in str(forwarded)
     assert prefix[0].content not in str(forwarded)
-    assert session.messages[4].content in str(forwarded)
     durable = adapter._get_session_store("default").get(session.id)
     assert len(durable.messages) == before_count + 2
     assert [item.content for item in durable.messages[-2:]] == [
         prompt,
         "The governed project response.",
     ]
+
+
+def test_immediately_valid_but_lookahead_stale_summary_never_launches_provider(
+    product_client,
+    monkeypatch,
+) -> None:
+    client, adapter = product_client
+    session = _seed_long_product_session(client, adapter)
+    context_store = _enable_test_budget(adapter, monkeypatch)
+    scheduled = []
+    monkeypatch.setattr(
+        adapter,
+        "_schedule_context_maintenance",
+        lambda **kwargs: scheduled.append(kwargs),
+    )
+    prefix = session.messages[:4]
+    context_store.save(
+        ContextSummary(
+            source=source_for(session, prefix),
+            generator=SummaryGenerator(configured_model="claude-sonnet-4-20250514"),
+            created_at=utc_now(),
+            sections=SummarySections(
+                narrative_recap=[
+                    SummaryFact(text="Derived context.", evidence_message_ids=[prefix[0].id])
+                ]
+            ),
+        )
+    )
+    before = session.to_dict()
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "fiction-model",
+            "project_id": "default",
+            "session_id": session.id,
+            "messages": [
+                *[{"role": item.role, "content": item.content} for item in session.messages],
+                {"role": "user", "content": "Continue."},
+            ],
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["failure_type"] == "context_maintenance"
+    assert adapter._governed_chat_adapter.chat_send.await_count == 0
+    assert adapter._get_session_store("default").get(session.id).to_dict() == before
+    assert len(scheduled) == 1

@@ -257,3 +257,44 @@ def test_proactive_lookahead_covers_more_than_the_immediate_minimum() -> None:
     )
 
     assert len(proactive) > len(immediate)
+
+
+def test_interactive_context_requires_the_same_lookahead_as_prebuild() -> None:
+    session = session_with_pairs(3)
+    incident_policy = policy()
+    counter = WordCounter()
+    immediate = choose_summary_prefix(session, [], "Continue.", incident_policy, counter)
+    proactive = choose_summary_prefix(
+        session,
+        [],
+        "Continue.",
+        incident_policy,
+        counter,
+        additional_reserve_tokens=maintenance_lookahead_tokens(incident_policy),
+    )
+    assert len(immediate) < len(proactive)
+
+    with pytest.raises(ContextMaintenanceRequired, match="does not cover enough"):
+        build_generation_context(
+            session=session,
+            pending_user="Continue.",
+            fixed_messages=[],
+            policy=incident_policy,
+            counter=counter,
+            summary=summary_for(session, immediate),
+            additional_reserve_tokens=maintenance_lookahead_tokens(incident_policy),
+        )
+
+    built = build_generation_context(
+        session=session,
+        pending_user="Continue.",
+        fixed_messages=[],
+        policy=incident_policy,
+        counter=counter,
+        summary=summary_for(session, proactive),
+        additional_reserve_tokens=maintenance_lookahead_tokens(incident_policy),
+    )
+    assert built.metrics.summarized_message_count == len(proactive)
+    assert built.metrics.application_tokens <= (
+        incident_policy.application_tokens - maintenance_lookahead_tokens(incident_policy)
+    )
