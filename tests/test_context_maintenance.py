@@ -136,6 +136,57 @@ async def test_interrupted_summary_resumes_without_repeating_completed_chunks(
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_survives_configured_alias_change_for_same_upstream(
+    tmp_path: Path,
+) -> None:
+    session = make_session()
+    store = ContextSummaryStore(tmp_path)
+    first_calls = 0
+
+    async def interrupt(messages, model):
+        nonlocal first_calls
+        first_calls += 1
+        if first_calls == 2:
+            raise RuntimeError("pause after first checkpoint")
+        return result_for(messages, first_calls)
+
+    first = ContextMaintainer(
+        store=store,
+        policy=maintenance_policy(),
+        counter=WordCounter(),
+        configured_model="claude-writing-alias",
+        provider_id="claude-local",
+        model_id="sonnet",
+        generate=interrupt,
+    )
+    with pytest.raises(RuntimeError, match="pause after first"):
+        await first.maintain(session, session.messages)
+    assert len(store.load_work(session.id).chunks) == 1
+
+    resumed_calls = 0
+
+    async def resume(messages, model):
+        nonlocal resumed_calls
+        resumed_calls += 1
+        return result_for(messages, 100 + resumed_calls)
+
+    renamed = ContextMaintainer(
+        store=store,
+        policy=maintenance_policy(),
+        counter=WordCounter(),
+        configured_model="claude-context-summary",
+        provider_id="claude-local",
+        model_id="sonnet",
+        generate=resume,
+    )
+    summary = await renamed.maintain(session, session.messages)
+
+    assert resumed_calls == 4
+    assert summary.generator.configured_model == "claude-context-summary"
+    assert store.load_work(session.id).generator_model == "claude-context-summary"
+
+
+@pytest.mark.asyncio
 async def test_interrupted_merge_resumes_without_repeating_completed_merges(
     tmp_path: Path,
 ) -> None:

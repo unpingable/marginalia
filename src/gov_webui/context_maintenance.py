@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from gov_webui.context_budget import TokenCounter, as_messages
 from gov_webui.context_summary import (
+    SUMMARY_PROMPT_VERSION,
     ContextPolicy,
     ContextSummary,
     ContextSummaryError,
@@ -202,9 +203,26 @@ class ContextMaintainer:
         )
         work = self.store.load_work(session.id)
         reusable = False
+        cached_steps = [*(work.chunks if work is not None else []), *(work.merges if work else [])]
+        same_generator = bool(
+            work
+            and (
+                work.generator_model == self.configured_model
+                or (
+                    cached_steps
+                    and self.provider_id is not None
+                    and self.model_id is not None
+                    and all(
+                        item.provider_id == self.provider_id and item.model_id == self.model_id
+                        for item in cached_steps
+                    )
+                )
+            )
+        )
         if (
             work is not None
-            and work.generator_model == self.configured_model
+            and same_generator
+            and work.prompt_version == SUMMARY_PROMPT_VERSION
             and work.source.session_id == source.session_id
             and work.source.context_id == source.context_id
             and len(work.source.covered_message_ids) <= len(source_messages)
@@ -224,7 +242,13 @@ class ContextMaintainer:
                 updated_at=utc_now(),
             )
         else:
-            work = work.model_copy(update={"source": source, "updated_at": utc_now()})
+            work = work.model_copy(
+                update={
+                    "source": source,
+                    "generator_model": self.configured_model,
+                    "updated_at": utc_now(),
+                }
+            )
 
         completed = {item.source_sha256: item for item in work.chunks}
         ordered: list[SummaryWorkChunk] = []
