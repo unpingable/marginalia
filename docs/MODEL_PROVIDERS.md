@@ -58,6 +58,12 @@ source repository.
           "id": "claude-writing",
           "model": "sonnet",
           "label": "Claude Sonnet"
+        },
+        {
+          "id": "claude-context-summary",
+          "model": "sonnet",
+          "label": "Claude Sonnet context maintenance",
+          "purpose": "context-maintenance"
         }
       ]
     },
@@ -112,6 +118,11 @@ The nested `model` value is the exact upstream model ID.
 An `existing-command` model without a nested `model` delegates to the
 existing command's default model behavior.
 
+Model `purpose` defaults to `writing`. A `context-maintenance` model is internal:
+it is omitted from writer model lists, rejected by story-generation APIs, and
+may be resolved only by the derived-context maintenance path. The configured
+default must be a writer-selectable model.
+
 Only `http` and `https` base URLs without embedded credentials, query
 strings, or fragments are accepted. `api_key_env` contains an environment
 variable name, never a credential. Unknown fields, protocols, models, duplicate
@@ -136,6 +147,13 @@ terminate their process group on timeout/cancellation, and normalize command
 failures without exposing raw stderr. Local commands currently emit whole
 assistant messages rather than token deltas, so Marginalia receives a bounded
 completion chunk after each command turn finishes.
+
+For an internal Claude `context-maintenance` model, the adapter also supplies
+the exact `SummarySections` JSON Schema through Claude's native
+`--json-schema` interface. Ordinary Claude writing models do not receive that
+schema. Marginalia still parses and validates the returned object, evidence
+IDs, and compaction bounds before checkpointing it; native constrained output
+does not replace application validation.
 
 For HTTP providers, `timeout_seconds` is a total execution deadline, not merely
 a socket timeout. Optional `connect_timeout_seconds` and
@@ -211,9 +229,10 @@ counter; they do not alter provider sampling or model selection.
 
 `MARGINALIA_CONTEXT_MAINTENANCE_MODEL` names a configured model used only to
 derive long-session summaries. The household rollout uses
-`claude-sonnet-4-20250514` (provider `claude-code-local`, upstream
-`sonnet`). It must be explicitly available in the private provider catalog;
-Marginalia never substitutes it for the writer's selected model.
+`claude-context-summary` (provider `claude-code-local`, upstream `sonnet`) with
+`purpose` set to `context-maintenance`. It must be explicitly available in the
+private provider catalog; Marginalia never substitutes it for the writer's
+selected model.
 
 Bounded context is disabled per project until an operator prebuilds and
 validates every required summary, then activates it. Maintenance calls use an

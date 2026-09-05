@@ -310,7 +310,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-config", default=os.environ.get("MARGINALIA_MODEL_CONFIG", ""))
     parser.add_argument(
         "--maintenance-model",
-        default=os.environ.get("MARGINALIA_CONTEXT_MAINTENANCE_MODEL", "claude-sonnet-4-20250514"),
+        default=os.environ.get("MARGINALIA_CONTEXT_MAINTENANCE_MODEL", "claude-context-summary"),
     )
     parser.add_argument("--governor-socket", default=os.environ.get("GOVERNOR_SOCKET", ""))
     commands = parser.add_subparsers(dest="command", required=True)

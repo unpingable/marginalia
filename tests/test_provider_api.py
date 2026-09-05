@@ -117,6 +117,36 @@ def test_configured_model_list_is_explicit(provider_client) -> None:
     ]
 
 
+def test_context_maintenance_model_is_not_writer_selectable(provider_client) -> None:
+    client, adapter = provider_client
+    config_path = Path(adapter.MARGINALIA_MODEL_CONFIG)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["providers"][0]["models"].append(
+        {
+            "id": "internal-context-summary",
+            "model": "upstream-summary",
+            "label": "Internal context summary",
+            "purpose": "context-maintenance",
+        }
+    )
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    listed = client.get("/v1/models")
+    assert listed.status_code == 200
+    assert "internal-context-summary" not in {item["id"] for item in listed.json()["data"]}
+    assert client.get("/v1/models/internal-context-summary").status_code == 404
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "internal-context-summary",
+            "messages": [{"role": "user", "content": "Do not run."}],
+        },
+    )
+    assert response.status_code == 422
+    assert adapter._governed_chat_adapter.chat_send.await_count == 0
+
+
 def test_model_api_and_new_session_use_an_available_default(provider_client) -> None:
     client, adapter = provider_client
     config_path = Path(adapter.MARGINALIA_MODEL_CONFIG)

@@ -63,7 +63,14 @@ class ContextOperations:
             raise ContextSummaryError(
                 "context build requires --model-config or MARGINALIA_MODEL_CONFIG"
             )
-        return load_provider_catalog(self.model_config).require_available(self.maintenance_model_id)
+        model = load_provider_catalog(self.model_config).require_available(
+            self.maintenance_model_id
+        )
+        if model.purpose != "context-maintenance":
+            raise ContextSummaryError(
+                "configured context-maintenance model is not marked for context maintenance"
+            )
+        return model
 
     def _projects(
         self,

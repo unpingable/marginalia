@@ -72,10 +72,26 @@ def _catalog(
     return load_provider_catalog(config), environ
 
 
-def _claude_catalog(tmp_path: Path, executable: Path):
+def _claude_catalog(tmp_path: Path, executable: Path, *, with_maintenance: bool = False):
     workdir = tmp_path / "claude-work"
     workdir.mkdir(exist_ok=True)
     config = tmp_path / "claude-providers.json"
+    models = [
+        {
+            "id": "claude-writing",
+            "model": "sonnet",
+            "label": "Claude Sonnet",
+        }
+    ]
+    if with_maintenance:
+        models.append(
+            {
+                "id": "claude-context-summary",
+                "model": "sonnet",
+                "label": "Claude Sonnet context maintenance",
+                "purpose": "context-maintenance",
+            }
+        )
     config.write_text(
         json.dumps(
             {
@@ -90,13 +106,7 @@ def _claude_catalog(tmp_path: Path, executable: Path):
                             "executable_env": "TEST_CLAUDE_PATH",
                             "working_directory_env": "TEST_CLAUDE_WORKDIR",
                         },
-                        "models": [
-                            {
-                                "id": "claude-writing",
-                                "model": "sonnet",
-                                "label": "Claude Sonnet",
-                            }
-                        ],
+                        "models": models,
                     }
                 ],
             }
@@ -236,6 +246,51 @@ print(json.dumps({
         "completion_tokens": 7,
         "total_tokens": 18,
     }
+
+
+@pytest.mark.asyncio
+async def test_claude_context_maintenance_uses_native_json_schema(tmp_path: Path) -> None:
+    executable = _executable(
+        tmp_path / "claude",
+        """import json
+import sys
+print(json.dumps({
+    "result": json.dumps({"arguments": sys.argv[1:]}),
+    "usage": {"input_tokens": 3, "output_tokens": 2},
+}))
+""",
+    )
+    catalog, environ = _claude_catalog(tmp_path, executable, with_maintenance=True)
+
+    response = await LocalCommandTransport(
+        catalog.resolve("claude-context-summary"), environ=environ
+    ).complete("Return a source-bound summary.")
+
+    arguments = json.loads(response.content)["arguments"]
+    schema_index = arguments.index("--json-schema")
+    schema = json.loads(arguments[schema_index + 1])
+    assert schema["type"] == "object"
+    assert set(schema["properties"]) == {
+        "narrative_recap",
+        "character_state",
+        "observed_facts",
+        "unresolved_threads",
+        "temporal_location_state",
+        "uncertainties",
+    }
+    assert arguments[:schema_index] == [
+        "--print",
+        "--output-format",
+        "json",
+        "--verbose",
+        "--model",
+        "sonnet",
+        "--tools",
+        "",
+        "--no-session-persistence",
+        "--disable-slash-commands",
+        "--safe-mode",
+    ]
 
 
 @pytest.mark.asyncio

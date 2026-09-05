@@ -175,7 +175,7 @@ MARGINALIA_BACKUP_REQUIRE_REMOTE = os.environ.get(
 ).lower() in {"true", "1", "yes"}
 MARGINALIA_MODEL_CONFIG = os.environ.get("MARGINALIA_MODEL_CONFIG", "").strip()
 MARGINALIA_CONTEXT_MAINTENANCE_MODEL = os.environ.get(
-    "MARGINALIA_CONTEXT_MAINTENANCE_MODEL", "claude-sonnet-4-20250514"
+    "MARGINALIA_CONTEXT_MAINTENANCE_MODEL", "claude-context-summary"
 ).strip()
 CONTEXT_MAINTENANCE_RETRY_DELAYS_SECONDS = (15.0, 60.0, 180.0)
 
@@ -539,6 +539,8 @@ def _resolve_configured_model(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ProviderError as exc:
         raise HTTPException(status_code=503, detail=exc.to_dict()) from exc
+    if model.purpose != "writing":
+        raise HTTPException(status_code=422, detail=f"model {model.id!r} is not writer-selectable")
     return model.id, model
 
 
@@ -832,6 +834,7 @@ async def list_models() -> ModelList:
                         unavailable_reason=model.availability_error(),
                     )
                     for model in catalog.models
+                    if model.purpose == "writing"
                 ],
             )
         adapter = _get_governed_chat_adapter()
@@ -854,6 +857,8 @@ async def get_model(model_id: str) -> ModelInfo:
             model = catalog.resolve(model_id)
         except ProviderConfigurationError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if model.purpose != "writing":
+            raise HTTPException(status_code=404, detail=f"model {model_id!r} is not exposed")
         return ModelInfo(
             id=model.id,
             label=model.label,
@@ -2345,6 +2350,10 @@ async def _perform_context_maintenance_once(
         if catalog is None:
             raise ContextSummaryError("context maintenance requires configured model providers")
         maintenance_model = catalog.require_available(MARGINALIA_CONTEXT_MAINTENANCE_MODEL)
+        if maintenance_model.purpose != "context-maintenance":
+            raise ContextSummaryError(
+                "configured context-maintenance model is not marked for context maintenance"
+            )
 
         async def generate(
             prompt: list[dict[str, str]], configured_model: str

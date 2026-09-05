@@ -27,6 +27,7 @@ _PROTOCOLS = {
     "openai-compatible",
 }
 _COMMAND_ADAPTERS = {"claude-code", "kimi-code"}
+_MODEL_PURPOSES = {"writing", "context-maintenance"}
 
 
 class ProviderConfigurationError(ValueError):
@@ -88,6 +89,7 @@ class ConfiguredModel:
     timeout_seconds: float
     command_model: str | None = None
     command: CommandConfiguration | None = None
+    purpose: str = "writing"
     tokenizer_encoding: str = "o200k_base"
     token_safety_multiplier: float = 1.0
 
@@ -144,6 +146,8 @@ class ProviderCatalog:
             raise ProviderConfigurationError(
                 f"default_model {self.default_model!r} is not an enabled model"
             )
+        if lookup[self.default_model].purpose != "writing":
+            raise ProviderConfigurationError("default_model must be a writer-selectable model")
 
     def resolve(self, model_id: str | None) -> ConfiguredModel:
         selected = model_id or self.default_model
@@ -161,7 +165,11 @@ class ProviderCatalog:
         if configured_default.availability_error(environ) is None:
             return configured_default
         return next(
-            (model for model in self.models if model.availability_error(environ) is None),
+            (
+                model
+                for model in self.models
+                if model.purpose == "writing" and model.availability_error(environ) is None
+            ),
             None,
         )
 
@@ -391,7 +399,14 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
             model = _require_object(model_value, model_location)
             _reject_unknown(
                 model,
-                {"id", "model", "label", "tokenizer_encoding", "token_safety_multiplier"},
+                {
+                    "id",
+                    "model",
+                    "label",
+                    "purpose",
+                    "tokenizer_encoding",
+                    "token_safety_multiplier",
+                },
                 model_location,
             )
             configured_id = _identifier(model.get("id"), f"{model_location}.id")
@@ -399,6 +414,11 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                 raise ProviderConfigurationError(f"duplicate configured model id {configured_id!r}")
             configured_ids.add(configured_id)
             label = _required_string(model.get("label"), f"{model_location}.label")
+            purpose = _required_string(model.get("purpose", "writing"), f"{model_location}.purpose")
+            if purpose not in _MODEL_PURPOSES:
+                raise ProviderConfigurationError(
+                    f"{model_location}.purpose {purpose!r} is unsupported"
+                )
             tokenizer_encoding = model.get("tokenizer_encoding", "o200k_base")
             if not isinstance(tokenizer_encoding, str) or not re.fullmatch(
                 r"[A-Za-z0-9_.-]{1,80}", tokenizer_encoding
@@ -448,6 +468,7 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                     timeout_seconds=timeout_seconds,
                     command_model=command_model,
                     command=command,
+                    purpose=purpose,
                     tokenizer_encoding=tokenizer_encoding,
                     token_safety_multiplier=token_safety_multiplier,
                 )
@@ -575,21 +596,31 @@ class LocalCommandTransport:
                 None,
             )
         if self.model.command.adapter == "claude-code":
+            arguments = [
+                executable,
+                "--print",
+                "--output-format",
+                "json",
+                "--verbose",
+                "--model",
+                self.model.model_id,
+                "--tools",
+                "",
+                "--no-session-persistence",
+                "--disable-slash-commands",
+                "--safe-mode",
+            ]
+            if self.model.purpose == "context-maintenance":
+                from gov_webui.context_summary import SummarySections
+
+                arguments.extend(
+                    (
+                        "--json-schema",
+                        json.dumps(SummarySections.model_json_schema(), separators=(",", ":")),
+                    )
+                )
             return (
-                [
-                    executable,
-                    "--print",
-                    "--output-format",
-                    "json",
-                    "--verbose",
-                    "--model",
-                    self.model.model_id,
-                    "--tools",
-                    "",
-                    "--no-session-persistence",
-                    "--disable-slash-commands",
-                    "--safe-mode",
-                ],
+                arguments,
                 prompt.encode("utf-8"),
             )
         raise ProviderError(

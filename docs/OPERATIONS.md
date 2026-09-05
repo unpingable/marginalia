@@ -211,7 +211,7 @@ docker compose exec -T marginalia python3 -m gov_webui.ops \
 docker compose exec -T marginalia python3 -m gov_webui.ops \
   --data-root /data --context-id erin-writing \
   --model-config /path/to/models.json \
-  --maintenance-model claude-sonnet-4-20250514 \
+  --maintenance-model claude-context-summary \
   context-build --project-id PROJECT_ID
 
 docker compose exec -T marginalia python3 -m gov_webui.ops \

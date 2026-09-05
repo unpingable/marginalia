@@ -136,14 +136,24 @@ recorded for end-to-end context-window planning. Agent Governor contract v1
 does not accept a native output cap on `chat.send`, so that reserve is planning
 headroom rather than a provider-enforced completion limit.
 
+Interactive admission also retains the same maintenance lookahead used by the
+prebuilder: the smaller of 12,000 tokens or one third of the application
+budget. With the initial policy this is 10,666 tokens, so an ordinary writing
+provider call is launched only when current application-controlled input is at
+most 21,334 tokens (about 37,334 predicted tokens including provider overhead).
+The remaining nominal envelope is growth and maintenance headroom, not capacity
+that the interactive path may silently consume while its derived summary is
+behind.
+
 Counts use a real configured tokenizer (`o200k_base` by default), optional
 model-specific safety multiplication, and message framing overhead. Marginalia
 preflights before launching the writing provider. Mandatory
 project/canon/prompt input that cannot fit returns typed `context_too_large`.
-If a valid summary is not sufficiently far ahead, the interactive request
-schedules resumable maintenance outside the request and returns typed
-`context_maintenance` immediately. It never launches the remote maintenance
-provider inline. Neither outcome mutates narrative history.
+If a valid summary does not cover the prefix required by that same lookahead,
+the interactive request schedules resumable maintenance outside the request
+and returns typed `context_maintenance` immediately. It launches neither the
+writing provider nor the remote maintenance provider inline. Neither outcome
+mutates narrative history.
 
 A summary is derived cache state, never canon or authored prose. It records the
 session/context, observed revision, every covered message ID, a SHA-256 digest
