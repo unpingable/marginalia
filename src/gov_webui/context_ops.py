@@ -234,6 +234,8 @@ class ContextOperations:
     ) -> dict[str, Any]:
         reports = []
         maintenance_model = self._maintenance_model()
+        catalog = load_provider_catalog(self.model_config)
+        compatible_models = catalog.compatible_model_ids(maintenance_model)
         for project in self._projects(workspace_id=workspace_id, project_id=project_id):
             store = self._store(project)
             policy = store.policy()
@@ -312,6 +314,7 @@ class ContextOperations:
                         provider_id=maintenance_model.provider_id,
                         model_id=maintenance_model.model_id,
                         generate=generate,
+                        compatible_configured_models=compatible_models,
                     )
                     summary = await maintainer.maintain(session, source)
                     reports.append(

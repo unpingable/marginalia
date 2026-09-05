@@ -179,6 +179,7 @@ class ContextMaintainer:
         provider_id: str | None,
         model_id: str | None,
         generate: SummaryGeneratorCall,
+        compatible_configured_models: frozenset[str] | None = None,
     ) -> None:
         self.store = store
         self.policy = policy
@@ -187,6 +188,9 @@ class ContextMaintainer:
         self.provider_id = provider_id
         self.model_id = model_id
         self.generate = generate
+        self.compatible_configured_models = compatible_configured_models or frozenset(
+            {configured_model}
+        )
 
     async def maintain(
         self,
@@ -203,25 +207,9 @@ class ContextMaintainer:
         )
         work = self.store.load_work(session.id)
         reusable = False
-        cached_steps = [*(work.chunks if work is not None else []), *(work.merges if work else [])]
-        same_generator = bool(
-            work
-            and (
-                work.generator_model == self.configured_model
-                or (
-                    cached_steps
-                    and self.provider_id is not None
-                    and self.model_id is not None
-                    and all(
-                        item.provider_id == self.provider_id and item.model_id == self.model_id
-                        for item in cached_steps
-                    )
-                )
-            )
-        )
         if (
             work is not None
-            and same_generator
+            and work.generator_model in self.compatible_configured_models
             and work.prompt_version == SUMMARY_PROMPT_VERSION
             and work.source.session_id == source.session_id
             and work.source.context_id == source.context_id

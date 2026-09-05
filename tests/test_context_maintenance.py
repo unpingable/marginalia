@@ -178,6 +178,7 @@ async def test_checkpoint_survives_configured_alias_change_for_same_upstream(
         provider_id="claude-local",
         model_id="sonnet",
         generate=resume,
+        compatible_configured_models=frozenset({"claude-writing-alias", "claude-context-summary"}),
     )
     summary = await renamed.maintain(session, session.messages)
 

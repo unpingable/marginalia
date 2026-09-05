@@ -2373,6 +2373,7 @@ async def _perform_context_maintenance_once(
             provider_id=maintenance_model.provider_id,
             model_id=maintenance_model.model_id,
             generate=generate,
+            compatible_configured_models=catalog.compatible_model_ids(maintenance_model),
         )
         summary = await maintainer.maintain(session, source_messages)
         telemetry_logger.info(

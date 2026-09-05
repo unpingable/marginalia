@@ -149,6 +149,34 @@ def test_unknown_model_refused_without_fallback(tmp_path: Path) -> None:
     assert catalog.resolve("local-model").provider_id == "local"
 
 
+def test_compatible_aliases_require_exact_protocol_provider_and_upstream_model(
+    tmp_path: Path,
+) -> None:
+    path = write_config(tmp_path / "providers.json")
+    config = json.loads(path.read_text(encoding="utf-8"))
+    config["providers"][1]["models"].extend(
+        [
+            {
+                "id": "local-model-maintenance",
+                "model": "upstream-local",
+                "label": "Same upstream alias",
+                "purpose": "context-maintenance",
+            },
+            {
+                "id": "local-model-other",
+                "model": "upstream-other",
+                "label": "Different upstream",
+            },
+        ]
+    )
+    path.write_text(json.dumps(config), encoding="utf-8")
+    catalog = load_provider_catalog(path)
+
+    assert catalog.compatible_model_ids(catalog.resolve("local-model-maintenance")) == frozenset(
+        {"local-model", "local-model-maintenance"}
+    )
+
+
 def test_missing_credential_refused_without_substitution(tmp_path: Path) -> None:
     catalog = load_provider_catalog(write_config(tmp_path / "providers.json"))
 

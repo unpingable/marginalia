@@ -191,6 +191,16 @@ class ProviderCatalog:
             )
         return model
 
+    def compatible_model_ids(self, model: ConfiguredModel) -> frozenset[str]:
+        """Configured aliases with the same exact transport/provider/model identity."""
+        return frozenset(
+            candidate.id
+            for candidate in self.models
+            if candidate.protocol == model.protocol
+            and candidate.provider_id == model.provider_id
+            and candidate.model_id == model.model_id
+        )
+
 
 def _require_object(value: Any, location: str) -> dict[str, Any]:
     if not isinstance(value, dict):
