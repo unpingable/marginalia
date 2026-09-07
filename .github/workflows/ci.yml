@@ -27,6 +27,8 @@ concurrency:
 env:
   PYTHON_VERSION: "3.11"
   AG_CONTRACT_COMMIT: e279a94326a0a13dbe43473846b53e4c3a9b31f2
+  AG_NG_CONTRACT_COMMIT: cb85d363e2495a75f78c28fb8ce9b46af1f289c0
+  DOCKET_CONTRACT_COMMIT: c49ad8d0f26fb2a13b9dbafdde84d7abfe1f867b
 
 jobs:
   quality:
@@ -81,10 +83,28 @@ jobs:
           ref: ${{ env.AG_CONTRACT_COMMIT }}
           path: _agent_gov
 
+      - name: Checkout the qualified ag-ng contract
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: unpingable/ag_ng
+          ref: ${{ env.AG_NG_CONTRACT_COMMIT }}
+          path: _ag_ng
+
+      - name: Checkout the qualified Docket contract
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: unpingable/docket
+          ref: ${{ env.DOCKET_CONTRACT_COMMIT }}
+          path: _docket
+
       - name: Verify the Agent Governor contract
         run: |
           test "$(tr -d '[:space:]' < AG_CONTRACT_COMMIT)" = "$AG_CONTRACT_COMMIT"
           test "$(git -C _agent_gov rev-parse HEAD)" = "$AG_CONTRACT_COMMIT"
+          test "$(tr -d '[:space:]' < AG_NG_CONTRACT_COMMIT)" = "$AG_NG_CONTRACT_COMMIT"
+          test "$(git -C _ag_ng rev-parse HEAD)" = "$AG_NG_CONTRACT_COMMIT"
+          test "$(tr -d '[:space:]' < DOCKET_CONTRACT_COMMIT)" = "$DOCKET_CONTRACT_COMMIT"
+          test "$(git -C _docket rev-parse HEAD)" = "$DOCKET_CONTRACT_COMMIT"
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -125,6 +145,8 @@ jobs:
       - name: Run the deterministic qualification suite
         env:
           MARGINALIA_AG_SOURCE_DIR: ${{ github.workspace }}/_agent_gov
+          MARGINALIA_AG_NG_SOURCE_DIR: ${{ github.workspace }}/_ag_ng
+          MARGINALIA_DOCKET_SOURCE_DIR: ${{ github.workspace }}/_docket
         run: make test
 
   browser:
@@ -136,7 +158,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "24"
           cache: npm
@@ -165,9 +187,31 @@ jobs:
           ref: ${{ env.AG_CONTRACT_COMMIT }}
           path: _agent_gov
 
+      - name: Checkout the qualified ag-ng contract
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: unpingable/ag_ng
+          ref: ${{ env.AG_NG_CONTRACT_COMMIT }}
+          path: _ag_ng
+
+      - name: Checkout the qualified Docket contract
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: unpingable/docket
+          ref: ${{ env.DOCKET_CONTRACT_COMMIT }}
+          path: _docket
+
+      - name: Verify all qualified contracts
+        run: |
+          test "$(git -C _agent_gov rev-parse HEAD)" = "$AG_CONTRACT_COMMIT"
+          test "$(git -C _ag_ng rev-parse HEAD)" = "$AG_NG_CONTRACT_COMMIT"
+          test "$(git -C _docket rev-parse HEAD)" = "$DOCKET_CONTRACT_COMMIT"
+
       - name: Stage the exact local dependencies
         env:
           MARGINALIA_AG_SOURCE_DIR: ${{ github.workspace }}/_agent_gov
+          MARGINALIA_AG_NG_SOURCE_DIR: ${{ github.workspace }}/_ag_ng
+          MARGINALIA_DOCKET_SOURCE_DIR: ${{ github.workspace }}/_docket
         run: ./sync-deps.sh
 
       - name: Build the production image
