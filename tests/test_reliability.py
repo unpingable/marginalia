@@ -382,7 +382,10 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_toke
     monkeypatch.setenv("CODEX_NATIVE_PATH", str(provider))
     monkeypatch.setenv("FIXTURE_PROVIDER_PID", str(provider_pid))
     monkeypatch.setenv("FIXTURE_DESCENDANT_PID", str(descendant_pid))
-    monkeypatch.setenv("MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS", "0.2")
+    # Leave enough time for a loaded qualification host to start the real
+    # wrapper and fixture interpreter. The fixture's 60-second sleep, rather
+    # than process-startup variance, must be what trips this timeout.
+    monkeypatch.setenv("MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS", "2")
     monkeypatch.setenv("MARGINALIA_PROVIDER_CLEANUP_GRACE_SECONDS", "0.2")
     monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}")
     monkeypatch.setenv("PYTHONPATH", str(Path.cwd() / "src"))
@@ -407,14 +410,16 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_toke
         await asyncio.sleep(0.01)
     client = DaemonChatClient(socket_path, rpc_timeout_seconds=1, chat_timeout_seconds=5)
     try:
-        with pytest.raises(RuntimeError, match="timed out after 0.2 seconds"):
+        with pytest.raises(RuntimeError, match="timed out after 2 seconds"):
             await client.chat_send(
                 [{"role": "user", "content": "WEDGE"}],
                 model="codex-default",
                 context_id="synthetic",
             )
-        # Preserve the 200 ms negative control for A while allowing ordinary
-        # interpreter startup variance for the immediate recovery request B.
+        assert provider_pid.exists(), "timeout elapsed before the fixture provider started"
+        assert descendant_pid.exists(), "fixture provider did not start its child"
+        # Use the same bound for the immediate recovery request B. Unlike A,
+        # it returns as soon as the provider interpreter is ready.
         monkeypatch.setenv("MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS", "2")
         result = await client.chat_send(
             [{"role": "user", "content": "B"}],
