@@ -2,7 +2,7 @@
 
 Run identity: `marginalia-gate3a-20260907-001`
 
-Status: durable guest qualification producer running.
+Status: passed and evidence copied to the host. See `GATE3A-QUALIFICATION.md`.
 
 ## Frozen inputs
 
@@ -29,7 +29,7 @@ Status: durable guest qualification producer running.
 - Guest source roots: `/srv/qualification/ag_ng` and `/srv/qualification/docket`
 - Host log: `.gate3/qualification-vm/marginalia-gate3a-20260907-001/serial.log`
 - Guest results: `/srv/qualification/results/`
-- Host-copied results: `.gate3/qualification-vm/marginalia-gate3a-20260907-001/results/`
+- Host-copied results: `.gate3/qualification-vm/marginalia-gate3a-20260907-001/results-final/`
 
 ## Guest capability remediation
 
@@ -41,7 +41,7 @@ Status: durable guest qualification producer running.
 - The production host's namespace and AppArmor settings were not changed.
 - The real Bubblewrap probe passed after the guest profile was loaded.
 
-## Expected terminal records
+## Terminal records
 
 - `environment.txt`: OS, kernel, CPU, memory, user-namespace and Bubblewrap probes.
 - `toolchain.txt`: compiler, Cargo, Git, Bubblewrap, SQLite, and package identities.
@@ -52,15 +52,16 @@ Status: durable guest qualification producer running.
 - `docket-reproduction.log` and `.status`.
 - `RESULT`: one unambiguous Gate 3A result.
 
+The producer exited successfully at `2026-09-07T13:49:01+00:00`. `RESULT` says
+`result=pass`. The complete evidence set was copied before any VM teardown.
+
 ## Resume procedure
 
-1. Read this checkpoint; do not start a replacement VM or duplicate suite.
-2. Inspect `systemctl --user status marginalia-gate3a-20260907-001.service` and the QMP/serial records.
-3. Inspect the existing guest producer with `sudo systemctl status marginalia-gate3a-producer.service`; do not restart it while active.
-4. Connect only through the recorded loopback SSH endpoint and key in the local VM state directory.
-5. Inspect existing guest result/status files before taking any action.
-6. If the producer is still running, resume bounded monitoring without restarting it.
-7. If the VM stopped, classify the existing evidence before deciding whether the run is failed or indeterminate.
-8. The next authorized action after a passing `RESULT` is to seal the Gate 3A evidence and begin 3B. A contract/product defect or unresolved qualification failure stops the campaign.
+1. Read this checkpoint and `GATE3A-QUALIFICATION.md`; do not duplicate the completed suite.
+2. Use the host-copied result set for review. It is complete and sealed by the
+   SHA-256 manifest recorded in the qualification report.
+3. The VM may be stopped after the copied evidence and manifest are verified.
+4. Continue at Gate 3B. A companion contract/product defect or material scope
+   expansion still stops the campaign.
 
 Worker recovery does not imply recovery of an interrupted external provider execution.
