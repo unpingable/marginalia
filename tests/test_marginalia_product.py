@@ -108,6 +108,8 @@ def test_root_is_an_intentional_marginalia_writing_shell(product_client) -> None
     assert 'id="artifact-editor"' in response.text
     assert 'id="model-select"' in response.text
     assert "Category remains open" in response.text
+    assert 'id="rule-closes-category-toggle"' in response.text
+    assert "This rule lists every member of a category" in response.text
     for donor_term in (
         "Phosphor",
         "Desk",

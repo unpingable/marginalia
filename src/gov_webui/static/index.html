@@ -490,6 +490,8 @@
             <div class="item-list" id="world-rules"></div>
             <form class="inline-form" id="rule-form">
               <div class="field"><label for="rule-text">Rule</label><textarea id="rule-text" required placeholder="Magic always leaves a physical trace."></textarea></div>
+              <label class="save-state"><input id="rule-closes-category-toggle" type="checkbox"> This rule lists every member of a category</label>
+              <div class="field" id="rule-closes-category-field" hidden><label for="rule-closes-category">Complete category</label><input id="rule-closes-category" maxlength="240" placeholder="for example: the moons of Ardin"><span class="save-state">Use only when canon establishes the complete set. Leave off to keep the category open.</span></div>
               <div class="form-actions"><button type="button" class="small-button" data-cancel-form="rule-form">Cancel</button><button class="primary-button">Add rule</button></div>
             </form>
           </div>
@@ -2546,11 +2548,19 @@
           event.target.reset(); event.target.classList.remove("visible"); await loadBible(); toast("Character added");
         } catch (error) { toast(error.message); }
       });
+      $("#rule-closes-category-toggle").addEventListener("change", (event) => {
+        $("#rule-closes-category-field").hidden = !event.target.checked;
+        $("#rule-closes-category").disabled = !event.target.checked;
+        if (event.target.checked) $("#rule-closes-category").focus();
+        else $("#rule-closes-category").value = "";
+      });
+      $("#rule-closes-category").disabled = true;
       $("#rule-form").addEventListener("submit", async (event) => {
         event.preventDefault();
         try {
-          await api("/governor/fiction/world-rules", {method: "POST", body: JSON.stringify({rule: $("#rule-text").value, project_id: state.activeProjectId})});
-          event.target.reset(); event.target.classList.remove("visible"); await loadBible(); toast("World rule added");
+          const closesCategory = $("#rule-closes-category-toggle").checked ? $("#rule-closes-category").value.trim() : "";
+          await api("/governor/fiction/world-rules", {method: "POST", body: JSON.stringify({rule: $("#rule-text").value, project_id: state.activeProjectId, closes_category: closesCategory})});
+          event.target.reset(); $("#rule-closes-category-field").hidden = true; $("#rule-closes-category").disabled = true; event.target.classList.remove("visible"); await loadBible(); toast("World rule added");
         } catch (error) { toast(error.message); }
       });
       $("#forbidden-form").addEventListener("submit", async (event) => {
