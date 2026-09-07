@@ -153,3 +153,50 @@ def observed_from_normalized_usage(usage: Any) -> ObservedUsage:
         total_tokens=total,
         source="normalized",
     )
+
+
+def message_accounting(
+    *,
+    provider_id: str,
+    model_id: str,
+    usage: Any,
+    estimated_prompt_tokens: int | None = None,
+    latency_ms: float | None = None,
+    inference: str | None = None,
+    input_cost_per_million_usd: float | None = None,
+    output_cost_per_million_usd: float | None = None,
+) -> dict[str, Any]:
+    """Build honest per-message usage and provider-cost presentation data."""
+    observed = observed_from_normalized_usage(usage)
+    cost_status: Literal["known", "estimated", "unavailable"] = "unavailable"
+    cost_usd: float | None = None
+    cost_note = "The provider did not report cost and no price estimate is configured."
+    if inference == "local":
+        cost_status = "known"
+        cost_usd = 0.0
+        cost_note = "No provider API charge; local compute and electricity are not priced."
+    elif (
+        input_cost_per_million_usd is not None
+        and output_cost_per_million_usd is not None
+        and observed.prompt_tokens is not None
+        and observed.completion_tokens is not None
+    ):
+        cost_status = "estimated"
+        cost_usd = (
+            observed.prompt_tokens * input_cost_per_million_usd
+            + observed.completion_tokens * output_cost_per_million_usd
+        ) / 1_000_000
+        cost_note = "Estimated from configured token rates; provider billing remains authoritative."
+    return {
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "estimated_prompt_tokens": estimated_prompt_tokens,
+        "reported_prompt_tokens": observed.prompt_tokens,
+        "reported_completion_tokens": observed.completion_tokens,
+        "reported_total_tokens": observed.total_tokens,
+        "reported_source": observed.source,
+        "cost_status": cost_status,
+        "cost_usd": None if cost_usd is None else round(cost_usd, 8),
+        "cost_note": cost_note,
+        "latency_ms": None if latency_ms is None else round(latency_ms, 1),
+    }

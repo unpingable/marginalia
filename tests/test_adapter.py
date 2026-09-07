@@ -754,7 +754,7 @@ class TestGenerationOutcomeBoundary:
         assert "failure?.incident_id" in body
         assert "marginalia:draft:" in body
         assert "persistPromptDraft(content);" in body
-        assert "clearPromptDraft();" in body
+        assert "clearPromptDraft(content);" in body
         assert "failure?.retryable === false" in body
         assert "maintenance-dialog" in body
         assert "applyMaintenanceState" in body

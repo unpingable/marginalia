@@ -11,6 +11,7 @@ from gov_webui.usage_accounting import (
     RequestAccounting,
     observed_from_normalized_usage,
     observed_from_provider_usage,
+    message_accounting,
 )
 
 
@@ -199,3 +200,38 @@ def test_accounting_without_an_estimate_still_records_cost() -> None:
     assert payload["estimated_prompt_tokens"] is None
     assert payload["prompt_delta"] is None
     assert payload["observed_cost_usd"] == 0.0466262
+
+
+def test_message_cost_is_estimated_only_from_explicit_rates() -> None:
+    payload = message_accounting(
+        provider_id="gateway",
+        model_id="writer",
+        usage={"prompt_tokens": 10_000, "completion_tokens": 2_000, "total_tokens": 12_000},
+        input_cost_per_million_usd=1.0,
+        output_cost_per_million_usd=3.0,
+    )
+    assert payload["cost_status"] == "estimated"
+    assert payload["cost_usd"] == 0.016
+    assert payload["reported_total_tokens"] == 12_000
+
+
+def test_local_provider_cost_is_known_zero_but_compute_is_not_priced() -> None:
+    payload = message_accounting(
+        provider_id="ollama",
+        model_id="local",
+        usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        inference="local",
+    )
+    assert payload["cost_status"] == "known"
+    assert payload["cost_usd"] == 0
+    assert "electricity" in payload["cost_note"]
+
+
+def test_unpriced_hosted_provider_cost_is_explicitly_unavailable() -> None:
+    payload = message_accounting(
+        provider_id="hosted",
+        model_id="writer",
+        usage={"prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11},
+    )
+    assert payload["cost_status"] == "unavailable"
+    assert payload["cost_usd"] is None

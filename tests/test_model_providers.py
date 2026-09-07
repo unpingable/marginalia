@@ -530,6 +530,24 @@ def test_context_window_is_optional_and_bounded(tmp_path: Path) -> None:
             load_provider_catalog(config(bad))
 
 
+def test_optional_model_pricing_is_explicit_and_bounded(tmp_path: Path) -> None:
+    path = write_config(tmp_path / "providers.json")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["providers"][1]["models"][0]["pricing"] = {
+        "input_per_million_usd": 0.25,
+        "output_per_million_usd": 1.5,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    model = load_provider_catalog(path).resolve("local-model")
+    assert model.input_cost_per_million_usd == 0.25
+    assert model.output_cost_per_million_usd == 1.5
+
+    payload["providers"][1]["models"][0]["pricing"]["input_per_million_usd"] = -1
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ProviderConfigurationError, match="pricing.input_per_million_usd"):
+        load_provider_catalog(path)
+
+
 _ABSENT = object()
 
 

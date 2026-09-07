@@ -22,6 +22,7 @@ from gov_webui.context_summary import (
     source_for,
     utc_now,
 )
+from gov_webui.evidence_store import EncryptedEvidenceStore, create_keyring
 from gov_webui.session_store import SessionMessage
 
 
@@ -459,6 +460,127 @@ def test_durable_chat_is_idempotent_and_does_not_dispatch_synchronously(
     )
     assert conflicting.status_code == 409
     assert "different frozen work" in conflicting.json()["detail"]
+
+
+def _record_durable_candidate(adapter, request_id: str, keyring: Path, content: str) -> None:
+    store = adapter._get_generation_store("default")
+    logical = store.get_request(request_id)
+    assert logical is not None
+    dispatch = store.list_dispatches(request_id)[-1]
+    store.mark_executing(dispatch.id, f"provider-{request_id}")
+    project = adapter._project_record("default")
+    context = adapter._get_context_manager().get_or_create(project.context_id, mode="fiction")
+    evidence = EncryptedEvidenceStore(context.root / "marginalia" / "generation-evidence", keyring)
+    reference = evidence.write(
+        {
+            "content": content,
+            "model": dispatch.actual_model,
+            "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+            "receipt": {"receipt_id": f"receipt-{request_id}"},
+        },
+        logical_request_id=request_id,
+        dispatch_id=dispatch.id,
+        docket_attempt=f"attempt-{request_id}",
+    )
+    store.record_candidate(
+        dispatch.id,
+        response_digest=reference.response_digest,
+        evidence_ref=reference.reference,
+    )
+
+
+def test_lost_ack_replay_returns_historical_acceptance_even_after_switch_off(
+    product_client, monkeypatch, tmp_path: Path
+) -> None:
+    client, adapter = product_client
+    monkeypatch.setattr(adapter, "MARGINALIA_DURABLE_GENERATION_AVAILABLE", True)
+    keyring = tmp_path / "secrets" / "evidence.json"
+    create_keyring(keyring, key_id="test", key=b"k" * 32)
+    monkeypatch.setattr(adapter, "MARGINALIA_EVIDENCE_KEY_FILE", str(keyring))
+    assert client.put("/v1/generation/settings", json={"enabled": True}).status_code == 200
+    session = client.post(
+        "/sessions/",
+        json={"title": "Lost acknowledgement", "model": "fiction-model"},
+    ).json()
+    request = {
+        "model": "fiction-model",
+        "project_id": "default",
+        "session_id": session["id"],
+        "client_request_id": "lost-ack-1",
+        "messages": [{"role": "user", "content": "Continue exactly once."}],
+    }
+    pending = client.post("/v1/chat/completions", json=request)
+    _record_durable_candidate(adapter, pending.json()["request_id"], keyring, "One result.")
+
+    accepted = client.get(f"/v1/generations/{pending.json()['request_id']}")
+    assert accepted.status_code == 200
+    assert accepted.json()["outcome"] == "authored"
+    assert accepted.json()["client_request_id"] == "lost-ack-1"
+
+    assert client.put("/v1/generation/settings", json={"enabled": False}).status_code == 200
+    replay = client.post("/v1/chat/completions", json=request)
+    assert replay.status_code == 200
+    assert replay.json()["committed_messages"] == accepted.json()["committed_messages"]
+    durable = client.get(f"/sessions/{session['id']}").json()
+    assert [item["content"] for item in durable["messages"]] == [
+        "Continue exactly once.",
+        "One result.",
+    ]
+
+    listing = client.get(
+        "/v1/generations",
+        params={"session_id": session["id"], "client_request_id": "lost-ack-1"},
+    ).json()
+    assert listing["generations"][0]["outcome"] == "authored"
+
+    new_delivery = client.post(
+        "/v1/chat/completions",
+        json={
+            **request,
+            "client_request_id": "new-while-off",
+            "messages": [
+                {"role": item["role"], "content": item["content"]} for item in durable["messages"]
+            ]
+            + [{"role": "user", "content": "Do not dispatch."}],
+        },
+    )
+    assert new_delivery.status_code == 409
+    assert "not rerouted" in new_delivery.json()["detail"]
+    assert adapter._governed_chat_adapter.chat_send.await_count == 0
+
+
+def test_two_tabs_from_one_revision_accept_exactly_one_durable_candidate(
+    product_client, monkeypatch, tmp_path: Path
+) -> None:
+    client, adapter = product_client
+    monkeypatch.setattr(adapter, "MARGINALIA_DURABLE_GENERATION_AVAILABLE", True)
+    keyring = tmp_path / "secrets" / "evidence.json"
+    create_keyring(keyring, key_id="test", key=b"k" * 32)
+    monkeypatch.setattr(adapter, "MARGINALIA_EVIDENCE_KEY_FILE", str(keyring))
+    client.put("/v1/generation/settings", json={"enabled": True})
+    session = client.post("/sessions/", json={"title": "Two tabs", "model": "fiction-model"}).json()
+    base = {
+        "model": "fiction-model",
+        "project_id": "default",
+        "session_id": session["id"],
+    }
+    first = client.post(
+        "/v1/chat/completions",
+        json={**base, "client_request_id": "tab-a", "messages": [{"role": "user", "content": "A"}]},
+    ).json()
+    second = client.post(
+        "/v1/chat/completions",
+        json={**base, "client_request_id": "tab-b", "messages": [{"role": "user", "content": "B"}]},
+    ).json()
+    _record_durable_candidate(adapter, first["request_id"], keyring, "Result A")
+    _record_durable_candidate(adapter, second["request_id"], keyring, "Result B")
+
+    assert client.get(f"/v1/generations/{first['request_id']}").json()["outcome"] == "authored"
+    rejected = client.get(f"/v1/generations/{second['request_id']}").json()
+    assert rejected["outcome"] == "blocked"
+    assert rejected["message"] == "session revision changed"
+    durable = client.get(f"/sessions/{session['id']}").json()
+    assert [item["content"] for item in durable["messages"]] == ["A", "Result A"]
 
 
 def test_project_b_cannot_receive_project_a_prompt_context(product_client) -> None:

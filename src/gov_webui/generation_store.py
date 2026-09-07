@@ -67,6 +67,8 @@ class LogicalRequest:
     original_model: str
     original_route: str
     fallback_policy: tuple[tuple[str, str], ...]
+    delivery_digest: str | None
+    estimated_prompt_tokens: int | None
     request_digest: str
     status: LogicalStatus
     candidate_id: str | None
@@ -134,10 +136,25 @@ def _digest(domain: str, value: Any) -> str:
     return "sha256:" + hashlib.sha256(material).hexdigest()
 
 
+def delivery_digest(
+    *, project_id: str, session_id: str, model: str, messages: list[dict[str, str]]
+) -> str:
+    """Identify the exact browser delivery before mutable state is consulted."""
+    return _digest(
+        "marginalia.generation-delivery/v1",
+        {
+            "project_id": project_id,
+            "session_id": session_id,
+            "model": model,
+            "messages": messages,
+        },
+    )
+
+
 class GenerationStore:
     """SQLite custody index shared by the web and worker processes."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -174,6 +191,8 @@ class GenerationStore:
                     original_model TEXT NOT NULL,
                     original_route TEXT NOT NULL,
                     fallback_policy_json TEXT NOT NULL,
+                    delivery_digest TEXT,
+                    estimated_prompt_tokens INTEGER,
                     request_digest TEXT NOT NULL,
                     request_json TEXT NOT NULL,
                     status TEXT NOT NULL CHECK(status IN
@@ -232,6 +251,15 @@ class GenerationStore:
                 connection.execute(
                     """ALTER TABLE generation_settings ADD COLUMN fallback_policy_json
                        TEXT NOT NULL DEFAULT '[]'"""
+                )
+            request_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(logical_request)")
+            }
+            if "delivery_digest" not in request_columns:
+                connection.execute("ALTER TABLE logical_request ADD COLUMN delivery_digest TEXT")
+            if "estimated_prompt_tokens" not in request_columns:
+                connection.execute(
+                    "ALTER TABLE logical_request ADD COLUMN estimated_prompt_tokens INTEGER"
                 )
             connection.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
@@ -317,12 +345,20 @@ class GenerationStore:
         guidance_fingerprint: str,
         original_model: str,
         original_route: str,
+        delivery_digest: str | None = None,
+        estimated_prompt_tokens: int | None = None,
         fallback_policy: Iterable[dict[str, str]] = (),
         request: dict[str, Any],
     ) -> CreateResult:
         client_request_id = client_request_id.strip()
         if not client_request_id:
             raise ValueError("client_request_id must not be empty")
+        if estimated_prompt_tokens is not None and (
+            isinstance(estimated_prompt_tokens, bool)
+            or not isinstance(estimated_prompt_tokens, int)
+            or estimated_prompt_tokens < 0
+        ):
+            raise ValueError("estimated_prompt_tokens must be a nonnegative integer")
         fallbacks = self._fallbacks(fallback_policy)
         frozen = {
             "schema": "marginalia.logical-generation/v1",
@@ -336,6 +372,8 @@ class GenerationStore:
             "authorized_fallback_policy": [
                 {"model": model, "route": route} for model, route in fallbacks
             ],
+            "delivery_digest": delivery_digest,
+            "estimated_prompt_tokens": estimated_prompt_tokens,
             "request": request,
         }
         request_digest = _digest("marginalia.logical-generation/v1", frozen)
@@ -359,8 +397,9 @@ class GenerationStore:
                 """INSERT INTO logical_request(
                        id,client_request_id,project_id,session_id,expected_revision,
                        canon_fingerprint,guidance_fingerprint,original_model,original_route,
-                       fallback_policy_json,request_digest,request_json,status,created_at,updated_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       fallback_policy_json,delivery_digest,estimated_prompt_tokens,request_digest,
+                       request_json,status,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     logical_id,
                     client_request_id,
@@ -372,6 +411,8 @@ class GenerationStore:
                     original_model,
                     original_route,
                     _canonical([{"model": m, "route": r} for m, r in fallbacks]).decode(),
+                    delivery_digest,
+                    estimated_prompt_tokens,
                     request_digest,
                     _canonical(request).decode(),
                     LogicalStatus.QUEUED,
@@ -889,6 +930,8 @@ class GenerationStore:
             fallback_policy=tuple(
                 (item["model"], item["route"]) for item in json.loads(row["fallback_policy_json"])
             ),
+            delivery_digest=row["delivery_digest"],
+            estimated_prompt_tokens=row["estimated_prompt_tokens"],
             request_digest=row["request_digest"],
             status=LogicalStatus(row["status"]),
             candidate_id=row["candidate_id"],

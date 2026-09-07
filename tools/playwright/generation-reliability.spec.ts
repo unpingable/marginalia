@@ -1,6 +1,6 @@
 import { expect, Page, test } from '@playwright/test';
 
-async function mockWritingRoom(page: Page, available: boolean) {
+async function mockWritingRoom(page: Page, available: boolean, enabled = false) {
   const savedSettings: Array<Record<string, unknown>> = [];
   await page.route('**/*', async (route) => {
     const request = route.request();
@@ -30,7 +30,7 @@ async function mockWritingRoom(page: Page, available: boolean) {
       if (request.method() === 'PUT') savedSettings.push(JSON.parse(request.postData() || '{}'));
       body = {
         available,
-        enabled: request.method() === 'PUT' ? savedSettings.at(-1)?.enabled : false,
+        enabled: request.method() === 'PUT' ? savedSettings.at(-1)?.enabled : enabled,
         fallback_model: request.method() === 'PUT' ? savedSettings.at(-1)?.fallback_model : null,
         status: available ? 'ready' : 'The durable generation worker is unavailable.',
       };
@@ -68,6 +68,9 @@ async function mockWritingRoom(page: Page, available: boolean) {
       body = { snapshots: [] };
     } else if (path === '/v1/governed-chat/pending') {
       body = { pending: null };
+    } else if (path === '/v1/markdown') {
+      const posted = JSON.parse(request.postData() || '{}');
+      body = { html: posted.content || '' };
     }
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
@@ -82,6 +85,7 @@ test('reliability control is prominent and unavailable state is explicit', async
   await expect(page.getByRole('heading', { name: 'Generation reliability' })).toBeVisible();
   await expect(page.locator('#durable-generation')).toBeDisabled();
   await expect(page.locator('#generation-reliability-status')).toContainText('unavailable');
+  await expect(page.getByText('What does this change?')).toBeVisible();
 });
 
 test('writer can enable custody and choose confirmed-failure fallback', async ({ page }) => {
@@ -96,4 +100,108 @@ test('writer can enable custody and choose confirmed-failure fallback', async ({
 
   await expect.poll(() => saved.length).toBe(1);
   expect(saved[0]).toMatchObject({ enabled: true, fallback_model: 'fallback' });
+});
+
+async function mockExistingSession(page: Page, messages: Array<Record<string, unknown>> = []) {
+  const session = {
+    id: 'session-1', title: 'Interrupted scene', model: 'primary', messages,
+    message_count: messages.length, revision: messages.length ? 1 : 0,
+  };
+  await page.route('**/sessions/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const body = path === '/sessions/'
+      ? { sessions: [{ ...session, messages: undefined }] }
+      : session;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+  });
+  return session;
+}
+
+test('reload reconciles a lost acknowledgement and shows actual usage and cost state', async ({ page }) => {
+  await mockWritingRoom(page, true, true);
+  const messages = [
+    { id: 'user-1', role: 'user', content: 'Continue once.', timestamp: '2026-09-07T00:00:00Z' },
+    {
+      id: 'assistant-1', role: 'assistant', content: 'Exactly one continuation.',
+      timestamp: '2026-09-07T00:00:01Z', provider_id: 'openrouter', model_id: 'actual/model',
+      accounting: {
+        reported_total_tokens: 321, cost_status: 'estimated', cost_usd: 0.0042,
+        cost_note: 'Estimated from configured token rates.',
+      },
+    },
+  ];
+  await mockExistingSession(page, messages);
+  await page.route('**/v1/generations**', async (route) => {
+    await route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ generations: [{
+        outcome: 'authored', request_id: 'generation-1', client_request_id: 'delivery-1',
+        committed_messages: messages,
+      }] }),
+    });
+  });
+  await page.addInitScript(() => {
+    localStorage.setItem('marginalia.project', 'default');
+    localStorage.setItem(
+      'marginalia.durable-generation.default.session-1',
+      JSON.stringify({ id: 'delivery-1', content: 'Continue once.' }),
+    );
+    localStorage.setItem('marginalia:draft:default:session-1', 'Continue once.');
+  });
+
+  await page.goto('/');
+  await page.locator('button.session', { hasText: 'Interrupted scene' }).click();
+  await expect(page.getByText('Exactly one continuation.')).toBeVisible();
+  await expect(page.getByText('Marginalia · openrouter / actual/model')).toBeVisible();
+  await expect(page.locator('.message-accounting')).toHaveText(
+    '321 tokens reported · Provider cost $0.0042 (estimated)',
+  );
+  await expect(page.locator('#prompt')).toHaveValue('');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem(
+    'marginalia.durable-generation.default.session-1',
+  ))).toBeNull();
+});
+
+test('rapid double submit creates one browser delivery', async ({ page }) => {
+  await mockWritingRoom(page, true, true);
+  await mockExistingSession(page);
+  let posts = 0;
+  await page.route('**/v1/chat/completions', async (route) => {
+    posts += 1;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await page.evaluate(() => {
+      localStorage.setItem(
+        'marginalia.durable-generation.default.session-1',
+        JSON.stringify({ id: 'other-tab-delivery', content: 'Other tab prompt.' }),
+      );
+      localStorage.setItem('marginalia:draft:default:session-1', 'Other tab draft.');
+    });
+    await route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({
+        outcome: 'authored',
+        committed_messages: [
+          { id: 'u', role: 'user', content: 'One click too many.' },
+          { id: 'a', role: 'assistant', content: 'One accepted result.' },
+        ],
+      }),
+    });
+  });
+
+  await page.goto('/');
+  await page.locator('button.session', { hasText: 'Interrupted scene' }).click();
+  await page.locator('#prompt').fill('One click too many.');
+  await page.evaluate(() => {
+    const form = document.querySelector<HTMLFormElement>('#composer');
+    form?.requestSubmit();
+    form?.requestSubmit();
+  });
+  await expect(page.getByText('One accepted result.')).toBeVisible();
+  expect(posts).toBe(1);
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem(
+    'marginalia.durable-generation.default.session-1',
+  ) || 'null')?.id)).toBe('other-tab-delivery');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem(
+    'marginalia:draft:default:session-1',
+  ))).toBe('Other tab draft.');
 });

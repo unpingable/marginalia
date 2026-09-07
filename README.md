@@ -130,6 +130,8 @@ See [RELIABILITY.md](docs/RELIABILITY.md) for the exact generation,
 concurrency, timeout, and context-budget contracts.
 Deployment activation, separate key recovery, and rollback checks are in
 [Gate 3 durable generation operations](docs/gate3/DURABLE-GENERATION-OPERATIONS.md).
+The writer-facing switch, recovery states, and usage/cost labels are introduced
+in [Durable generation: writer onboarding](docs/gate3/ERIN-DURABLE-GENERATION.md).
 
 ## Your data, backups, and exports
 
@@ -162,6 +164,7 @@ Further technical references:
 - [Provider configuration](docs/MODEL_PROVIDERS.md)
 - [Reliability](docs/RELIABILITY.md)
 - [Operations and recovery](docs/OPERATIONS.md)
+- [Durable-generation writer onboarding](docs/gate3/ERIN-DURABLE-GENERATION.md)
 - [Qualified baseline and next work](docs/NEXT_WORK.md)
 - [Provenance](PROVENANCE.md)
 

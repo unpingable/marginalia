@@ -47,6 +47,20 @@ def test_client_id_is_idempotent_only_for_the_exact_frozen_request(tmp_path: Pat
     with pytest.raises(IdempotencyConflict):
         create(store, content="Different work")
 
+    with pytest.raises(ValueError, match="estimated_prompt_tokens"):
+        store.create_request(
+            client_request_id="bad-estimate",
+            project_id="project-a",
+            session_id="session-a",
+            expected_revision=0,
+            canon_fingerprint="sha256:canon",
+            guidance_fingerprint="sha256:guidance",
+            original_model="writer",
+            original_route="provider",
+            estimated_prompt_tokens=-1,
+            request={"messages": []},
+        )
+
 
 def test_dispatch_has_immutable_actual_route_and_distinct_identity(tmp_path: Path) -> None:
     store = GenerationStore(tmp_path / "generation.sqlite")

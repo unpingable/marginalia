@@ -348,6 +348,9 @@
     .toggle-row input { width: 18px; height: 18px; accent-color: var(--accent); }
     .reliability-status { margin-top: 8px; color: var(--sage); font-size: 10px; line-height: 1.4; }
     .reliability-status.unavailable { color: var(--warning); }
+    .reliability-help { margin-top: 10px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .reliability-help summary { color: var(--ink); cursor: pointer; font-weight: 600; }
+    .message-accounting { margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.4; }
     .toast { position: fixed; left: 50%; bottom: 25px; transform: translate(-50%, 20px); opacity: 0; pointer-events: none; padding: 10px 14px; border-radius: 9px; color: #fff; background: #302d29; font-size: 12px; transition: .2s ease; z-index: 20; }
     .toast.visible { opacity: 1; transform: translate(-50%, 0); }
 
@@ -569,6 +572,11 @@
           <label class="toggle-row" for="durable-generation"><input type="checkbox" id="durable-generation">Use durable generation for this project</label>
           <div class="field"><label for="fallback-model">Automatic fallback after a confirmed failure</label><select id="fallback-model"><option value="">No automatic fallback</option></select></div>
           <div class="reliability-status" id="generation-reliability-status">Checking worker availability…</div>
+          <details class="reliability-help">
+            <summary>What does this change?</summary>
+            <p>Marginalia records the request before a model starts. You can reload or close this tab and the same request will be inspected instead of silently run twice. A response enters the conversation only if its original conversation, canon, and project direction still match.</p>
+            <p>If an outcome cannot be confirmed, Marginalia labels it unknown and keeps reconciling. Turning this setting off stops new durable dispatches; it does not discard work already in custody.</p>
+          </details>
         </section>
         <div class="field"><label for="project-brief">Project brief</label><textarea id="project-brief" placeholder="What are you writing? What matters about its premise, form, or destination?"></textarea></div>
         <div class="field"><label for="collaborator-stance">Collaborator stance</label><textarea id="collaborator-stance" placeholder="Be a continuity-conscious co-writer. Ask before making major plot decisions."></textarea></div>
@@ -1274,8 +1282,11 @@
       }
     }
 
-    function clearPromptDraft() {
-      try { localStorage.removeItem(draftKey()); } catch (_) {}
+    function clearPromptDraft(expectedContent = null) {
+      try {
+        if (expectedContent !== null && localStorage.getItem(draftKey()) !== expectedContent) return;
+        localStorage.removeItem(draftKey());
+      } catch (_) {}
     }
 
     function durableRequestKey(sessionId = state.activeSession?.id) {
@@ -1296,7 +1307,19 @@
     }
 
     function clearDurableRequest() {
-      try { localStorage.removeItem(durableRequestKey()); } catch (_) {}
+      const expectedId = arguments[0] || null;
+      try {
+        if (expectedId) {
+          const current = JSON.parse(localStorage.getItem(durableRequestKey()) || "null");
+          if (current?.id !== expectedId) return;
+        }
+        localStorage.removeItem(durableRequestKey());
+      } catch (_) {}
+    }
+
+    function savedDurableRequest() {
+      try { return JSON.parse(localStorage.getItem(durableRequestKey()) || "null"); }
+      catch (_) { return null; }
     }
 
 
@@ -1462,6 +1485,24 @@
       body.textContent = content;
       if (role === "assistant" && content) void renderAssistantMarkdown(body, content);
       wrapper.append(label, body);
+      if (role === "assistant" && provenance?.accounting) {
+        const accounting = document.createElement("div");
+        accounting.className = "message-accounting";
+        const detail = provenance.accounting;
+        const tokens = detail.reported_total_tokens == null
+          ? "Token usage unavailable"
+          : `${Number(detail.reported_total_tokens).toLocaleString()} tokens reported`;
+        let cost = "Provider cost unavailable";
+        if (detail.cost_status === "known" && detail.cost_usd != null) {
+          cost = `Provider cost $${Number(detail.cost_usd).toFixed(2)} (known)`;
+        } else if (detail.cost_status === "estimated" && detail.cost_usd != null) {
+          const digits = Number(detail.cost_usd) < 0.01 ? 4 : 2;
+          cost = `Provider cost $${Number(detail.cost_usd).toFixed(digits)} (estimated)`;
+        }
+        accounting.textContent = `${tokens} · ${cost}`;
+        accounting.title = detail.cost_note || "";
+        wrapper.append(accounting);
+      }
       if (content && id) {
         const actions = document.createElement("div");
         actions.className = "message-actions";
@@ -1554,40 +1595,51 @@
       }
     }
 
-    async function resumeOutstandingGeneration() {
+    async function resumeOutstandingGeneration(existingNotice = null) {
       if (!state.activeSession || state.resumingGeneration) return;
       state.resumingGeneration = true;
       try {
         const sessionId = state.activeSession.id;
+        const saved = savedDurableRequest();
+        const clientFilter = saved?.id
+          ? `&client_request_id=${encodeURIComponent(saved.id)}` : "";
         const data = await api(projectPath(
-          `/v1/generations?session_id=${encodeURIComponent(sessionId)}`
+          `/v1/generations?session_id=${encodeURIComponent(sessionId)}${clientFilter}`
         ));
         const active = data.generations?.find((item) =>
-          item.outcome === "pending" || item.outcome === "unknown"
+          saved?.id ? item.client_request_id === saved.id
+            : item.outcome === "pending" || item.outcome === "unknown"
         );
-        if (!active || state.activeSession?.id !== sessionId) return;
-        const notice = renderGenerationNotice(
+        if (!active || state.activeSession?.id !== sessionId) return false;
+        const notice = existingNotice || renderGenerationNotice(
           "pending", active.message || "Reconnecting to the generation Marginalia already holds…"
         );
-        const terminal = await waitForDurableGeneration(active.request_id, notice);
+        const terminal = active.outcome === "pending" || active.outcome === "unknown"
+          ? await waitForDurableGeneration(active.request_id, notice) : active;
         notice.remove();
-        if (state.activeSession?.id !== sessionId) return;
+        if (state.activeSession?.id !== sessionId) return true;
         if (terminal.outcome === "authored") {
           state.activeSession = await api(`/sessions/${encodeURIComponent(sessionId)}`);
-          clearDurableRequest();
-          clearPromptDraft();
+          clearDurableRequest(terminal.client_request_id || saved?.id);
+          if (!saved?.content || $("#prompt").value.trim() === saved.content) {
+            clearPromptDraft(saved?.content || null);
+            $("#prompt").value = "";
+          }
           renderConversation();
           await loadSessions();
           toast("Recovered generation added to the conversation");
         } else {
+          clearDurableRequest(terminal.client_request_id || saved?.id);
           renderGenerationNotice(
             terminal.outcome === "blocked" ? "blocked" : "failure",
             terminal.message || "The retained generation could not be accepted.",
             terminal.outcome === "failure" ? "provider_execution" : "",
           );
         }
+        return true;
       } catch (error) {
         toast(`Could not inspect retained generation: ${error.message}`);
+        return false;
       } finally {
         state.resumingGeneration = false;
       }
@@ -1622,6 +1674,8 @@
       state.busy = true;
       $("#send").disabled = true;
       let userDraft = null;
+      let waiting = null;
+      let clientRequestId = null;
       let generationCommitted = false;
       try {
         if (!state.activeSession) await createSession();
@@ -1629,11 +1683,13 @@
         userDraft = renderMessage("user", content);
         prompt.value = "";
 
-        const waiting = renderGenerationNotice("pending", "Thinking with your project in view…");
+        waiting = renderGenerationNotice("pending", "Thinking with your project in view…");
         waiting.querySelector(".message-body").classList.add("thinking");
         const messages = state.activeSession.messages
           .map(({role, content: text}) => ({role, content: text}))
           .concat({role: "user", content});
+        clientRequestId = state.generationSettings?.enabled
+          ? durableClientRequestId(content) : null;
         const response = await api("/v1/chat/completions", {
           method: "POST",
           body: JSON.stringify({
@@ -1642,8 +1698,7 @@
             stream: false,
             project_id: state.activeProjectId,
             session_id: state.activeSession.id,
-            client_request_id: state.generationSettings?.enabled
-              ? durableClientRequestId(content) : undefined,
+            client_request_id: clientRequestId || undefined,
           }),
         });
         const terminalResponse = response.outcome === "pending" && response.request_id
@@ -1653,7 +1708,7 @@
         userDraft.remove();
         userDraft = null;
         if (terminalResponse.outcome === "blocked") {
-          clearDurableRequest();
+          clearDurableRequest(clientRequestId);
           prompt.value = content;
           renderGenerationNotice("blocked", terminalResponse.message);
           await refreshPending();
@@ -1667,8 +1722,8 @@
           throw boundaryError;
         }
         const [userMessage, assistantMessage] = terminalResponse.committed_messages;
-        clearPromptDraft();
-        clearDurableRequest();
+        clearPromptDraft(content);
+        clearDurableRequest(clientRequestId);
         state.activeSession.messages.push(userMessage, assistantMessage);
         state.activeSession.message_count = state.activeSession.messages.length;
         generationCommitted = true;
@@ -1698,7 +1753,18 @@
         if (!prompt.value) prompt.value = content;
         $$(".thinking").forEach((node) => node.closest(".message")?.remove());
         const failure = error.payload?.outcome === "failure" ? error.payload : null;
-        if (failure) clearDurableRequest();
+        if (failure) clearDurableRequest(clientRequestId);
+        if (!failure && state.generationSettings?.enabled && savedDurableRequest()?.id) {
+          const uncertain = renderGenerationNotice(
+            "unknown",
+            "The browser lost the acknowledgement. Marginalia is checking durable custody; do not submit this prompt again yet."
+          );
+          const recovered = await resumeOutstandingGeneration(uncertain);
+          if (!recovered) {
+            uncertain.querySelector(".message-role").textContent = "Delivery not yet confirmed";
+          }
+          return;
+        }
         renderGenerationNotice(
           "failure",
           failure?.message || error.message,

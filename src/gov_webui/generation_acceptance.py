@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import Any, Callable
 
 from gov_webui.evidence_store import EncryptedEvidenceStore
 from gov_webui.generation_outcome import (
@@ -40,6 +41,8 @@ def accept_candidate(
     context_root: Path,
     project_id: str,
     candidate_id: str,
+    accounting_resolver: Callable[[str, str, dict[str, int], int | None], dict[str, Any]]
+    | None = None,
 ) -> AcceptanceResult:
     """Accept once while revision, canon, and guidance remain frozen."""
     candidate = generation_store.get_candidate(candidate_id)
@@ -93,6 +96,16 @@ def accept_candidate(
         )
         if not isinstance(pending_user, str) or not pending_user.strip():
             return _block(generation_store, candidate_id, "frozen request has no user turn")
+        accounting = (
+            accounting_resolver(
+                dispatch.actual_model,
+                dispatch.actual_route,
+                outcome.usage,
+                request.estimated_prompt_tokens,
+            )
+            if accounting_resolver
+            else None
+        )
         messages = [
             SessionMessage.create(role="user", content=pending_user),
             SessionMessage.create(
@@ -101,7 +114,8 @@ def accept_candidate(
                 model=outcome.model,
                 usage=outcome.usage,
                 provider_id=dispatch.actual_route,
-                model_id=dispatch.actual_model,
+                model_id=(accounting or {}).get("model_id", dispatch.actual_model),
+                accounting=accounting,
                 generation_candidate_id=candidate_id,
             ),
         ]

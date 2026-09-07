@@ -113,6 +113,8 @@ class ConfiguredModel:
     token_safety_multiplier: float = 1.0
     context_window_tokens: int | None = None
     inference: str = "hosted"
+    input_cost_per_million_usd: float | None = None
+    output_cost_per_million_usd: float | None = None
 
     @property
     def kind(self) -> str:
@@ -485,6 +487,7 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                     "tokenizer_encoding",
                     "token_safety_multiplier",
                     "context_window_tokens",
+                    "pricing",
                 },
                 model_location,
             )
@@ -529,6 +532,29 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                     )
                 context_window_tokens = raw_window
 
+            pricing = model.get("pricing")
+            input_cost: float | None = None
+            output_cost: float | None = None
+            if pricing is not None:
+                pricing = _require_object(pricing, f"{model_location}.pricing")
+                _reject_unknown(
+                    pricing,
+                    {"input_per_million_usd", "output_per_million_usd"},
+                    f"{model_location}.pricing",
+                )
+                for field_name in ("input_per_million_usd", "output_per_million_usd"):
+                    value = pricing.get(field_name)
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not 0 <= float(value) <= 1_000_000
+                    ):
+                        raise ProviderConfigurationError(
+                            f"{model_location}.pricing.{field_name} must be between 0 and 1000000"
+                        )
+                input_cost = float(pricing["input_per_million_usd"])
+                output_cost = float(pricing["output_per_million_usd"])
+
             raw_model_id = model.get("model")
             command_model: str | None = None
             if protocol in {
@@ -565,6 +591,8 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                     token_safety_multiplier=token_safety_multiplier,
                     context_window_tokens=context_window_tokens,
                     inference=inference,
+                    input_cost_per_million_usd=input_cost,
+                    output_cost_per_million_usd=output_cost,
                 )
             )
 

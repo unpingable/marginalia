@@ -47,6 +47,7 @@ class SessionMessage:
     usage: dict[str, int] | None = None
     provider_id: str | None = None
     model_id: str | None = None
+    accounting: dict[str, Any] | None = None
     generation_candidate_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -64,6 +65,8 @@ class SessionMessage:
             result["provider_id"] = self.provider_id
         if self.model_id is not None:
             result["model_id"] = self.model_id
+        if self.accounting is not None:
+            result["accounting"] = self.accounting
         if self.generation_candidate_id is not None:
             result["generation_candidate_id"] = self.generation_candidate_id
         return result
@@ -79,6 +82,7 @@ class SessionMessage:
             usage=data.get("usage"),
             provider_id=data.get("provider_id"),
             model_id=data.get("model_id"),
+            accounting=data.get("accounting"),
             generation_candidate_id=data.get("generation_candidate_id"),
         )
 
@@ -91,6 +95,7 @@ class SessionMessage:
         usage: dict[str, int] | None = None,
         provider_id: str | None = None,
         model_id: str | None = None,
+        accounting: dict[str, Any] | None = None,
         generation_candidate_id: str | None = None,
     ) -> SessionMessage:
         return cls(
@@ -102,6 +107,7 @@ class SessionMessage:
             usage=usage,
             provider_id=provider_id,
             model_id=model_id,
+            accounting=accounting,
             generation_candidate_id=generation_candidate_id,
         )
 

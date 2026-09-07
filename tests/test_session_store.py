@@ -33,6 +33,22 @@ def test_exact_provider_model_provenance_round_trips(tmp_path: Path) -> None:
     assert loaded.messages[0].model_id == "upstream-a"
 
 
+def test_message_accounting_round_trips_without_affecting_legacy_records(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create("context", model="selection-a")
+    generated = SessionMessage.create(
+        "assistant",
+        "Measured result",
+        accounting={
+            "reported_total_tokens": 123,
+            "cost_status": "unavailable",
+            "cost_usd": None,
+        },
+    )
+    assert store.append_message(session.id, generated)
+    assert store.get(session.id).messages[0].accounting == generated.accounting
+
+
 def test_model_switch_changes_future_selection_not_history(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "sessions")
     session = store.create("context", model="selection-a")

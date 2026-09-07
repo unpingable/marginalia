@@ -120,8 +120,10 @@ The current invariant is:
 
 The deterministic suite covers the typed outcome boundary, revision
 compare-and-swap, failure persistence, bounded context, source-linked summaries,
-backups, and restore rehearsal. The completed campaign qualified 682 tests
-against the exact Agent Governor contract commit in `AG_CONTRACT_COMMIT`.
+backups, restore rehearsal, and durable generation custody. Gate 3 qualified the
+complete Marginalia suite (839 passed), the exact pinned ag-ng and Docket suites,
+their cross-process witness, and the focused browser reliability flow. See
+`docs/gate3/GATE3H-VALIDATION.md` for exact commits and evidence.
 
 Context summaries have prefix semantics. `observed_revision` records provenance;
 it is not a validity equality check. A summary covering messages 1–51 remains
@@ -133,23 +135,28 @@ The regression is
 
 ## Priority backlog
 
-1. **Durable attempt IDs and lost-response idempotency.** Establish one logical
-   generation attempt to at most one durable authored turn, including a server
-   commit followed by a lost HTTP response and client replay. Scope IDs by
-   session/workspace and return an already committed terminal result on replay.
-2. **Transparent operational recovery.** Add bounded same-route retry for
-   retryable timeout/transport failures, then configured Claude fallback. Keep
-   all branches under one durable attempt ID and commit only one winner. Do not
-   retry cancellation, governance blocks, invalid requests, or revision
-   conflicts silently.
+1. **Durable attempt IDs and lost-response idempotency — shipped in Gate 3.** One
+   logical generation attempt produces at most one durable authored turn,
+   including after a server commit followed by a lost HTTP response and client
+   replay. IDs are project/session scoped, and exact replay returns the already
+   committed terminal result.
+2. **Transparent operational recovery — partially shipped.** Configured fallback
+   after a qualified terminal failure, indeterminate custody, reconciliation,
+   and one-winner acceptance are live. Bounded same-route retry/backoff remains.
+   Circuit breaking is not a committed subsystem; add it only if passive failure
+   evidence demonstrates a need. Cancellation never proves non-execution or
+   non-billing, and unknown work is never silently retried.
 3. **Selective old-passage retrieval.** Combine recent authored turns,
    structured canon, the source-linked rolling summary, and retrieved original
    passages for old callbacks. Preserve source IDs and branch provenance.
-4. **Qualification expansion.** Implement the impatient/failure-path synthetic
-   writer described in `SYNTHETIC_QUALIFICATION.md`, then add the focused
-   Playwright generation-failure flow described in `DEVELOPMENT.md` and a
-   provisioned browser CI job.
-5. **Per-model/provider context-budget policy.** `provider_overhead_tokens` and
+4. **Qualification expansion — impatient browser/API layer qualified in the next
+   candidate.** Playwright CI and prominent reliability-toggle coverage shipped
+   in Gate 3. Reload/lost-acknowledgement recovery, rapid double-submit, and
+   cross-tab cleanup now have browser cases; exact post-acceptance replay and
+   two-tab one-winner CAS have application cases. The broader failure-path
+   synthetic writer in `SYNTHETIC_QUALIFICATION.md` remains.
+5. **Per-model/provider context-budget policy — characterization started; policy
+   deferred.** `provider_overhead_tokens` and
    `output_reserve_tokens` are global constants, and the second promotion of this
    campaign showed the first one is load-bearing in a way nobody has stated.
    Declaring Orion's true serving window of 24,576 makes Marginalia refuse the
@@ -178,8 +185,14 @@ The regression is
    The acceptance test is behavioural, not arithmetic: a declared serving window
    must actually bound prompt plus generated *and reasoning* tokens against the
    real endpoint, rather than merely satisfying Marginalia's internal formula.
+   Successful observed prompts establish only a tested lower bound. Keep that
+   evidence distinct from a provider-published maximum, a configured ceiling,
+   and the empirical reserve chosen for safe operation. Failures and censored
+   timeouts belong in the characterization set; 30 successes is merely a
+   suggestion threshold, not tail-latency qualification.
 
-6. **Open fictional ontology — the cast is not the ontology.** The canon
+6. **Open fictional ontology — base protections shipped; richer classification
+   deferred.** The canon
    authority boundary (see `RELIABILITY.md`) refuses an interpretation as a
    mutation warrant. It does not yet catch the step *before* that one, where a
    pass narrows an authoritative generic claim because no other members of the
@@ -339,8 +352,15 @@ The regression is
    promotes. Full note, including open questions, is in
    `research/MARGINALIA-ADVERSARIAL-SECOND-PASS-DESIGN-NOTE.md`.
 
-10. **MAINTENANCE-OFF-CRITICAL-PATH.** Successor to the planner/executor
-    campaign, which made maintenance correct but left it in front of the writer.
+10. **MAINTENANCE-OFF-CRITICAL-PATH — foundations shipped; durable scheduler
+    remains.** Gate 1 shipped per-session coalescing, bounded chunk concurrency,
+    monotone requirement joins, terminal-failure handling, and startup recovery.
+    Those are real scheduling capabilities, but jobs and progress are still
+    process-local. The remaining campaign is durable cross-process/restart
+    single-flight, prefix-qualified snapshot promotion normally ahead of the
+    foreground turn, durable progress visibility, and diagnosis of the observed
+    29 provider calls. This is the successor to the planner/executor campaign,
+    which made maintenance correct but can still leave it in front of the writer.
     Observed 2026-09-06 on a 102-message session: six minutes of a writing
     application declining to write, five of them spent telling the author to
     retry, then two completions at 05:29 and 05:40. Not a wedge — it recovers —
@@ -373,8 +393,16 @@ The regression is
 
     `research/MARGINALIA-MAINTENANCE-OFF-CRITICAL-PATH-CAMPAIGN.md`.
 
-11. **Cost telemetry — observed versus estimated.** Tractable now that the
-    OpenRouter path returns real usage. Record both, keep reasoning tokens as
+11. **Cost telemetry — passive per-turn baseline qualified in the next candidate.** Accepted responses
+    retain the actual provider/model and normalized reported usage. The writing
+    UI now distinguishes known, configured-estimate, and unavailable provider
+    cost without letting economics affect admission. Aggregation by
+    session/project/model/provider/day and exact gateway-reported cost remain
+    later work. The pinned Agent Governor v1 result currently normalizes usage to
+    three token counters, so richer gateway fields require an explicit companion
+    contract decision rather than an undocumented side channel. The OpenRouter
+    path returns real normalized usage. Future expansion should retain raw
+    provider usage too, keep reasoning tokens as
     their own field (one measured GLM 5.3 turn spent 5,310 of 5,526 completion
     tokens on reasoning), and aggregate by session/project/model/provider/day.
 
@@ -447,13 +475,15 @@ deterministic qualification and synthetic behavioral fuzzing.
 
 ## Known limitations at this baseline
 
-- There is no durable attempt ledger, so a lost successful HTTP response followed
-  by replay after reload can still create a logically duplicate turn.
-- Automatic same-route retry, failover, circuit breaking, selective retrieval,
-  and reconnectable background generation are not implemented.
-- Pending prompts are browser-local drafts rather than durable cross-device
-  operational attempts.
-- Functional Playwright coverage and browser CI provisioning remain outstanding.
+- Durable custody, exact replay, configured qualified-failure fallback, and
+  reconnectable inspection are implemented. Bounded same-route retry/backoff is
+  not; circuit breaking remains conditional on observed need.
+- The prompt is a browser draft only until the server returns custody. Once
+  custody is established the operational attempt is durable and cross-process,
+  but draft text itself does not synchronize across devices.
+- Selective old-passage retrieval is not implemented.
+- Basic Playwright CI is present. The full synthetic failure matrix remains to be
+  expanded beyond reload, lost acknowledgement, double-submit, and two-tab CAS.
 - Removed-container stdout is not retained unless deployment-level log retention
   is configured.
 - Source binding validates summary provenance, not literary quality; writers

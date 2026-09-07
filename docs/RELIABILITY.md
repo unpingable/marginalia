@@ -66,12 +66,14 @@ Provider, RPC, validation, and persistence exceptions receive a short incident
 ID. The browser receives a bounded failure-class summary and that ID; full raw
 CLI/RPC/stderr diagnostics remain in server logs under the same ID.
 
-Marginalia does not yet offer durable request-attempt idempotency. If a server
-commit succeeds but its HTTP response is lost, a client that reloads current
-history can safely continue, but an automatic replay of the old delivery cannot
-recover the original response by attempt ID. Correct duplicate-in-flight and
-post-commit replay semantics require durable, session-scoped attempt claims and
-terminal records; a request field alone would not provide the guarantee.
+Durable generation separates browser delivery identity, one logical request,
+each provider dispatch, and each candidate response. Exact duplicate deliveries
+reconcile to the same logical request, including after acceptance and later
+session/canon changes; a client ID reused for different frozen work is rejected.
+The project switch stops new dispatches only. Inspection, reconciliation,
+evidence recovery, and historical replay remain available, and disabling the
+switch cannot reroute an existing durable delivery through synchronous
+generation. See `docs/gate3/DURABLE-GENERATION-OPERATIONS.md`.
 
 ## Health semantics
 

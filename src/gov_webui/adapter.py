@@ -113,6 +113,7 @@ from gov_webui.generation_outcome import (
 from gov_webui.evidence_store import EncryptedEvidenceStore
 from gov_webui.generation_acceptance import AcceptanceStatus, accept_candidate
 from gov_webui.generation_store import (
+    delivery_digest,
     GenerationDisabled,
     GenerationStore,
     IdempotencyConflict,
@@ -157,6 +158,7 @@ from gov_webui.usage_accounting import (
     EstimatedUsage,
     RequestAccounting,
     observed_from_normalized_usage,
+    message_accounting,
 )
 from gov_webui.session_store import (
     ChatSession,
@@ -672,6 +674,34 @@ def _resolve_configured_model(
     if model.purpose != "writing":
         raise HTTPException(status_code=422, detail=f"model {model.id!r} is not writer-selectable")
     return model.id, model
+
+
+def _message_accounting(
+    configured_model: str,
+    provider_id: str,
+    usage: dict[str, int],
+    estimated_prompt_tokens: int | None = None,
+    *,
+    latency_ms: float | None = None,
+) -> dict[str, Any]:
+    catalog = _configured_provider_catalog()
+    identity = catalog.resolve(configured_model) if catalog is not None else None
+    result = message_accounting(
+        provider_id=provider_id,
+        model_id=identity.model_id if identity is not None else configured_model,
+        usage=usage,
+        estimated_prompt_tokens=estimated_prompt_tokens,
+        latency_ms=latency_ms,
+        inference=identity.inference if identity is not None else None,
+        input_cost_per_million_usd=(
+            identity.input_cost_per_million_usd if identity is not None else None
+        ),
+        output_cost_per_million_usd=(
+            identity.output_cost_per_million_usd if identity is not None else None
+        ),
+    )
+    telemetry_logger.info("accepted_message_accounting %s", json.dumps(result))
+    return result
 
 
 def _get_library_store() -> LibraryStore:
@@ -1635,6 +1665,7 @@ def _generation_status_payload(project_id: str, request_id: str) -> dict[str, An
             context_root=context.root,
             project_id=project.id,
             candidate_id=logical.candidate_id,
+            accounting_resolver=_message_accounting,
         )
         logical = store.get_request(request_id)
         assert logical is not None
@@ -1642,12 +1673,14 @@ def _generation_status_payload(project_id: str, request_id: str) -> dict[str, An
             return {
                 "outcome": "blocked",
                 "request_id": request_id,
+                "client_request_id": logical.client_request_id,
                 "message": accepted.reason,
             }
     if logical.status is LogicalStatus.ACCEPTED and logical.accepted_candidate_id:
         return {
             "outcome": "authored",
             "request_id": request_id,
+            "client_request_id": logical.client_request_id,
             "committed_messages": _accepted_generation_messages(
                 _get_session_store(project.id),
                 logical.session_id,
@@ -1658,23 +1691,31 @@ def _generation_status_payload(project_id: str, request_id: str) -> dict[str, An
         return {
             "outcome": "unknown",
             "request_id": request_id,
+            "client_request_id": logical.client_request_id,
             "message": (
                 "The provider outcome is still unknown. Marginalia is retaining custody and "
                 "will keep reconciling; starting another generation is not yet safe."
             ),
         }
     if logical.status is LogicalStatus.BLOCKED:
-        return {"outcome": "blocked", "request_id": request_id, "message": logical.last_error}
+        return {
+            "outcome": "blocked",
+            "request_id": request_id,
+            "client_request_id": logical.client_request_id,
+            "message": logical.last_error,
+        }
     if logical.status is LogicalStatus.FAILED:
         return {
             "outcome": "failure",
             "request_id": request_id,
+            "client_request_id": logical.client_request_id,
             "message": logical.last_error or "The provider returned a confirmed failure.",
             "retryable": True,
         }
     return {
         "outcome": "pending",
         "request_id": request_id,
+        "client_request_id": logical.client_request_id,
         "status": logical.status,
         "message": "Marginalia has custody of this generation.",
     }
@@ -1688,18 +1729,23 @@ async def get_generation_status(request_id: str, project_id: str | None = None) 
 
 @app.get("/v1/generations")
 async def list_generations(
-    project_id: str | None = None, session_id: str | None = None
+    project_id: str | None = None,
+    session_id: str | None = None,
+    client_request_id: str | None = None,
 ) -> dict[str, Any]:
     project = _project_record(project_id)
     requests = [
         item
         for item in _get_generation_store(project.id).list_requests()
-        if item.project_id == project.id and (session_id is None or item.session_id == session_id)
+        if item.project_id == project.id
+        and (session_id is None or item.session_id == session_id)
+        and (client_request_id is None or item.client_request_id == client_request_id)
     ]
     active = [
         _generation_status_payload(project.id, item.id)
         for item in requests
-        if item.status not in {LogicalStatus.ACCEPTED, LogicalStatus.BLOCKED, LogicalStatus.FAILED}
+        if client_request_id is not None
+        or item.status not in {LogicalStatus.ACCEPTED, LogicalStatus.BLOCKED, LogicalStatus.FAILED}
     ]
     return {"generations": active}
 
@@ -2521,6 +2567,9 @@ def _commit_authored_turn(
     target: tuple[SessionStore, ChatSession, ChatMessage],
     outcome: AuthoredGeneration,
     model_identity: ConfiguredModel | None,
+    *,
+    estimated_prompt_tokens: int | None = None,
+    latency_ms: float | None = None,
 ) -> list[dict[str, Any]]:
     """Persist the prompt and authored result together, only after success."""
     store, session, pending_user = target
@@ -2532,6 +2581,17 @@ def _commit_authored_turn(
         usage=outcome.usage,
         provider_id=model_identity.provider_id if model_identity else None,
         model_id=model_identity.model_id if model_identity else None,
+        accounting=(
+            _message_accounting(
+                model_identity.id,
+                model_identity.provider_id,
+                outcome.usage,
+                estimated_prompt_tokens=estimated_prompt_tokens,
+                latency_ms=latency_ms,
+            )
+            if model_identity
+            else None
+        ),
     )
     committed = [user_message, assistant_message]
     result = store.append_messages_if_revision(session.id, session.revision, committed)
@@ -2943,26 +3003,57 @@ async def chat_completions(
     Delegates to the governor daemon for the full governed pipeline:
     pending check → augment → generate → check → receipt.
     """
+    messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    durable_store: GenerationStore | None = None
+    durable_settings = None
+    request_delivery_digest: str | None = None
+    if request.project_id is not None and request.session_id is not None:
+        project = _project_record(request.project_id)
+        durable_store = _get_generation_store(project.id)
+        durable_settings = durable_store.settings(project.id)
+        if request.client_request_id is not None:
+            request_delivery_digest = delivery_digest(
+                project_id=project.id,
+                session_id=request.session_id,
+                model=request.model,
+                messages=messages,
+            )
+            existing = durable_store.get_by_client_id(project.id, request.client_request_id)
+            if existing is not None and existing.delivery_digest is not None:
+                if existing.delivery_digest != request_delivery_digest:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="client request ID is already bound to different frozen work",
+                    )
+                payload = _generation_status_payload(project.id, existing.id)
+                status_code = 202 if payload["outcome"] in {"pending", "unknown"} else 200
+                return JSONResponse(status_code=status_code, content=payload)
+            if not durable_settings.dispatch_enabled:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "durable generation is off for this project; the request was not "
+                        "rerouted through synchronous generation"
+                    ),
+                )
+
     maintenance = _maintenance_message()
     if maintenance is not None:
         return _failure_response(_generation_failure(ServiceMaintenanceError(maintenance)))
 
     selected_model, model_identity = _resolve_configured_model(request.model)
     governed_chat = _get_governed_chat_adapter(request.project_id)
-    messages = [{"role": m.role, "content": m.content} for m in request.messages]
     try:
         commit_target = _prepare_generation_commit(request)
     except StaleSessionRevisionError as exc:
         return _failure_response(_generation_failure(exc))
 
-    durable_store: GenerationStore | None = None
     durable_snapshot: tuple[str, str] | None = None
     durable_context = None
-    durable_settings = None
     if commit_target is not None:
         project = _project_record(request.project_id)
-        durable_store = _get_generation_store(project.id)
-        durable_settings = durable_store.settings(project.id)
+        durable_store = durable_store or _get_generation_store(project.id)
+        durable_settings = durable_settings or durable_store.settings(project.id)
         if durable_settings.dispatch_enabled:
             if not MARGINALIA_DURABLE_GENERATION_AVAILABLE:
                 raise HTTPException(
@@ -3093,6 +3184,8 @@ async def chat_completions(
                     guidance_fingerprint=durable_snapshot[1],
                     original_model=selected_model,
                     original_route=(model_identity.provider_id if model_identity else "governor"),
+                    delivery_digest=request_delivery_digest,
+                    estimated_prompt_tokens=estimated_prompt_tokens,
                     fallback_policy=fallbacks,
                     request={
                         "context_id": project.context_id,
@@ -3187,9 +3280,18 @@ async def chat_completions(
         telemetry_logger.info("request_accounting %s", json.dumps(accounting.to_dict()))
 
     request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    generation_latency_ms = (time.monotonic() - generation_started) * 1000
     try:
         committed_messages = (
-            _commit_authored_turn(commit_target, outcome, model_identity) if commit_target else []
+            _commit_authored_turn(
+                commit_target,
+                outcome,
+                model_identity,
+                estimated_prompt_tokens=estimated_prompt_tokens,
+                latency_ms=generation_latency_ms,
+            )
+            if commit_target
+            else []
         )
     except StaleSessionRevisionError as exc:
         failure = _generation_failure(exc)
