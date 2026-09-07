@@ -17,6 +17,8 @@ from typing import Any, Callable, Iterator
 
 import fcntl
 
+from gov_webui.usage_accounting import message_accounting
+
 
 class SessionWriteResult(StrEnum):
     """Terminal result of a revision-checked durable session write."""
@@ -73,16 +75,39 @@ class SessionMessage:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SessionMessage:
+        accounting = data.get("accounting")
+        provider_id = data.get("provider_id")
+        model_id = data.get("model_id")
+        usage = data.get("usage")
+        if (
+            accounting is None
+            and data.get("role") == "assistant"
+            and isinstance(provider_id, str)
+            and provider_id
+            and isinstance(model_id, str)
+            and model_id
+            and isinstance(usage, dict)
+        ):
+            # The qualified previous image preserves the source facts but does
+            # not know the additive accounting object. If it rewrites a session
+            # during rollback, reconstruct only what those retained facts prove.
+            # Historical price and latency are not recoverable, so cost stays
+            # explicitly unavailable rather than being recomputed at new rates.
+            accounting = message_accounting(
+                provider_id=provider_id,
+                model_id=model_id,
+                usage=usage,
+            )
         return cls(
             id=data["id"],
             role=data["role"],
             content=data["content"],
             timestamp=data["timestamp"],
             model=data.get("model"),
-            usage=data.get("usage"),
-            provider_id=data.get("provider_id"),
-            model_id=data.get("model_id"),
-            accounting=data.get("accounting"),
+            usage=usage,
+            provider_id=provider_id,
+            model_id=model_id,
+            accounting=accounting,
             generation_candidate_id=data.get("generation_candidate_id"),
         )
 

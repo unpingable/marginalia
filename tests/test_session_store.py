@@ -49,6 +49,36 @@ def test_message_accounting_round_trips_without_affecting_legacy_records(tmp_pat
     assert store.get(session.id).messages[0].accounting == generated.accounting
 
 
+def test_previous_image_rewrite_reconstructs_only_proven_accounting() -> None:
+    message = SessionMessage.from_dict(
+        {
+            "id": "candidate-message",
+            "role": "assistant",
+            "content": "Retained response",
+            "timestamp": "2026-09-07T00:00:00+00:00",
+            "model": "writer-selection",
+            "provider_id": "provider-a",
+            "model_id": "upstream-a",
+            "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+            "generation_candidate_id": "sha256:" + "a" * 64,
+        }
+    )
+
+    assert message.accounting == {
+        "provider_id": "provider-a",
+        "model_id": "upstream-a",
+        "estimated_prompt_tokens": None,
+        "reported_prompt_tokens": 7,
+        "reported_completion_tokens": 3,
+        "reported_total_tokens": 10,
+        "reported_source": "normalized",
+        "cost_status": "unavailable",
+        "cost_usd": None,
+        "cost_note": "The provider did not report cost and no price estimate is configured.",
+        "latency_ms": None,
+    }
+
+
 def test_model_switch_changes_future_selection_not_history(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "sessions")
     session = store.create("context", model="selection-a")
