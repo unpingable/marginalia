@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import tempfile
 import zipfile
 from datetime import datetime, timezone
@@ -90,6 +91,41 @@ class WorkspaceBackupManager:
                 return content
         raise BackupError(f"source changed repeatedly during backup: {path}")
 
+    @staticmethod
+    def _sqlite_snapshot(path: Path) -> bytes:
+        """Return a coherent SQLite backup without copying a live WAL piecemeal."""
+        descriptor, temporary_name = tempfile.mkstemp(suffix=".sqlite")
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        source: sqlite3.Connection | None = None
+        destination: sqlite3.Connection | None = None
+        try:
+            source = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+            destination = sqlite3.connect(temporary)
+            source.backup(destination)
+            integrity = destination.execute("PRAGMA integrity_check").fetchone()
+            if integrity is None or integrity[0] != "ok":
+                raise BackupError(f"SQLite snapshot failed integrity check: {path}")
+            destination.close()
+            destination = None
+            return temporary.read_bytes()
+        except sqlite3.Error as exc:
+            raise BackupError(f"cannot snapshot SQLite source {path}: {exc}") from exc
+        finally:
+            if destination is not None:
+                destination.close()
+            if source is not None:
+                source.close()
+            temporary.unlink(missing_ok=True)
+
+    @classmethod
+    def _read_context_file(cls, path: Path) -> bytes | None:
+        if path.name.endswith((".sqlite-wal", ".sqlite-shm")):
+            return None
+        if path.suffix == ".sqlite":
+            return cls._sqlite_snapshot(path)
+        return cls._read_stable(path)
+
     def _workspace_library_bytes(self, workspace_id: str) -> tuple[bytes, list[str]]:
         library = self._library()
         state = library.snapshot()
@@ -130,7 +166,9 @@ class WorkspaceBackupManager:
                 continue
             for path in sorted(item for item in root.rglob("*") if item.is_file()):
                 relative = path.relative_to(root).as_posix()
-                entries[f"payload/contexts/{context_id}/{relative}"] = self._read_stable(path)
+                content = self._read_context_file(path)
+                if content is not None:
+                    entries[f"payload/contexts/{context_id}/{relative}"] = content
 
         snapshots_root = self.data_root / "marginalia" / "snapshots"
         state = LibraryState.model_validate_json(library_bytes)
