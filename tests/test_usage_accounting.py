@@ -1,0 +1,201 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Estimated and observed cost stay distinct, and malformed usage never raises."""
+
+from __future__ import annotations
+
+import pytest
+
+from gov_webui.usage_accounting import (
+    EstimatedUsage,
+    ObservedUsage,
+    RequestAccounting,
+    observed_from_normalized_usage,
+    observed_from_provider_usage,
+)
+
+
+def test_openrouter_usage_is_read_including_reasoning_and_cost() -> None:
+    """Reasoning bills as completion tokens and must be visible separately."""
+    observed = observed_from_provider_usage(
+        {
+            "prompt_tokens": 15937,
+            "completion_tokens": 5526,
+            "total_tokens": 21463,
+            "cost": 0.0466262,
+            "completion_tokens_details": {"reasoning_tokens": 5310, "audio_tokens": 0},
+        }
+    )
+    assert observed.prompt_tokens == 15937
+    assert observed.completion_tokens == 5526
+    assert observed.reasoning_tokens == 5310
+    assert observed.cost_usd == 0.0466262
+    assert observed.reported is True
+
+
+def test_legacy_normalized_usage_is_labelled_and_missing_is_unavailable() -> None:
+    observed = observed_from_normalized_usage(
+        {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+    )
+    assert observed.source == "normalized"
+    assert observed.reasoning_tokens is None
+    assert observed.cost_usd is None
+
+    missing = observed_from_normalized_usage(
+        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    )
+    assert missing.source == "unavailable"
+    assert missing.reported is False
+
+
+def test_negative_provider_counts_are_unavailable() -> None:
+    assert observed_from_provider_usage({"prompt_tokens": -1}).prompt_tokens is None
+    assert observed_from_provider_usage({"cost": -0.1}).cost_usd is None
+
+
+def test_absent_fields_are_none_and_never_zero() -> None:
+    """A zero would claim a free request and corrupt any aggregate built on it."""
+    observed = observed_from_provider_usage({"prompt_tokens": 10})
+    assert observed.prompt_tokens == 10
+    assert observed.completion_tokens is None
+    assert observed.reasoning_tokens is None
+    assert observed.cost_usd is None
+
+
+def test_malformed_usage_never_raises() -> None:
+    """Billing data is not a reason to fail a request that already succeeded."""
+    for payload in (
+        None,
+        [],
+        "usage",
+        7,
+        {"prompt_tokens": "many"},
+        {"completion_tokens_details": 3},
+    ):
+        observed = observed_from_provider_usage(payload)
+        assert observed.reported is False
+
+
+def test_booleans_are_not_token_counts() -> None:
+    assert observed_from_provider_usage({"prompt_tokens": True}).prompt_tokens is None
+
+
+def test_float_token_counts_are_coerced_to_int() -> None:
+    """Some gateways report counts as floats; the field contract says int."""
+    observed = observed_from_provider_usage({"prompt_tokens": 1024.0})
+    assert observed.prompt_tokens == 1024
+    assert isinstance(observed.prompt_tokens, int)
+
+
+def test_prompt_delta_makes_the_budget_model_measurable() -> None:
+    """The gap between estimate and reality is the point of recording both."""
+    accounting = RequestAccounting(
+        provider_id="openrouter",
+        model_id="z-ai/glm-5.3",
+        estimated=EstimatedUsage(prompt_tokens=19625),
+        observed=ObservedUsage(prompt_tokens=15937),
+        latency_ms=55234.5,
+    )
+    assert accounting.prompt_delta == -3688
+
+    payload = accounting.to_dict()
+    # The two sources are never merged into one field.
+    assert payload["estimated_prompt_tokens"] == 19625
+    assert payload["observed_prompt_tokens"] == 15937
+    assert set(payload) >= {"estimated_prompt_tokens", "observed_prompt_tokens", "prompt_delta"}
+
+
+def test_prompt_delta_is_none_when_the_provider_reported_nothing() -> None:
+    accounting = RequestAccounting(
+        provider_id="ollama-local",
+        model_id="orion",
+        estimated=EstimatedUsage(prompt_tokens=100),
+        observed=ObservedUsage(),
+        latency_ms=1.0,
+    )
+    assert accounting.prompt_delta is None
+    assert accounting.to_dict()["observed_prompt_tokens"] is None
+
+
+# =============================================================================
+# Liveness probes: a deleted model is a configuration fault, not a dead backend
+# =============================================================================
+
+
+def test_unknown_probe_model_is_configuration_not_liveness() -> None:
+    """Health telemetry that is knowingly false is worse than none.
+
+    A probe naming a model the catalog no longer contains returns 422. Recording
+    that as an ordinary FAIL claims the backend is down when it was merely
+    deleted — which made three of four production probes false for two days
+    after a model cleanup.
+    """
+    import httpx
+
+    from gov_webui.synthetic_worker import _failure_class
+
+    request = httpx.Request("POST", "http://marginalia:8000/v1/internal/synthetic-governor")
+    unknown_model = httpx.HTTPStatusError(
+        "422", request=request, response=httpx.Response(422, request=request)
+    )
+    backend_down = httpx.HTTPStatusError(
+        "502", request=request, response=httpx.Response(502, request=request)
+    )
+
+    assert _failure_class(unknown_model) == "configuration_error"
+    assert _failure_class(backend_down) == "http_502"
+
+
+@pytest.mark.asyncio
+async def test_synthetic_probe_uses_the_declared_read_deadline(monkeypatch) -> None:
+    import httpx
+
+    from gov_webui import synthetic_worker
+
+    observed = {}
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            observed["read"] = timeout.read
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            request = httpx.Request("POST", "http://marginalia/probe")
+            return httpx.Response(200, request=request, json={"status": "PASS", "receipt_id": "r"})
+
+    monkeypatch.setattr(synthetic_worker.httpx, "AsyncClient", FakeClient)
+    result = await synthetic_worker.probe_once(
+        base_url="http://marginalia", model="orion", timeout_seconds=600
+    )
+    assert result["result"] == "PASS"
+    assert observed["read"] == 600
+
+
+def test_transport_failures_remain_liveness_failures() -> None:
+    """The distinction must not blunt real outage detection."""
+    import httpx
+
+    from gov_webui.synthetic_worker import _failure_class
+
+    request = httpx.Request("POST", "http://marginalia:8000/")
+    assert _failure_class(httpx.ConnectTimeout("x", request=request)) == "connect_timeout"
+    assert _failure_class(httpx.ReadTimeout("x", request=request)) == "read_timeout"
+
+
+def test_accounting_without_an_estimate_still_records_cost() -> None:
+    """An unbudgeted request has no estimate, but still has a bill."""
+    accounting = RequestAccounting(
+        provider_id="openrouter",
+        model_id="z-ai/glm-5.3",
+        estimated=None,
+        observed=ObservedUsage(prompt_tokens=15937, cost_usd=0.0466262),
+        latency_ms=55234.5,
+    )
+    payload = accounting.to_dict()
+    assert payload["estimated_prompt_tokens"] is None
+    assert payload["prompt_delta"] is None
+    assert payload["observed_cost_usd"] == 0.0466262

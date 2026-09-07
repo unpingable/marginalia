@@ -30,11 +30,25 @@ class ContextSummaryError(RuntimeError):
 
 
 class ContextMaintenanceRequired(ContextSummaryError):
-    """A bounded generation needs a new or expanded summary."""
+    """A bounded generation needs a new or expanded summary.
+
+    ``required_covered_messages`` is the coverage the blocked generation actually
+    needs, measured against its real fixed context and prompt. It travels with the
+    failure so maintenance satisfies that exact requirement instead of re-deriving
+    a weaker estimate from different inputs.
+    """
+
+    def __init__(self, message: str, *, required_covered_messages: int | None = None) -> None:
+        super().__init__(message)
+        self.required_covered_messages = required_covered_messages
 
 
 class ContextTooLarge(ContextSummaryError):
     """Mandatory context cannot fit the configured token allocation."""
+
+
+class ContextMaintenanceUnavailable(ContextSummaryError):
+    """Maintenance cannot run until configuration changes; retrying will not help."""
 
 
 class SummaryFact(BaseModel):
@@ -72,12 +86,37 @@ class SummarySource(BaseModel):
     prefix_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class CounterIdentity(BaseModel):
+    """The token counter that sized a piece of derived context.
+
+    Coverage requirements, chunk boundaries, and the summary's own size bound are
+    all measured with a counter. Recording which one produced a summary makes a
+    later counter change detectable instead of silently changing what "enough
+    coverage" means. Absent on records written before this was tracked, which is
+    treated as unknown rather than as a mismatch.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    tokenizer_encoding: str
+    token_safety_multiplier: float
+
+    def matches(self, other: "CounterIdentity | None") -> bool:
+        """Unknown identity on either side compares as compatible."""
+        if other is None:
+            return True
+        return (
+            self.tokenizer_encoding == other.tokenizer_encoding
+            and self.token_safety_multiplier == other.token_safety_multiplier
+        )
+
+
 class SummaryGenerator(BaseModel):
     model_config = ConfigDict(extra="forbid")
     configured_model: str
     provider_id: str | None = None
     model_id: str | None = None
     prompt_version: str = SUMMARY_PROMPT_VERSION
+    counter: CounterIdentity | None = None
     receipt_ids: list[str] = Field(default_factory=list)
 
 
@@ -142,6 +181,7 @@ class SummaryWork(BaseModel):
     source: SummarySource
     generator_model: str
     prompt_version: str = SUMMARY_PROMPT_VERSION
+    counter: CounterIdentity | None = None
     chunks: list[SummaryWorkChunk] = Field(default_factory=list)
     merges: list[SummaryWorkChunk] = Field(default_factory=list)
     updated_at: str
@@ -252,6 +292,39 @@ class ContextSummaryStore:
             summary.model_dump_json(indent=2) + "\n",
         )
 
+    def interrupted_sessions(self) -> list[str]:
+        """Sessions whose maintenance stopped before it finished.
+
+        Checkpoints are durable but progress is process-local, so a container
+        replacement mid-run leaves finished chunks on disk with nothing to carry
+        them forward. Until the writer's next attempt, that work sits idle and
+        the writer pays the latency again.
+
+        A session qualifies when work exists and no summary has caught up to it.
+        Never raises: an unreadable checkpoint is skipped, because reconciliation
+        runs at startup and must not keep the application from serving.
+        """
+        if not self.root.exists():
+            return []
+        interrupted: list[str] = []
+        for work_file in sorted(self.root.glob("*.work.json")):
+            session_id = work_file.name[: -len(".work.json")]
+            try:
+                work = SummaryWork.model_validate_json(work_file.read_text(encoding="utf-8"))
+                covered = len(work.source.covered_message_ids)
+                summary_file = self.summary_path(session_id)
+                if not summary_file.exists():
+                    interrupted.append(session_id)
+                    continue
+                summary = ContextSummary.model_validate_json(
+                    summary_file.read_text(encoding="utf-8")
+                )
+                if len(summary.source.covered_message_ids) < covered:
+                    interrupted.append(session_id)
+            except (OSError, ValueError, ValidationError):
+                continue
+        return interrupted
+
     def load_work(self, session_id: str) -> SummaryWork | None:
         path = self.work_path(session_id)
         if not path.exists():
@@ -274,11 +347,20 @@ def parse_summary_sections(content: str) -> SummarySections:
             lines = lines[:-1]
         text = "\n".join(lines).strip()
     try:
-        return SummarySections.model_validate_json(text)
+        sections = SummarySections.model_validate_json(text)
     except ValidationError as exc:
         raise ContextSummaryError(
             f"context-maintenance model returned invalid summary JSON: {exc}"
         ) from exc
+    # Every section defaults to an empty list, so `{}` is structurally valid and
+    # would be promoted as derived context covering its whole source while saying
+    # nothing about it. A summary that carries no fact is a failed generation, not
+    # a story with nothing in it; treat it as malformed so the retry path runs.
+    if not any(getattr(sections, name) for name in SummarySections.model_fields):
+        raise ContextSummaryError(
+            "context-maintenance model returned a summary containing no facts"
+        )
+    return sections
 
 
 def render_summary(summary: ContextSummary) -> dict[str, str]:

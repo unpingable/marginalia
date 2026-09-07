@@ -20,6 +20,7 @@ class GenerationFailureKind(StrEnum):
     CONTEXT_MAINTENANCE = "context_maintenance"
     CONTEXT_TOO_LARGE = "context_too_large"
     SERVICE_MAINTENANCE = "service_maintenance"
+    CLIENT_OUTDATED = "client_outdated"
     INTERNAL = "internal"
 
 

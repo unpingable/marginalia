@@ -29,6 +29,25 @@ _PROTOCOLS = {
 _COMMAND_ADAPTERS = {"claude-code", "kimi-code"}
 _MODEL_PURPOSES = {"writing", "context-maintenance"}
 
+# Protocols where Marginalia drives an agent process rather than calling a model
+# endpoint. The parser forbids `api_key_env` on both, so an agent's credential is
+# always the tool's own login — which is why "subscription" below is derived
+# rather than declared.
+_AGENT_PROTOCOLS = {"existing-command", "local-command"}
+
+# Where the weights actually run. This is the one property of a provider that
+# Marginalia cannot observe: a base URL's hostname is a guess, and a missing
+# credential says nothing about locality. Deployments declare it, and the default
+# is "hosted" so an undeclared provider is never presented as private.
+_INFERENCE_LOCATIONS = {"local", "hosted"}
+
+_CATEGORY_LABELS = {
+    "hosted-model": "Hosted models",
+    "local-model": "Local models",
+    "subscription-agent": "Subscription agents",
+    "local-agent": "Local agents",
+}
+
 
 class ProviderConfigurationError(ValueError):
     """Provider configuration is invalid and cannot be used safely."""
@@ -92,6 +111,35 @@ class ConfiguredModel:
     purpose: str = "writing"
     tokenizer_encoding: str = "o200k_base"
     token_safety_multiplier: float = 1.0
+    context_window_tokens: int | None = None
+    inference: str = "hosted"
+
+    @property
+    def kind(self) -> str:
+        """Whether Marginalia drives an agent process or calls a model endpoint."""
+        return "agent" if self.protocol in _AGENT_PROTOCOLS else "model"
+
+    @property
+    def access(self) -> str:
+        """How this entry is reached and paid for.
+
+        Agents authenticate through their own tool login, which the parser
+        guarantees by refusing `api_key_env` on every agent protocol.
+        """
+        if self.kind == "agent":
+            return "subscription"
+        return "api" if self.api_key_env else "open"
+
+    @property
+    def category(self) -> str:
+        """The menu group, derived from locality and kind — never from a label."""
+        if self.kind == "agent":
+            return "local-agent" if self.inference == "local" else "subscription-agent"
+        return "local-model" if self.inference == "local" else "hosted-model"
+
+    @property
+    def category_label(self) -> str:
+        return _CATEGORY_LABELS[self.category]
 
     def availability_error(self, environ: Mapping[str, str] | None = None) -> str | None:
         env = os.environ if environ is None else environ
@@ -125,6 +173,11 @@ class ConfiguredModel:
             "model_id": self.model_id,
             "protocol": self.protocol,
             "available": unavailable is None,
+            "kind": self.kind,
+            "inference": self.inference,
+            "access": self.access,
+            "category": self.category,
+            "category_label": self.category_label,
         }
         if unavailable:
             result["unavailable_reason"] = unavailable
@@ -305,6 +358,7 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
             {
                 "id",
                 "protocol",
+                "inference",
                 "base_url",
                 "api_key_env",
                 "command",
@@ -323,6 +377,10 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
         protocol = _required_string(provider.get("protocol"), f"{location}.protocol")
         if protocol not in _PROTOCOLS:
             raise ProviderConfigurationError(f"{location}.protocol {protocol!r} is unsupported")
+
+        inference = _required_string(provider.get("inference", "hosted"), f"{location}.inference")
+        if inference not in _INFERENCE_LOCATIONS:
+            raise ProviderConfigurationError(f"{location}.inference must be 'local' or 'hosted'")
 
         raw_timeout = provider.get("timeout_seconds", 120)
         if (
@@ -350,7 +408,17 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
         connect_timeout_seconds = timeout_field(
             "connect_timeout_seconds", min(10.0, timeout_seconds)
         )
-        read_timeout_seconds = timeout_field("read_timeout_seconds", min(30.0, timeout_seconds))
+        # The read bound is how long one wait for provider bytes may last. It
+        # defaults to the total budget rather than a tighter slice: a model's
+        # first token routinely arrives tens of seconds in — cold local weights
+        # have to load, and a reasoning model spends its first minute thinking
+        # without emitting anything a non-streaming caller can see. A short
+        # default silently kills work that was about to succeed, and reports it
+        # as an idle provider, which sends the reader looking at the network.
+        # Deployments that want stall detection set this explicitly, below the
+        # total. Failing at `timeout_seconds` is the fail-safe direction: the
+        # outer bound exists precisely to end a genuinely hung request.
+        read_timeout_seconds = timeout_field("read_timeout_seconds", timeout_seconds)
 
         base_url: str | None = None
         api_key_env: str | None = None
@@ -416,6 +484,7 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                     "purpose",
                     "tokenizer_encoding",
                     "token_safety_multiplier",
+                    "context_window_tokens",
                 },
                 model_location,
             )
@@ -446,6 +515,19 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                 raise ProviderConfigurationError(
                     f"{model_location}.token_safety_multiplier must be between 1 and 2"
                 )
+
+            raw_window = model.get("context_window_tokens")
+            context_window_tokens: int | None = None
+            if raw_window is not None:
+                if isinstance(raw_window, bool) or not isinstance(raw_window, int):
+                    raise ProviderConfigurationError(
+                        f"{model_location}.context_window_tokens must be a positive integer"
+                    )
+                if not 1_000 <= raw_window <= 10_000_000:
+                    raise ProviderConfigurationError(
+                        f"{model_location}.context_window_tokens must be between 1000 and 10000000"
+                    )
+                context_window_tokens = raw_window
 
             raw_model_id = model.get("model")
             command_model: str | None = None
@@ -481,6 +563,8 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                     purpose=purpose,
                     tokenizer_encoding=tokenizer_encoding,
                     token_safety_multiplier=token_safety_multiplier,
+                    context_window_tokens=context_window_tokens,
+                    inference=inference,
                 )
             )
 
@@ -493,6 +577,12 @@ class ProviderResponse:
     model_id: str
     usage: dict[str, int]
     finish_reason: str | None
+    # The provider's usage object as received. `usage` above is the normalised
+    # three-integer contract every caller already relies on; gateways report more
+    # than that — reasoning tokens billed as completion, and sometimes cost — and
+    # discarding it made spend unmeasurable. Kept raw and optional so nothing is
+    # forced to interpret a field it does not understand.
+    raw_usage: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -790,6 +880,7 @@ class LocalCommandTransport:
                 "total_tokens": prompt_tokens + completion_tokens,
             },
             finish_reason="stop",
+            raw_usage=raw_usage,
         )
 
     def _parse_response(self, stdout: str) -> ProviderResponse:
@@ -927,6 +1018,31 @@ class _OpenAICompatibleTransportCore:
             status_code=status_code,
         )
 
+    def _reject_gateway_error(self, data: Any) -> None:
+        """Refuse an error envelope returned with a success status.
+
+        Aggregating gateways in front of chat-completions APIs report upstream
+        refusals — rate limits, routing failures, moderation — as HTTP 200 with an
+        ``error`` object and no ``choices``. Treating that as a malformed body
+        would call a known refusal corruption and discard its status. The upstream
+        message itself is not echoed, matching how HTTP failures are normalized.
+        """
+        if not isinstance(data, Mapping):
+            return
+        error = data.get("error")
+        if error is None or data.get("choices"):
+            return
+        status_code: int | None = None
+        if isinstance(error, Mapping):
+            raw_code = error.get("code")
+            if isinstance(raw_code, int) and not isinstance(raw_code, bool):
+                status_code = raw_code
+        raise self._error(
+            "provider_error",
+            "provider reported an error instead of a completion",
+            status_code=status_code,
+        )
+
     async def complete(
         self,
         messages: Sequence[Mapping[str, str]],
@@ -961,9 +1077,19 @@ class _OpenAICompatibleTransportCore:
                 )
             try:
                 data = response.json()
+                self._reject_gateway_error(data)
                 choice = data["choices"][0]
                 content = choice["message"]["content"]
                 if not isinstance(content, str):
+                    # A reasoning model that exhausts its output budget before
+                    # emitting an answer returns null content with a length stop.
+                    # That is a truncation with a knowable cause, not a corrupt
+                    # body, and it must never read as an empty success.
+                    if choice.get("finish_reason") == "length":
+                        raise self._error(
+                            "truncated_response",
+                            "provider stopped at its output limit before returning content",
+                        )
                     raise TypeError
                 response_model = data.get("model", self.model.model_id)
                 if not isinstance(response_model, str):
@@ -985,7 +1111,13 @@ class _OpenAICompatibleTransportCore:
                     "malformed_response",
                     "provider returned a malformed chat-completion response",
                 ) from exc
-            return ProviderResponse(content, response_model, usage, finish_reason)
+            return ProviderResponse(
+                content,
+                response_model,
+                usage,
+                finish_reason,
+                raw_usage=usage_raw if isinstance(usage_raw, dict) else None,
+            )
         except ProviderError:
             raise
         except httpx.ConnectTimeout as exc:
@@ -1155,7 +1287,9 @@ class _AnthropicMessagesTransportCore:
                     "malformed_response",
                     "provider returned a malformed Anthropic Messages response",
                 ) from exc
-            return ProviderResponse("".join(text_parts), response_model, usage, finish_reason)
+            return ProviderResponse(
+                "".join(text_parts), response_model, usage, finish_reason, raw_usage=usage_raw
+            )
         except ProviderError:
             raise
         except httpx.ConnectTimeout as exc:
@@ -1334,6 +1468,7 @@ class OpenAICompatibleTransport(_OpenAICompatibleTransportCore):
                         break
                     try:
                         data = json.loads(raw_event)
+                        self._reject_gateway_error(data)
                         response_model = data.get("model")
                         if response_model is not None and response_model != self.model.model_id:
                             raise self._error(

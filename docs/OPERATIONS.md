@@ -89,8 +89,9 @@ and deployment ID are also stored in every backup manifest.
 ## Live updates and incident retention
 
 The current appliance is a single web-and-governor container. Replacing that
-container creates a brief service interruption and can turn an in-flight
-generation into a correctly typed, retryable transport failure. Do not rebuild
+container creates a brief service interruption and can stop Marginalia waiting for an in-flight
+generation without proving whether provider execution completed. That unresolved
+state is not automatically retryable. Do not rebuild
 or recreate a household's live container while someone is writing. Announce a
 quiet update window, confirm `execution.in_flight` is zero in
 `/health/ready`, take and verify a backup, and then perform the replacement.
@@ -232,6 +233,20 @@ inline; when coverage is behind it returns a fast typed preparation outcome and
 schedules checkpointed work outside the request. Activation fails closed unless
 every session that currently needs compaction has a source-valid summary
 covering at least the required prefix.
+
+Planning sizes each session against the same inputs the runtime uses: the
+project's real fixed context blocks and the tokenizer of the model that session
+will next use. `summary_ready` is therefore three-valued. `true` means proven
+sufficient, `false` proven short, and `null` not provable from the available
+configuration — for example when no model catalog is configured, so the session
+tokenizer cannot be resolved. The accompanying `estimated` field says which
+inputs were used. Only `true` counts toward the top-level `ready`, and the CLI
+exit code follows that verdict, so `context-validate` can now exit non-zero
+where an older build reported ready from placeholder sizing. Activation refuses
+an unprovable verdict rather than treating it as ready. Readiness is evaluated
+against a minimal prompt because no real prompt exists at planning time; a long
+prompt can still require more coverage, and generation reports that exact
+requirement when it happens rather than wedging.
 
 Derived files live under:
 

@@ -259,42 +259,156 @@ def test_proactive_lookahead_covers_more_than_the_immediate_minimum() -> None:
     assert len(proactive) > len(immediate)
 
 
-def test_interactive_context_requires_the_same_lookahead_as_prebuild() -> None:
+def test_admission_measures_the_real_summary_before_demanding_more_coverage() -> None:
+    """Planning reserves the largest a summary may become; admission must not.
+
+    `choose_summary_prefix` reserves `summary_max_tokens` because it is choosing a
+    prefix for a summary that does not exist yet. The summary actually in hand is
+    usually smaller. Blocking a turn on the planning estimate tells the writer to
+    wait for coverage the real composition never needed — which is what produced
+    a six-minute stall in production on 2026-09-06.
+    """
     session = session_with_pairs(3)
     incident_policy = policy()
     counter = WordCounter()
+    lookahead = maintenance_lookahead_tokens(incident_policy)
+
     immediate = choose_summary_prefix(session, [], "Continue.", incident_policy, counter)
     proactive = choose_summary_prefix(
-        session,
-        [],
-        "Continue.",
-        incident_policy,
-        counter,
-        additional_reserve_tokens=maintenance_lookahead_tokens(incident_policy),
+        session, [], "Continue.", incident_policy, counter, additional_reserve_tokens=lookahead
     )
+    # Planning still wants more coverage than the immediate minimum.
     assert len(immediate) < len(proactive)
 
-    with pytest.raises(ContextMaintenanceRequired, match="does not cover enough"):
-        build_generation_context(
-            session=session,
-            pending_user="Continue.",
-            fixed_messages=[],
-            policy=incident_policy,
-            counter=counter,
-            summary=summary_for(session, immediate),
-            additional_reserve_tokens=maintenance_lookahead_tokens(incident_policy),
-        )
-
+    # ...but a summary at the immediate minimum composes to 1,834 tokens against a
+    # 2,667 limit here, so it is admitted rather than blocked.
     built = build_generation_context(
         session=session,
         pending_user="Continue.",
         fixed_messages=[],
         policy=incident_policy,
         counter=counter,
-        summary=summary_for(session, proactive),
-        additional_reserve_tokens=maintenance_lookahead_tokens(incident_policy),
+        summary=summary_for(session, immediate),
+        additional_reserve_tokens=lookahead,
     )
-    assert built.metrics.summarized_message_count == len(proactive)
-    assert built.metrics.application_tokens <= (
-        incident_policy.application_tokens - maintenance_lookahead_tokens(incident_policy)
+    assert built.metrics.compacted is True
+    assert built.metrics.summarized_message_count == len(immediate)
+    assert built.metrics.application_tokens <= incident_policy.application_tokens - lookahead
+
+
+def test_blocking_still_reports_the_lookahead_aware_requirement() -> None:
+    """When the real composition genuinely overflows, the two sides still agree.
+
+    The planner/executor invariant is unchanged: the coverage reported to
+    maintenance is measured with the same lookahead reserve maintenance plans
+    with, so maintenance cannot under-cover what generation asked for.
+    """
+    session = session_with_pairs(3)
+    incident_policy = policy()
+    counter = WordCounter()
+    lookahead = maintenance_lookahead_tokens(incident_policy)
+    expected = len(
+        choose_summary_prefix(
+            session, [], "Continue.", incident_policy, counter, additional_reserve_tokens=lookahead
+        )
     )
+
+    # A summary covering nothing leaves the whole history in the tail, which
+    # cannot fit any budget.
+    with pytest.raises(ContextMaintenanceRequired, match="does not cover enough") as raised:
+        build_generation_context(
+            session=session,
+            pending_user="Continue.",
+            fixed_messages=[],
+            policy=incident_policy,
+            counter=counter,
+            summary=summary_for(session, session.messages[:2]),
+            additional_reserve_tokens=lookahead,
+        )
+    assert raised.value.required_covered_messages == expected
+
+
+def test_effective_policy_narrows_to_the_selected_model_window() -> None:
+    """The budget is a project intent; a smaller model window overrides it."""
+    from gov_webui.context_budget import effective_context_policy
+    from gov_webui.context_summary import ContextTooLarge, utc_now
+
+    policy = ContextPolicy(
+        target_provider_input_tokens=48_000,
+        provider_overhead_tokens=16_000,
+        output_reserve_tokens=8_000,
+        updated_at=utc_now(),
+    )
+
+    # No declared window: the project budget stands.
+    assert effective_context_policy(policy, None) is policy
+    # A window larger than the project intent changes nothing.
+    assert effective_context_policy(policy, 200_000) is policy
+    # A smaller window narrows the input ceiling by the output reserve.
+    narrowed = effective_context_policy(policy, 32_000)
+    assert narrowed.target_provider_input_tokens == 24_000
+    assert narrowed.application_tokens == 8_000
+    # Other policy fields are carried through untouched.
+    assert narrowed.summary_max_tokens == policy.summary_max_tokens
+    assert narrowed.tokenizer_encoding == policy.tokenizer_encoding
+    # A window that cannot satisfy the project's own floors is a typed refusal.
+    with pytest.raises(ContextTooLarge, match="context window is too small"):
+        effective_context_policy(policy, 9_000)
+
+
+def test_narrowed_budget_changes_what_admission_accepts() -> None:
+    """Narrowing must actually bind, not merely be reported."""
+    from gov_webui.context_budget import effective_context_policy
+    from gov_webui.context_summary import utc_now
+
+    policy = ContextPolicy(
+        enabled=True,
+        target_provider_input_tokens=48_000,
+        provider_overhead_tokens=16_000,
+        output_reserve_tokens=8_000,
+        summary_max_tokens=1_000,
+        summary_chunk_tokens=2_000,
+        updated_at=utc_now(),
+    )
+    messages = [
+        SessionMessage.create("user", words(6_000, "u")),
+        SessionMessage.create("assistant", words(6_000, "a")),
+    ]
+    session = ChatSession(
+        id="s",
+        context_id="c",
+        title="t",
+        created_at=utc_now(),
+        updated_at=utc_now(),
+        model="m",
+        revision=1,
+        message_count=len(messages),
+        messages=messages,
+    )
+    counter = WordCounter()
+
+    # Wide budget: the whole history fits uncompacted.
+    built = build_generation_context(
+        session=session,
+        pending_user="go",
+        fixed_messages=[],
+        policy=policy,
+        counter=counter,
+        summary=None,
+    )
+    assert built.metrics.compacted is False
+
+    # Same session, a model declaring a smaller window: no longer admissible
+    # without derived context. 32k window - 8k output reserve = 24k input,
+    # leaving 8k of application budget against a 12k history.
+    narrowed = effective_context_policy(policy, 32_000)
+    assert narrowed.application_tokens == 8_000
+    with pytest.raises(ContextMaintenanceRequired):
+        build_generation_context(
+            session=session,
+            pending_user="go",
+            fixed_messages=[],
+            policy=narrowed,
+            counter=counter,
+            summary=None,
+        )

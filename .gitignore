@@ -7,6 +7,10 @@ build/
 *.egg
 .pytest_cache/
 .env
+
+# Local provider credentials; never tracked.
+.openrouter
+.openrouter*
 agent-governor/
 receipt-v1/
 receipt-kernel/

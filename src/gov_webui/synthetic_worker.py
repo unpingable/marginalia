@@ -55,6 +55,13 @@ def _failure_class(exc: BaseException) -> str:
     if isinstance(exc, TimeoutError):
         return "deadline_exceeded"
     if isinstance(exc, httpx.HTTPStatusError):
+        # A probe naming a model the catalog does not contain is a configuration
+        # fault, not a liveness result. Reporting it as an ordinary failure makes
+        # the health signal claim a backend is down when it was simply deleted —
+        # which is how three of four production probes came to be false for two
+        # days after a model cleanup.
+        if exc.response.status_code == 422:
+            return "configuration_error"
         return f"http_{exc.response.status_code}"
     if isinstance(exc, httpx.HTTPError):
         return "transport_error"
@@ -78,9 +85,10 @@ async def probe_once(
         "backend": model,
     }
     try:
-        transport_timeout = httpx.Timeout(
-            min(30.0, timeout_seconds), connect=min(10.0, timeout_seconds)
-        )
+        # The endpoint is non-streaming. A cold local model may emit no HTTP
+        # bytes for several minutes, so a hidden 30-second read timeout reports
+        # healthy work as a failed probe. The outer deadline remains the bound.
+        transport_timeout = httpx.Timeout(timeout_seconds, connect=min(10.0, timeout_seconds))
         async with asyncio.timeout(timeout_seconds):
             async with httpx.AsyncClient(timeout=transport_timeout) as client:
                 response = await client.post(
@@ -101,10 +109,13 @@ async def probe_once(
             }
         )
     except Exception as exc:
+        failure_class = _failure_class(exc)
         record.update(
             {
-                "result": "FAIL",
-                "failure_class": _failure_class(exc),
+                # A misconfigured probe says nothing about whether the backend is
+                # alive, so it must not read as a liveness failure.
+                "result": "MISCONFIGURED" if failure_class == "configuration_error" else "FAIL",
+                "failure_class": failure_class,
                 "error": str(exc)[:500],
             }
         )

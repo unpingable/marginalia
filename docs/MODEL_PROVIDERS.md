@@ -70,6 +70,7 @@ source repository.
     {
       "id": "local-compatible",
       "protocol": "openai-compatible",
+      "inference": "local",
       "base_url": "http://provider.internal:11434/v1",
       "timeout_seconds": 120,
       "models": [
@@ -95,6 +96,20 @@ source repository.
       ]
     },
     {
+      "id": "openrouter",
+      "protocol": "openai-compatible",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "timeout_seconds": 180,
+      "models": [
+        {
+          "id": "openrouter-glm-5.3-flash",
+          "model": "z-ai/glm-5.3-flash",
+          "label": "GLM 5.3 Flash (OpenRouter)"
+        }
+      ]
+    },
+    {
       "id": "anthropic-api",
       "protocol": "anthropic-messages",
       "base_url": "https://api.anthropic.com/v1",
@@ -114,7 +129,11 @@ source repository.
 
 Provider IDs and configured model IDs must be unique. Configured model IDs are
 the values selected by the UI and passed through the governed daemon contract.
-The nested `model` value is the exact upstream model ID.
+The nested `model` value is the exact upstream model ID. A configured ID is
+restricted to letters, digits, `.`, `_`, `:`, and `-`, while an upstream model
+name may additionally contain `/`, so a namespaced slug such as
+`z-ai/glm-5.3-flash` belongs in `model` with a local ID like
+`openrouter-glm-5.3-flash` beside it.
 An `existing-command` model without a nested `model` delegates to the
 existing command's default model behavior.
 
@@ -136,7 +155,19 @@ substitution.
 selects a supported argument/output contract (`kimi-code` or `claude-code`);
 it is not an arbitrary command template. `executable_env` and
 `working_directory_env` name environment variables whose values remain
-deployment-local. The Kimi Code adapter invokes
+deployment-local.
+
+Bind-mount the host executable through a stable path, not a version-pinned one.
+A self-updating CLI replaces its versioned file, and a container that mounts the
+old version keeps working on the original inode until it is next replaced — at
+which point every model on that provider silently becomes unavailable, including
+the internal maintenance model. The failure is reported honestly by `/v1/models`
+and `availability_error` as `configured command executable is unavailable`, but
+nothing fails until the next container replacement, so it is easy to attribute to
+whatever change happened to accompany that restart. Mount the launcher symlink
+the installer maintains and confirm `/v1/models` after any replacement.
+
+The Kimi Code adapter invokes
 one explicit model in noninteractive `stream-json` mode and uses the final
 assistant message. The Claude Code adapter invokes `claude --print` with JSON
 output, passes the governed prompt over standard input, and returns the result
@@ -161,6 +192,143 @@ a socket timeout. Optional `connect_timeout_seconds` and
 idle time; each must be no greater than `timeout_seconds`. Continuous SSE data
 therefore cannot extend one invocation indefinitely. See
 [RELIABILITY.md](RELIABILITY.md) for the outer provider/RPC envelopes.
+
+Size `timeout_seconds` against the slowest realistic turn for that specific
+model, not a single house default, and keep it below
+`MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS` so the daemon does not expire
+first. Local runtimes are the usual surprise: a large local model that is not
+resident must be loaded before it emits anything, so the first turn after an
+idle period pays a cold-start cost the steady-state timing never shows. A
+timeout tuned on a warm model reports that as `provider response became idle`,
+which reads like a hang rather than a budget that was always too small. Either
+raise the budget or keep the model resident; measure both states before
+choosing.
+
+### OpenAI-compatible gateways
+
+OpenRouter is reached through the `openai-compatible` protocol rather than a
+protocol of its own: it exposes Chat Completions at
+`https://openrouter.ai/api/v1`, takes a bearer credential, and echoes the
+requested model. Point `base_url` at the gateway, name the credential variable
+in `api_key_env`, and put the routed slug in `model`. Selecting a different
+OpenRouter model — `z-ai/glm-5.3` in place of `z-ai/glm-5.3-flash` — is an edit
+to that one field; no code knows the slug. A self-hosted or proxied gateway is
+the same change with a different `base_url`.
+
+Two behaviours differ from a first-party API and are handled at the transport.
+A gateway may return HTTP 200 carrying an `error` object and no `choices` when
+an upstream refuses — rate limiting, no permitted provider, moderation. That is
+reported as a typed `provider_error` with the upstream status where one is
+given, never as a malformed body and never as an empty successful generation.
+Gateways also emit SSE comment lines as keep-alives while they route; those are
+ignored rather than parsed as data.
+
+Marginalia still requires the response model to equal the requested one, so a
+gateway configured to silently reroute to a substitute fails closed as
+`model_mismatch`. Configure one explicit slug per entry rather than a routing
+alias that may answer as something else.
+
+Reasoning models routed through a gateway spend their completion budget on
+reasoning before any answer text, and report `content: null` with a `length`
+stop when that budget runs out first. Marginalia does not send `max_tokens` on
+generation, so the provider's own default applies and ordinary turns are
+unaffected; when it does happen the transport reports a typed
+`truncated_response` naming the output limit rather than calling the body
+malformed. Reasoning tokens are billed as completion tokens, so usage counts for
+these models exceed the visible answer length. Gateways may also return usage
+fields beyond the three Marginalia records — cost breakdowns, cache and
+reasoning detail — which are ignored rather than rejected.
+
+Attribution headers some gateways accept for leaderboard ranking are not sent.
+They are optional for functionality and would require a deployment-specific URL
+and title that do not belong in provider configuration.
+
+## The timeout ladder
+
+Five bounds sit inside one another. Each must be strictly larger than the one
+it contains, or the outer layer kills the request before the inner layer can
+report a clean, classified failure:
+
+```
+provider connect_timeout_seconds   (per provider; short on purpose)
+provider read_timeout_seconds      <= timeout_seconds
+provider timeout_seconds           total for one provider call
+MARGINALIA_CODEX_TIMEOUT_SECONDS   provider-command deadline   (0.1-1800)
+MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS  supervisor      (0.1-3600)
+MARGINALIA_GOVERNOR_CHAT_TIMEOUT_SECONDS        daemon RPC
+MARGINALIA_SYNTHETIC_TIMEOUT_SECONDS            liveness worker
+```
+
+Two ways this bites, both observed in production:
+
+**A read bound shorter than the real first-token latency.** `read_timeout_seconds`
+bounds one wait for provider bytes, and on the non-streaming path nothing
+arrives until the whole answer does. Cold local weights need ~30s to load before
+emitting anything, and a reasoning model can spend its first 30s producing
+tokens a non-streaming caller never sees — one measured GLM 5.3 Flash turn spent
+2,073 reasoning tokens and 30.6s before its first visible character. A 30-second
+read bound cancels both at the moment they were about to answer, and reports
+`read_timeout` / "provider response became idle", which reads like a network
+fault rather than a bound that was simply too small. The default is now
+`timeout_seconds`; set it explicitly only when you want stall detection.
+
+**An inner bound equal to an outer one.** If a provider's `timeout_seconds`
+equals `MARGINALIA_CODEX_TIMEOUT_SECONDS`, the two expire together and the
+supervisor's tree-kill wins the race. The provider never gets to raise its own
+timeout, so the incident is classified as a provider-execution failure instead
+of a timeout, and the operator reads the wrong story. Leave a real margin —
+the deployment currently runs 600 / 660 / 680 / 700 / 720.
+
+Size these from measured latency at your *largest* real context, not from a
+small smoke test. First-token latency scales with prompt size, and the prompt
+grows as the manuscript does.
+
+## Model taxonomy in the picker
+
+The writer's menu is grouped, and the groups are served by the catalog rather
+than guessed by the browser. Three properties describe every entry:
+
+| property    | values                          | source                       |
+| ----------- | ------------------------------- | ---------------------------- |
+| `kind`      | `model`, `agent`                | derived from `protocol`      |
+| `inference` | `local`, `hosted`               | **declared per provider**    |
+| `access`    | `api`, `subscription`, `open`   | derived from credentials     |
+
+`kind` follows from the protocol: `existing-command` and `local-command` drive
+an agent process, everything else calls a model endpoint. `access` follows from
+that — the parser forbids `api_key_env` on both agent protocols, so an agent's
+credential is always the tool's own login, which is a subscription.
+
+`inference` is the one property Marginalia cannot observe. A base URL's hostname
+is a guess, and an absent credential says nothing about where weights run. So
+the deployment declares it on the provider:
+
+```json
+{
+  "id": "ollama-local",
+  "protocol": "openai-compatible",
+  "inference": "local",
+  "base_url": "http://host.docker.internal:11434/v1",
+  "models": [{"id": "orion-local", "model": "orion:latest", "label": "Orion 26B"}]
+}
+```
+
+The default is `hosted`, so a provider that forgets to declare is never
+presented to the writer as private. Declare `local` only when the weights run on
+hardware the deployment controls. **An agent binary executing locally is not
+local inference** — Claude Code, Codex, and Kimi Code all send prompts to a
+vendor. Calling those "local" spends the word the writer needs for actual
+privacy, so they group as *Subscription agents*.
+
+The four resulting groups are `Hosted models`, `Local models`,
+`Subscription agents`, and `Local agents` (an agent adapter pointed at local
+inference). Groups appear in the order their first model appears in this file,
+so provider order controls menu order.
+
+Because the group carries locality and billing, labels should carry neither:
+prefer `Orion 26B` over `Orion 26B (local)` and `Claude Code (Sonnet)` over
+`Claude Sonnet`. A label that names the product and its model stays true when
+the group changes; one that encodes transport does not.
 
 ## Behavior
 
@@ -226,6 +394,35 @@ counter; they do not alter provider sampling or model selection.
   "token_safety_multiplier": 1.0
 }
 ```
+
+Generation admission, background maintenance, and operator planning all size a
+session with the counter of the model that session will next use, so these
+values are one authority rather than three. A summary and its checkpoint record
+the counter that produced them, so a later counter change is detectable rather
+than silently redefining what "enough coverage" means: the checkpoint is not
+reused across a change, and `context-plan` reports `counter_changed` and stops
+asserting readiness it can no longer prove. Records written before this was
+tracked carry no identity and are treated as unknown, not as a mismatch, so
+existing checkpoints survive the upgrade.
+
+A model may declare `context_window_tokens`, the total window it accepts:
+
+```json
+{
+  "id": "small-window-model",
+  "label": "Small window",
+  "context_window_tokens": 32000
+}
+```
+
+`target_provider_input_tokens` is a per-project *intent*. When the selected model
+declares a smaller window, the effective input ceiling narrows to
+`context_window_tokens - output_reserve_tokens` for that request, and admission,
+maintenance planning, and operator reporting all read the narrowed budget. A
+window that cannot satisfy the project's own floors is refused as a typed
+oversized-context outcome before the provider is launched, rather than becoming
+an opaque provider error. Omitting the field leaves the model unconstrained, so
+existing catalogs behave exactly as before.
 
 `MARGINALIA_CONTEXT_MAINTENANCE_MODEL` names a configured model used only to
 derive long-session summaries. The household rollout uses

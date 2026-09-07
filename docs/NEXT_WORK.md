@@ -1,5 +1,58 @@
 # Next work
 
+## Planner/executor contract campaign — 2026-09-05
+
+A fourth incident on session `78fc7d45675f4a21` produced three `context_maintenance`
+failures with a fresh incident ID each and no underlying progress. The cause was
+not a stale lock, crashed worker, corrupt state, or abandoned transaction:
+nothing was stale and the persisted state was internally consistent. Generation
+sized required coverage from the real fixed project context and the writer's
+actual prompt and needed 82–84 messages; maintenance independently re-derived
+the same quantity from an empty fixed-context list and the placeholder prompt
+`"Continue the story."`, concluded 80 sufficed, and its "already sufficient"
+check made it a silent no-op on every retry. Both components were internally
+correct and collectively deadlocked.
+
+A hostile audit of the surrounding pipeline found the same shape at three more
+boundaries. Five bounded repairs followed, each with a regression test verified
+to fail against the prior code, and two latent inputs were closed afterwards:
+
+1. The maintenance watermark, a proactive heuristic measured on history alone,
+   could return before the propagated coverage floor was read. A project whose
+   fixed context and prompt exceeded the admission limit while history sat under
+   the watermark wedged identically and permanently. The watermark is now
+   consulted only when no observed requirement is present.
+2. Required coverage is computed once, by admission, and travels on
+   `ContextMaintenanceRequired` instead of being recomputed by the caller.
+3. Fixed context construction moved to `gov_webui/fixed_context.py` so the
+   request path and operator tooling cannot assemble different approximations,
+   and `ContextOperations` sizes with the session's own model tokenizer.
+4. Readiness became three-valued. `/health/ready` and the ops CLI previously
+   reported ready from placeholder sizing while the runtime rejected the
+   session, and `context-activate` used that verdict to authorise durable state.
+5. Concurrent requirements join monotonically; terminal maintenance failures are
+   no longer retried on the backoff schedule or reported to the writer as
+   transient; and a shorter requirement prunes the checkpoint cache instead of
+   discarding it.
+6. Summaries and checkpoints record the token counter that produced them, so a
+   counter change is detectable rather than silently redefining sufficiency.
+7. A model may declare its context window, which narrows the effective budget for
+   that request instead of applying one per-project constant to every model.
+
+The reusable invariant is that the consumer computes its requirement and the
+preparer satisfies it. Prefer `compute once → propagate exact requirement →
+satisfy → verify` over `compute → independently recompute → hope both agree`.
+Any future preparation step that can declare an operation admissible must
+evaluate a context at least as demanding as the one the operation will execute
+under.
+
+Recovery was validated end to end on a disposable instance against a local
+Ollama model: a session in the wedge shape returned one preparation outcome,
+maintenance ran and satisfied the propagated requirement, and the retry authored
+normally. Persistence was not implicated at any point — the checkpoint,
+publication, and resume boundaries were audited and found sound, including a
+real provider timeout that resumed correctly in three calls.
+
 ## Context liveness incidents resolved — 2026-09-04/05
 
 Live build `70a6c9f9f4674c60d842c44e63e1617d3ebf6218` is healthy on image
@@ -96,6 +149,258 @@ The regression is
    writer described in `SYNTHETIC_QUALIFICATION.md`, then add the focused
    Playwright generation-failure flow described in `DEVELOPMENT.md` and a
    provisioned browser CI job.
+5. **Per-model/provider context-budget policy.** `provider_overhead_tokens` and
+   `output_reserve_tokens` are global constants, and the second promotion of this
+   campaign showed the first one is load-bearing in a way nobody has stated.
+   Declaring Orion's true serving window of 24,576 makes Marginalia refuse the
+   model outright: `24576 - 8000` output reserve leaves 16,576, minus the 16,000
+   global overhead leaves 576 application tokens, below the 4,000 floor. The
+   window metadata is therefore currently undeclared for Orion, and its admission
+   ceiling is approximated by the Ollama `num_ctx` instead of enforced.
+
+   The work is to let both reservations vary by model/provider, keeping the
+   current global values as defaults, and to refuse impossible combinations
+   explicitly rather than arriving at an unusable budget by arithmetic.
+
+   **Do not simply retune 16,000 to a prettier number.** Nobody can currently say
+   what that reservation represents. It is subtracted from the project input
+   target to produce the application budget, and `predicted_provider_tokens` adds
+   it back for telemetry, but it has never been validated against a provider's
+   own reported `prompt_tokens`. That is now measurable: the OpenRouter path
+   returns real usage, so the reservation can be characterised from evidence
+   before it is parameterised.
+
+   A universal 8,000-token output reserve is separately questionable now that
+   reasoning models are in the menu. Reasoning bills as completion tokens, and
+   Orion spent ~2,900 of them on a two-sentence answer, so the reserve is not
+   bounding what it appears to bound.
+
+   The acceptance test is behavioural, not arithmetic: a declared serving window
+   must actually bound prompt plus generated *and reasoning* tokens against the
+   real endpoint, rather than merely satisfying Marginalia's internal formula.
+
+6. **Open fictional ontology — the cast is not the ontology.** The canon
+   authority boundary (see `RELIABILITY.md`) refuses an interpretation as a
+   mutation warrant. It does not yet catch the step *before* that one, where a
+   pass narrows an authoritative generic claim because no other members of the
+   category have appeared on the page yet.
+
+   The failure shape:
+
+   ```
+   authoritative generic category claim
+       -> pass observes the current instances
+       -> pass assumes a closed world          <-- introduced here
+       -> pass narrows the category
+       -> narrowed reading becomes a repair warrant
+   ```
+
+   `Observed(C) ⊆ C` does not license `Observed(C) = C`. In the incident that
+   produced the boundary, the author's rule quantified over robots; the story had
+   so far shown robots of one kind; the debugger argued the distinction was
+   immaterial *in this story* and used that to dismiss a scope question rather
+   than raise one. The author corrected it.
+
+   This is not pedantry, because fiction leaves ontology open deliberately.
+   Deliberate mystery, delayed exposition, foreshadowing, hidden subclasses, and
+   later refinement all look like overbroad canon to a closed-world reader. A
+   rule stated over AI before the story explains the postwar legal regime is not
+   secretly a rule about the one AI currently on the page.
+
+   Three cases must not collapse into each other:
+
+   - **refinement** — later material adds subclasses or history and the earlier
+     claim stays true; no defect;
+   - **restriction/supersession** — later authoritative material explicitly
+     narrows or replaces the earlier rule;
+   - **contradiction** — the two genuinely cannot coexist at the same scope,
+     time, and world state.
+
+   Do not assume a universal open- or closed-world logic for fiction; both are
+   authorial choices. The tractable question is what evidence closes a category:
+   explicit enumeration, an authoritative "only", a sealed taxonomy, or a rule
+   asserting no other members. Absent one, default to non-exhaustion — the cost
+   is asymmetric, since a missed narrowing is a diagnostic not raised while a
+   wrong narrowing edits the author's canon.
+
+   Regression coverage to add when this is picked up: a generic rule with one
+   observed instance; observed subclasses wrongly unioned into the whole
+   category; a new subclass that does *not* contradict the earlier rule; a later
+   narrowing that genuinely supersedes it; explicit enumeration where closed-world
+   reasoning **is** permitted; and a model-derived narrowing that tries to
+   authorize a repair and must be refused.
+
+   Deferred rather than built, and recorded in the constellation item
+   `skunkworks/research/DEFERRED-SEMANTIC-AUTHORITY-NONAMPLIFICATION-2026-09-05.md`
+   §8, because the closure question is not fiction-specific and should be
+   crosswalked against existing open/closed-world and refinement work before
+   anything is invented here.
+
+7. **TEMPORALIZED-CANON — deferred campaign function.** Fiction carries four
+   distinct orderings that Marginalia currently flattens: when a fact is true
+   in-world, when a character knows it, when the reader is shown it, and when the
+   author recorded it. Narrative order is not world-time order, and later
+   disclosure is not later validity.
+
+   Today the product enforces only the coarse guard — registration order
+   authorizes nothing, and a `contradictory_state` candidate needs canon to
+   explicitly retire the anchor it targets. That stops a bad repair promoting. It
+   does not let Marginalia tell a temporal transition from a contradiction, a
+   late revelation from a retcon, or two characters disagreeing from canon
+   disagreeing with itself.
+
+   The intended feature is narrow: optionally preserve enough temporal structure
+   to stop treating change, delayed revelation, unequal knowledge, and nonlinear
+   narration as ordinary contradiction. Optional and progressively structured —
+   partial orders and event anchors (`before WAR_END`, `during COLLEGE`), not
+   mandatory calendars; claim-level validity rather than one mutable time field
+   per character; `validity: unspecified` as the permanent default. Existing
+   projects stay valid with no temporal metadata and nothing is migrated.
+
+   Explicitly **not** a temporal-logic project, not an epistemic-logic engine,
+   and not automatic retcon detection from model inference. A model-derived
+   temporal relation stays a diagnostic: the authority boundary applies
+   unchanged.
+
+   Full capture, including the twelve required regression fixtures, dependencies,
+   expected artifacts, and activation criteria, is in
+   `research/MARGINALIA-TEMPORALIZED-CANON-DEFERRED-CAMPAIGN-FUNCTION.md`.
+   Deferred; shares a boundary with item 6 and should probably be picked up
+   alongside it.
+
+8. **SUBMIT-TO-AGENT — operator-originated diagnostic handoff.** Captured as a
+   campaign to schedule, not deferred research. Log tailing catches mechanical
+   failures well — a live session caught two 502s and their timings *were* the
+   diagnosis. It catches semantic failures not at all: canon applied to the wrong
+   entity, an agent's own constraint projected onto the author, a derived reading
+   reported as a defect in the author's material. Every one of those was a
+   mechanically successful request that produced no log line, and every one
+   reached the debugger because a human relayed it in prose.
+
+   The author knows which occurrence is wrong and knows something about it that
+   cannot be reconstructed from telemetry. The campaign gives them a way to
+   contribute that: a **Submit to agent** control plus free-text testimony, which
+   freezes an evidence envelope bound to the historical occurrence — session and
+   canon revisions, receipt and attempt identity, provider and build identity —
+   and hands it to an abstract repair endpoint.
+
+   Two properties are load-bearing. The envelope reconstructs *the occurrence the
+   author saw*, not current state. And **reporting a defect is not authorization
+   to repair it**: diagnosis, proposal, and promotion gates stay in force, which
+   is the evidence-versus-warrant distinction the canon authority boundary
+   already implements. The endpoint is abstract — Claude Code today, something
+   else later — with the author-facing workflow unchanged either way, mirroring
+   how the provider catalog already handles writing models.
+
+   Most of the envelope already exists; the work is binding it, not inventing it.
+   Cheapest sequencing is after backlog item 1, since durable attempt IDs are the
+   natural anchor for occurrence identity. The clarification round-trip is the
+   most valuable slice and could ship alone.
+
+   Full capture, including the twelve acceptance cases, security boundary,
+   dependencies, and expected artifacts, is in
+   `research/MARGINALIA-SUBMIT-TO-AGENT-CAMPAIGN.md`. The broader constellation
+   pattern is recorded separately and stays deferred.
+
+9. **Adversarial second pass — design note, risk-triggered.** The canon
+   authority boundary decides whether a finding may change canon. It cannot judge
+   whether the finding is any good, and nothing currently reviews a
+   model-produced interpretation before it becomes a durable proposal. In the
+   incident that produced the boundary, several confident readings of the
+   author's world rules each looked like a defect and none was; the boundary held
+   only because the author kept correcting them, which is the wrong reviewer.
+
+   The pattern is asymmetric, not a debate. **Producer:** here is my result and
+   its warrants. **Challenger:** find unsupported semantic strengthening,
+   authority laundering, missing evidence, or lossy transformation — and do not
+   propose improvements unless you can point at a defect. That last clause is the
+   design; an unconstrained second model invents a clever alternate reading and
+   calls it debugging, which is the failure being guarded against.
+
+   **Two models agreeing is not canon, and two disagreeing is not a defect.**
+   Both outputs are evidence about the transformation, never authority over the
+   author, and the challenger's own findings are model-derived and bound by the
+   same warrant rules. Outcomes are typed onto the existing warrant sets:
+   `AGREE / independently supported`, `DISAGREE / semantic interpretation`
+   (diagnostic-only), `DISAGREE / source-fidelity defect` (mutation-admissible),
+   `INSUFFICIENT WARRANT`, `NEEDS AUTHOR RESOLUTION`.
+
+   Spend it on canon promotion and repair, contradiction-versus-refinement
+   classification, author-statement extraction, context summarization, and
+   submitted-to-agent diagnoses — not prose generation, retrieval, CRUD, or
+   ordinary turns. Prefer a challenger from a different model family, since two
+   instances of one model share blind spots; the provider catalog already
+   supports this, and `purpose: "context-maintenance"` shows the shape a
+   `purpose: "challenger"` entry would take. Deterministic gates run first —
+   nothing a schema check can catch should reach a challenger.
+
+   Off by default, risk-triggered. Cheapest alongside item 8, where one model
+   diagnoses an incident and another hostile-reads the diagnosis before anything
+   promotes. Full note, including open questions, is in
+   `research/MARGINALIA-ADVERSARIAL-SECOND-PASS-DESIGN-NOTE.md`.
+
+10. **MAINTENANCE-OFF-CRITICAL-PATH.** Successor to the planner/executor
+    campaign, which made maintenance correct but left it in front of the writer.
+    Observed 2026-09-06 on a 102-message session: six minutes of a writing
+    application declining to write, five of them spent telling the author to
+    retry, then two completions at 05:29 and 05:40. Not a wedge — it recovers —
+    but stop-the-world, and it scales with the manuscript.
+
+    > Context maintenance should be incremental, amortized, and normally off the
+    > user's critical path. A foreground turn blocks only when there is literally
+    > no qualified context snapshot that can safely admit it.
+
+    A snapshot should assert *qualified through revision N*, with everything
+    after N an ordinary bounded tail, and maintenance running ahead of necessity
+    against the existing revision CAS. A job that truthfully summarizes through
+    102 while the session sits at 104 must **promote through 102 and leave
+    103–104 in the tail** — prefix semantics already permit this, so the gap is
+    in the scheduler, not the data model. Plus single-flight workers, so five
+    retries do not start five jobs.
+
+    Diagnose before optimizing: ask why 102 messages needs **29 provider calls**
+    at all. If the chunk size exists because the Claude Code CLI has a small safe
+    envelope, an implementation constraint has become product architecture. Flash
+    handling a comparable payload in ~37s suggests most of that cost is
+    orchestration tax, not work.
+
+    **Do not flip the maintenance provider as the fix.** §9 of the campaign doc
+    records an independent prerequisite: any maintenance backend change needs a
+    qualification corpus first — schema adherence, fact preservation, no ontology
+    broadening, conflict preserved as uncertainty. Maintenance writes
+    consequential derived state the author never sees. A faster unqualified
+    backend is a quicker route to a corrupted story bible.
+
+    `research/MARGINALIA-MAINTENANCE-OFF-CRITICAL-PATH-CAMPAIGN.md`.
+
+11. **Cost telemetry — observed versus estimated.** Tractable now that the
+    OpenRouter path returns real usage. Record both, keep reasoning tokens as
+    their own field (one measured GLM 5.3 turn spent 5,310 of 5,526 completion
+    tokens on reasoning), and aggregate by session/project/model/provider/day.
+
+    Two payoffs. The author sees that GLM 5.3 full is $0.047 per turn at this
+    session's size against $0.0018 for Flash and free for Orion — a 26× choice
+    worth showing at selection time. And it finally makes
+    `provider_overhead_tokens = 16000` measurable rather than assumed: one
+    request Marginalia sized at ~19,600 application tokens came back reported as
+    15,937 prompt tokens. Collecting that systematically turns backlog item 5
+    from a redesign into a measurement.
+
+    Keep billing telemetry conceptually separate from context admission. Same
+    observations, different contracts — one is economics, the other a safety
+    boundary, and an admission budget that starts optimising for cost is no
+    longer a safety boundary. `research/MARGINALIA-COST-TELEMETRY-DESIGN-NOTE.md`.
+
+Counter identity on stored summaries and per-model context capacity were
+previously listed here; both are now implemented. Summaries and checkpoints
+record the counter that produced them, a checkpoint is not reused across a
+counter change, and `context-plan` reports `counter_changed` instead of
+asserting readiness it cannot prove. A model may declare `context_window_tokens`,
+which narrows the effective input ceiling for that request across admission,
+maintenance planning, and operator reporting; a window too small for the
+project's floors is refused as a typed outcome before the provider is launched.
+Both are backward compatible: records without identity are unknown rather than
+mismatched, and models without a declared window stay unconstrained.
 
 Do not combine these into one redesign. Attempt identity is the correctness
 foundation for invisible retry and failover, so it comes first.
@@ -122,6 +427,15 @@ deterministic qualification and synthetic behavioral fuzzing.
 3. Confirm the writer is not active before any container replacement. A prior
    development replacement caused a short, correctly classified AG transport
    outage.
+3a. After any container replacement, check `/v1/models` availability, not only
+   `/health/ready`. A host CLI that self-updates invalidates a version-pinned
+   bind mount, and the running container keeps its original inode until the next
+   replacement, so an unrelated-looking restart is when the provider actually
+   disappears. `/health/ready` stays green throughout, because the Codex backend
+   short-circuits its reachability check. This exact sequence took the Claude
+   writing and context-maintenance routes offline for about sixteen hours before
+   an attempted maintenance run surfaced it; mount the installer's stable
+   launcher symlink instead of a version directory.
 4. Create and restore-test a fresh workspace backup before live data migration
    or context-policy changes. Never restore over the live volume.
 5. Reproduce new failures with provider-boundary fakes; never wait for the real
@@ -144,3 +458,16 @@ deterministic qualification and synthetic behavioral fuzzing.
   is configured.
 - Source binding validates summary provenance, not literary quality; writers
   remain the authority on voice, continuity, and usefulness.
+- A declared context window is trusted as configured. Marginalia does not
+  discover a model's real window, so a wrong or absent `context_window_tokens`
+  still permits an oversized launch that only the provider can reject.
+- Maintenance progress is process-local, but startup now reconciles it: a
+  bounded number of sessions whose durable checkpoint is ahead of their summary
+  are rescheduled when the application starts, so a container replacement
+  mid-maintenance no longer waits for the writer's next attempt. `active_tasks`
+  still resets to zero on replacement.
+- `LibraryStore` refuses to overwrite a `library.json` that changed outside the
+  running application, raising `LibraryConcurrentModificationError` rather than
+  silently dropping an external edit. It still holds cached state and rewrites
+  the file wholesale, so external edits require an application restart to be
+  picked up — refusing is the guard, not merging.

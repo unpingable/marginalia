@@ -13,13 +13,18 @@ from gov_webui.context_budget import (
     TiktokenCounter,
     as_messages,
     choose_summary_prefix,
+    effective_context_policy,
     maintenance_lookahead_tokens,
 )
 from gov_webui.context_maintenance import ContextMaintainer, SummaryModelResult
 from gov_webui.context_summary import (
     ContextSummaryError,
     ContextSummaryStore,
+    ContextTooLarge,
+    CounterIdentity,
 )
+from gov_webui.creative_project import CreativeProjectError, CreativeProjectStore
+from gov_webui.fixed_context import fiction_fixed_context_messages
 from gov_webui.daemon_client import DaemonChatClient, default_socket_path
 from gov_webui.generation_outcome import (
     AuthoredGeneration,
@@ -28,7 +33,11 @@ from gov_webui.generation_outcome import (
 )
 from gov_webui.governed_chat_adapter import GovernedChatAdapter
 from gov_webui.library_store import LibraryStore, ProjectRecord
-from gov_webui.model_providers import ConfiguredModel, load_provider_catalog
+from gov_webui.model_providers import (
+    ConfiguredModel,
+    ProviderConfigurationError,
+    load_provider_catalog,
+)
 from gov_webui.session_store import ChatSession, SessionStore
 
 
@@ -114,6 +123,69 @@ class ContextOperations:
     def _counter(self, policy: Any) -> TiktokenCounter:
         return TiktokenCounter(policy.tokenizer_encoding, policy.token_safety_multiplier)
 
+    def _catalog(self) -> Any | None:
+        if self.model_config is None:
+            return None
+        try:
+            return load_provider_catalog(self.model_config)
+        except ProviderConfigurationError:
+            return None
+
+    def _session_counter(
+        self,
+        session: ChatSession,
+        policy: Any,
+        catalog: Any | None,
+    ) -> tuple[TiktokenCounter, CounterIdentity, bool]:
+        """Size with the model the next turn will use, as generation would.
+
+        ``ChatSession.model`` is the selection for future turns, so it identifies
+        the tokenizer admission will apply. When it cannot be resolved the policy
+        tokenizer is used and the result is reported as an estimate rather than a
+        readiness guarantee. The identity is returned alongside so a stored
+        summary produced by a different counter can be recognised as such.
+        """
+        if catalog is not None:
+            try:
+                model = catalog.resolve(session.model)
+            except ProviderConfigurationError:
+                pass
+            else:
+                return (
+                    TiktokenCounter(model.tokenizer_encoding, model.token_safety_multiplier),
+                    CounterIdentity(
+                        tokenizer_encoding=model.tokenizer_encoding,
+                        token_safety_multiplier=model.token_safety_multiplier,
+                    ),
+                    False,
+                )
+        return (
+            self._counter(policy),
+            CounterIdentity(
+                tokenizer_encoding=policy.tokenizer_encoding,
+                token_safety_multiplier=policy.token_safety_multiplier,
+            ),
+            True,
+        )
+
+    def _session_window(self, session: ChatSession, catalog: Any | None) -> int | None:
+        """The declared context window of the model this session will next use."""
+        if catalog is None:
+            return None
+        try:
+            return catalog.resolve(session.model).context_window_tokens
+        except ProviderConfigurationError:
+            return None
+
+    def _fixed_context(self, project: ProjectRecord) -> list[dict[str, str]]:
+        """The same application-owned blocks generation sends with every turn."""
+        context_root = self.context_base / project.context_id
+        config = CreativeProjectStore(context_root, project.context_id).get()
+        return fiction_fixed_context_messages(
+            project_config=config,
+            governor_dir=context_root / ".governor",
+        )
+
     def plan(
         self,
         *,
@@ -121,13 +193,45 @@ class ContextOperations:
         project_id: str | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any]:
+        """Report derived-context readiness using the inputs generation will use.
+
+        Sizing counts the project's real fixed context and the tokenizer of the
+        model each session will next use, so this cannot report ready for a
+        session the runtime would reject. ``summary_ready`` is tri-state: ``True``
+        proven sufficient, ``False`` proven short, ``None`` not provable from the
+        available configuration (``estimated`` says which). Only ``True`` counts
+        toward the top-level ``ready``.
+
+        Readiness is evaluated against a minimal prompt, since no real prompt
+        exists here. A long prompt can still require more coverage; generation
+        reports that requirement when it happens and maintenance satisfies it.
+        """
         reports = []
         ready = True
+        catalog = self._catalog()
         for project in self._projects(workspace_id=workspace_id, project_id=project_id):
             summary_store = self._store(project)
-            policy = summary_store.policy()
-            counter = self._counter(policy)
+            project_policy = summary_store.policy()
+            fixed_error: str | None = None
+            try:
+                fixed_messages = self._fixed_context(project)
+            except CreativeProjectError as exc:
+                fixed_messages = []
+                fixed_error = f"cannot read project context: {exc}"
             for session in self._sessions(project, session_id=session_id):
+                counter, counter_identity, estimated = self._session_counter(
+                    session, project_policy, catalog
+                )
+                # The budget belongs to the model this session will next use, so
+                # it is resolved per session rather than once per project.
+                window_error: str | None = None
+                try:
+                    policy = effective_context_policy(
+                        project_policy, self._session_window(session, catalog)
+                    )
+                except ContextTooLarge as exc:
+                    policy = project_policy
+                    window_error = str(exc)
                 history_tokens = counter.count_messages(as_messages(session.messages))
                 if not policy.enabled:
                     reports.append(
@@ -140,48 +244,64 @@ class ContextOperations:
                             "needs_summary": False,
                             "summary_valid": False,
                             "summary_ready": True,
+                            "estimated": False,
+                            "counter_changed": False,
                             "covered_messages": 0,
                             "required_covered_messages": 0,
                             "error": None,
                         }
                     )
                     continue
-                threshold = int(
-                    (policy.application_tokens - maintenance_lookahead_tokens(policy))
-                    * policy.maintenance_watermark
-                )
                 needs_summary = False
                 valid_summary = False
                 summary_ready = False
                 covered = 0
                 required_covered = 0
-                error = None
+                counter_changed = False
+                error = fixed_error or window_error
                 try:
                     summary = summary_store.load(session)
                     if summary is not None:
                         valid_summary = True
                         covered = len(summary.source.covered_message_ids)
+                        # A summary stays valid across a counter change, but the
+                        # coverage it was sized for was decided by a different
+                        # counter, so its sufficiency is no longer provable here.
+                        counter_changed = not counter_identity.matches(summary.generator.counter)
                 except ContextSummaryError as exc:
-                    error = str(exc)
+                    error = str(exc) if error is None else error
                 try:
-                    if history_tokens >= threshold:
-                        required_covered = len(
-                            choose_summary_prefix(
-                                session,
-                                [],
-                                "Continue the story.",
-                                policy,
-                                counter,
-                                additional_reserve_tokens=maintenance_lookahead_tokens(policy),
-                            )
+                    # No watermark shortcut: the watermark measures history alone,
+                    # while admission measures fixed context plus history plus the
+                    # prompt. Asking for the required prefix directly is the same
+                    # question generation asks.
+                    required_covered = len(
+                        choose_summary_prefix(
+                            session,
+                            fixed_messages,
+                            "Continue the story.",
+                            policy,
+                            counter,
+                            additional_reserve_tokens=maintenance_lookahead_tokens(policy),
                         )
+                    )
                 except ContextSummaryError as exc:
                     error = str(exc) if error is None else error
                 needs_summary = required_covered > 0
-                summary_ready = error is None and (
-                    not needs_summary or (valid_summary and covered >= required_covered)
-                )
-                if not summary_ready:
+                # Three outcomes, not two. Reporting a definite shortfall is safe
+                # and actionable; claiming readiness from inputs generation will
+                # not use is how a wedged session looked healthy. That case is
+                # reported as unknown (null) so it can never render as ready.
+                summary_ready: bool | None
+                if error is not None:
+                    summary_ready = False
+                elif needs_summary and not (valid_summary and covered >= required_covered):
+                    summary_ready = False
+                elif estimated or counter_changed:
+                    summary_ready = None
+                else:
+                    summary_ready = True
+                if summary_ready is not True:
                     ready = False
                 reports.append(
                     {
@@ -193,6 +313,8 @@ class ContextOperations:
                         "needs_summary": needs_summary,
                         "summary_valid": valid_summary,
                         "summary_ready": summary_ready,
+                        "estimated": estimated,
+                        "counter_changed": counter_changed,
                         "covered_messages": covered,
                         "required_covered_messages": required_covered,
                         "error": error,
@@ -238,8 +360,8 @@ class ContextOperations:
         compatible_models = catalog.compatible_model_ids(maintenance_model)
         for project in self._projects(workspace_id=workspace_id, project_id=project_id):
             store = self._store(project)
-            policy = store.policy()
-            counter = self._counter(policy)
+            project_policy = store.policy()
+            fixed_messages = self._fixed_context(project)
             maintenance_id = f"{project.context_id[:116]}-maintenance"
             adapter = GovernedChatAdapter(
                 DaemonChatClient(str(self.socket_path)),
@@ -248,27 +370,24 @@ class ContextOperations:
             )
             try:
                 for session in self._sessions(project, session_id=session_id):
-                    history_tokens = counter.count_messages(as_messages(session.messages))
-                    threshold = int(
-                        (policy.application_tokens - maintenance_lookahead_tokens(policy))
-                        * policy.maintenance_watermark
+                    counter, counter_identity, _estimated = self._session_counter(
+                        session, project_policy, catalog
                     )
-                    if history_tokens < threshold:
-                        reports.append(
-                            {
-                                "session_ref": _safe_ref(session.id),
-                                "status": "not_needed",
-                                "history_tokens": history_tokens,
-                            }
-                        )
-                        continue
+                    policy = effective_context_policy(
+                        project_policy, self._session_window(session, catalog)
+                    )
+                    history_tokens = counter.count_messages(as_messages(session.messages))
                     try:
                         existing = store.load(session)
                     except ContextSummaryError:
                         existing = None
+                    # The watermark is not consulted here: a session under it can
+                    # still need coverage once the project's fixed context and a
+                    # prompt are counted, and this command exists to repair exactly
+                    # that. An empty required prefix below still reports not_needed.
                     source = choose_summary_prefix(
                         session,
-                        [],
+                        fixed_messages,
                         "Continue the story.",
                         policy,
                         counter,
@@ -315,6 +434,7 @@ class ContextOperations:
                         model_id=maintenance_model.model_id,
                         generate=generate,
                         compatible_configured_models=compatible_models,
+                        counter_identity=counter_identity,
                     )
                     summary = await maintainer.maintain(session, source)
                     reports.append(

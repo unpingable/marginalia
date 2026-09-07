@@ -276,3 +276,203 @@ def test_conversation_switch_preserves_historical_response_identity(
         ("provider-a", "upstream-a"),
         ("provider-b", "upstream-b"),
     ]
+
+
+def test_openrouter_model_is_writer_selectable_through_the_model_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gateway participates through the normal catalog surface.
+
+    A writer-facing model is listed, reports availability from its credential
+    variable, and carries the exact provider and upstream identity Marginalia
+    records on authored messages.
+    """
+    import gov_webui.adapter as adapter
+
+    config_path = tmp_path / "providers.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "default_model": "openrouter-glm-5.3-flash",
+                "providers": [
+                    {
+                        "id": "openrouter",
+                        "protocol": "openai-compatible",
+                        "base_url": "https://openrouter.ai/api/v1",
+                        "api_key_env": "OPENROUTER_API_KEY",
+                        "timeout_seconds": 180,
+                        "models": [
+                            {
+                                "id": "openrouter-glm-5.3-flash",
+                                "model": "z-ai/glm-5.3-flash",
+                                "label": "GLM 5.3 Flash (OpenRouter)",
+                            },
+                            {
+                                "id": "openrouter-glm-5.3-summary",
+                                "model": "z-ai/glm-5.3-flash",
+                                "label": "GLM 5.3 Flash context maintenance",
+                                "purpose": "context-maintenance",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(adapter, "MARGINALIA_MODEL_CONFIG", str(config_path))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    catalog = adapter._configured_provider_catalog()
+    assert catalog is not None
+
+    writer_models = [model for model in catalog.models if model.purpose == "writing"]
+    assert [model.id for model in writer_models] == ["openrouter-glm-5.3-flash"]
+
+    # Without the credential the model is visible but disabled, never substituted.
+    listed = writer_models[0]
+    assert listed.availability_error() == (
+        "required credential environment variable OPENROUTER_API_KEY is not set"
+    )
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "placeholder-not-a-real-key")
+    resolved = adapter._configured_provider_catalog().require_available("openrouter-glm-5.3-flash")
+    assert resolved.provider_id == "openrouter"
+    assert resolved.model_id == "z-ai/glm-5.3-flash"
+
+    # The internal maintenance purpose remains hidden from writer selection.
+    maintenance = adapter._configured_provider_catalog().resolve("openrouter-glm-5.3-summary")
+    assert maintenance.purpose == "context-maintenance"
+
+
+@pytest.fixture()
+def taxonomy_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """One catalog covering every writer-visible category at once."""
+    import gov_webui.adapter as adapter
+
+    config_path = tmp_path / "providers.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "default_model": "hosted-writing",
+                "providers": [
+                    {
+                        "id": "hosted",
+                        "protocol": "openai-compatible",
+                        "base_url": "https://hosted.test/v1",
+                        "api_key_env": "TAXONOMY_TEST_KEY",
+                        "models": [
+                            {
+                                "id": "hosted-writing",
+                                "model": "upstream-hosted",
+                                "label": "Hosted writing model",
+                            }
+                        ],
+                    },
+                    {
+                        "id": "ollama",
+                        "protocol": "openai-compatible",
+                        "inference": "local",
+                        "base_url": "http://ollama.test/v1",
+                        "models": [
+                            {
+                                "id": "orion-test",
+                                "model": "orion-test",
+                                "label": "Orion 26B",
+                            }
+                        ],
+                    },
+                    {
+                        "id": "agent",
+                        "protocol": "existing-command",
+                        "models": [{"id": "agent-writing", "label": "Codex"}],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("TAXONOMY_TEST_KEY", "present")
+    monkeypatch.setattr(adapter, "MARGINALIA_ENABLE_DONOR_ROUTES", False)
+    monkeypatch.setattr(adapter, "GOVERNOR_CONTEXTS_DIR", str(tmp_path / "contexts"))
+    monkeypatch.setattr(adapter, "GOVERNOR_CONTEXT_ID", "taxonomy-test")
+    monkeypatch.setattr(adapter, "GOVERNOR_MODE", "fiction")
+    monkeypatch.setattr(adapter, "GOVERNOR_AUTH_TOKEN", "")
+    monkeypatch.setattr(adapter, "MARGINALIA_MODEL_CONFIG", str(config_path))
+    yield TestClient(adapter.app)
+
+
+def test_model_menu_reports_locality_and_kind_for_every_entry(taxonomy_client) -> None:
+    """The writer's menu must say where inference runs, from declared state."""
+    payload = taxonomy_client.get("/v1/models").json()
+
+    assert [
+        (item["id"], item["kind"], item["inference"], item["access"], item["category_label"])
+        for item in payload["data"]
+    ] == [
+        ("hosted-writing", "model", "hosted", "api", "Hosted models"),
+        ("orion-test", "model", "local", "open", "Local models"),
+        # An agent binary runs here; its inference does not. Naming this group
+        # "local" would spend the word the writer needs for actual privacy.
+        ("agent-writing", "agent", "hosted", "subscription", "Subscription agents"),
+    ]
+
+
+def test_single_model_endpoint_reports_the_same_taxonomy(taxonomy_client) -> None:
+    """One authority: the list and the detail view cannot classify differently."""
+    listed = {item["id"]: item for item in taxonomy_client.get("/v1/models").json()["data"]}
+
+    for model_id, expected in listed.items():
+        detail = taxonomy_client.get(f"/v1/models/{model_id}").json()
+        assert [detail[key] for key in ("kind", "inference", "access", "category")] == [
+            expected[key] for key in ("kind", "inference", "access", "category")
+        ]
+
+
+def test_generation_records_estimated_against_observed_usage(provider_client, caplog) -> None:
+    """The estimate and the provider's own count are logged side by side.
+
+    `provider_overhead_tokens` has never been checked against what a provider
+    actually counts, so it is assumed rather than known. Emitting both numbers
+    per turn is what makes it characterisable. This is economics: it is recorded
+    after the fact and never feeds an admission decision.
+    """
+    import json as _json
+    import logging
+
+    client, adapter = provider_client
+    created = client.post(
+        "/sessions/",
+        json={"title": "Accounting", "model": "fiction-model", "project_id": "default"},
+    ).json()
+
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "fiction-model",
+                "project_id": "default",
+                "session_id": created["id"],
+                "messages": [{"role": "user", "content": "Begin the story."}],
+            },
+        )
+    assert response.status_code == 200
+
+    lines = [r.getMessage() for r in caplog.records if "request_accounting" in r.getMessage()]
+    assert lines, "a configured-model generation must record accounting"
+    payload = _json.loads(lines[-1].split("request_accounting ", 1)[1])
+
+    assert payload["provider_id"] == "provider-a"
+    assert payload["model_id"] == "upstream-a"
+    # This fixture has no bounded budget, so there is no estimate — but what the
+    # call cost is still recorded, and the delta is honestly absent.
+    assert payload["estimated_prompt_tokens"] is None
+    assert payload["prompt_delta"] is None
+    # The two sources stay separate keys; neither defaults into the other.
+    assert "observed_prompt_tokens" in payload
+    assert "prompt_delta" in payload
+    assert payload["latency_ms"] >= 0

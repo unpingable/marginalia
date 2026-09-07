@@ -37,7 +37,7 @@ Marginalia's typed provider catalog.
 - `connect_timeout_seconds` bounds HTTP connection establishment and defaults
   to the smaller of 10 seconds and the execution deadline.
 - `read_timeout_seconds` is the maximum HTTP response-idle interval and
-  defaults to the smaller of 30 seconds and the execution deadline.
+  defaults to the complete provider execution deadline.
 - `MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS` is the hard process-tree
   envelope and must exceed the largest configured provider deadline plus its
   cleanup allowance.
@@ -47,7 +47,7 @@ Marginalia's typed provider catalog.
   an in-flight invocation wedged. It should fall between the normal provider
   deadline and the RPC deadline.
 
-Cancellation closes network streams and stale RPC framing. Local command and
+Confirmed transport cancellation closes network streams and stale RPC framing. A browser or daemon RPC timeout may only stop Marginalia from waiting; it does not prove that provider execution or billing did not occur. Local command and
 native subprocess cancellation also terminates their process groups. A
 provider failure never creates, deletes, or rewrites a Marginalia session or
 message; persistence remains an explicit application operation.
@@ -119,6 +119,107 @@ The recommended initial production matrix is:
 The worker persists last-attempt timestamps in the same JSONL record, so a
 container restart does not cause an immediate duplicate probe burst.
 
+## Authority over the author's canon
+
+Canon is the author's. Marginalia may add to it, and may repair a record that
+provably disagrees with its own source, but it may not settle a question about
+what the author's words mean.
+
+Every `CanonReviewItem` carries a **warrant** saying what makes it a change to
+canon rather than an opinion about it, and warrants fall in two disjoint sets:
+
+| set | examples | may carry an edit |
+| --- | --- | --- |
+| source-fidelity | `author_statement`, `source_omission`, `source_truncation`, `dropped_subject`, `dangling_reference`, `transformation_mismatch`, `category_misclassification`, `duplicate_state`, `contradictory_state` | yes |
+| interpretive | `inferred_implication`, `strengthened_proposition`, `scope_interpretation`, `proposed_formalization`, `ontology_clarification`, `interpretive_ambiguity` | no |
+
+A source-fidelity warrant can be shown true against the source without
+preferring one reading of the author's prose over another: text was dropped, a
+subject was lost in promotion, a record is filed as the wrong kind of thing. An
+interpretive warrant exists only in a reading. Those are still worth surfacing —
+they stay in the queue as diagnostics the author can answer — but promotion
+refuses them, and a proposal that targets an existing anchor cannot claim
+`author_statement`.
+
+Two further gates:
+
+- **Every relied-on proposition must be canon.** `relied_on` names what the
+  candidate's argument runs through. Promotion checks each against the registry,
+  so an argument cannot pass through a premise the model supplied and come out
+  the other side as a repair.
+- **Resolutions stick.** Dismissing or accepting a candidate records its
+  evidence fingerprint — kind, subject, statement, target, whitespace- and
+  case-normalised, deliberately *excluding* the warrant. Re-deriving the same
+  claim by a different argument raises `CanonResolutionStandsError` rather than
+  re-queuing it. Reopening needs new authoritative evidence: a different
+  statement, or a different anchor.
+
+### The failure this exists to stop
+
+```
+authoritative source proposition
+    -> model-derived stronger proposition     <-- introduced here
+    -> alleged contradiction
+    -> proposed repair                        <-- blocked
+```
+
+Concretely, from the incident that motivated it. The author's rule:
+
+> "Since robots have never been human, they cannot perceive ghosts."
+
+That states an exclusion — a necessary condition at most. An analysis pass read
+sufficiency into it ("having been human enables perception"), then produced a
+human character with no ghost affinity as proof the rule was defective. The
+author never made the stronger claim; the pass supplied it and then argued with
+it. `strengthened_proposition` is interpretive, so it cannot carry an edit, and
+`relied_on` would fail anyway because the sufficiency claim is not canon.
+
+The same pass found two real defects — a world fact filed under a prohibition
+category, and a promotion that dropped its subject. Both are mechanical, both
+still promote normally. The boundary is not timidity; it is about what counts as
+evidence.
+
+### The observed cast is not the ontology
+
+A rule stated over a category stays a rule over the category even when the pages
+written so far show one member of it. Retrieval can only show what has been
+written, so it establishes `observed_members(C) ⊆ C` and never, by itself,
+`observed_members(C) = C`. Fiction withholds ontology deliberately: the subtype
+introduced three chapters from now refines the world model rather than proving
+an earlier generic rule was overbroad.
+
+`canon_scope.py` answers one question against explicit author metadata — has the
+author marked this category complete? Closure-sounding prose is not authority by
+itself. In Possible canon, the author uses the visible “Category remains open”
+control to name the category a rule closes; without that action it stays open. A strong claim about members is not a
+claim about extent, so *"all robots are built from salvaged parts"* quantifies
+over the category without closing it.
+
+A candidate that sets `category` is saying its argument turns on how many
+members exist. Promotion refuses it unless an accepted, still-live canon anchor carries that explicit closure. When the
+author has closed it, closed-world reasoning is licensed and the candidate
+promotes normally — the point is the safe default, not a prohibition.
+
+### Registration order is not validity order
+
+Canon is entered in whatever order the author reached for it. That is not the
+order the story tells, and not the order the world lived. An anchor added today
+may describe earlier world-time — backstory, disclosed history, the legal regime
+that explains a rule written last week — so **later disclosure is not later
+validity** and a newer anchor is not a newer truth.
+
+A `contradictory_state` candidate targeting an anchor therefore needs canon to
+explicitly retire that anchor, naming it: *"supersedes world-1"*, *"world-1 no
+longer applies"*, *"instead of world-1"*. Ordinal position authorizes nothing.
+This keeps refinement, supersession, and contradiction from collapsing into each
+other: only the middle one is a claim about validity, and only the author makes
+it.
+
+Deliberately not modelled here: proposition identity, semantic equivalence,
+fuzzy resolution matching, and any general category calculus. Those are
+constellation questions — see `NEXT_WORK.md` backlog item 6 and the skunkworks
+deferred item it names.
+
 ## Bounded long-fiction context
 
 Durable session history remains complete. When a project's bounded-context
@@ -166,7 +267,11 @@ foreign evidence citation, or oversized result invalidates the summary.
 
 Maintenance runs in a dedicated `<context>-maintenance` AG context. Chunk work and bounded pairwise merge work are atomically persisted outside
 sessions so interrupted prebuilds can resume and later prefix expansion can
-reuse unchanged inputs. Merge outputs have hard structured compaction limits. It may leave a `.work.json`
+reuse unchanged inputs. Because chunks are packed left to right and addressed by
+a content digest, a later run needing *less* coverage reuses the leading chunks
+it already paid for instead of discarding the checkpoint; every individual reuse
+is still gated on a digest recomputed from current message content, so edited
+history is re-summarised rather than reused. Merge outputs have hard structured compaction limits. It may leave a `.work.json`
 operational trace after failure; this is never included in story history,
 search, forks, canon capture, manuscript operations, or provider context.
 Completed summaries are also derived files and can be rebuilt from durable
@@ -187,8 +292,27 @@ generation fails quickly with a safe preparation message while the prompt
 remains in the browser. Exactly zero narrative mutation occurs until a validated
 authored result wins the existing session-revision compare-and-swap.
 
-Background context maintenance retries checkpointed work. This release does not
-automatically retry or switch writing models. That remains a future
-attempt-orchestration layer and must preserve one logical attempt ID, the same
-CAS boundary, and the rule that blocks, cancellations, conflicts, and invalid
-state are not silently retried.
+Required summary coverage has exactly one authority. Generation admission
+measures it against the real fixed project context and the writer's actual
+prompt, and that measured value travels with the failure to the component that
+must satisfy it. Preparation never re-derives the same quantity from placeholder
+inputs, and no proactive heuristic may suppress work an admission check has
+already proven necessary: the maintenance watermark is consulted only when no
+observed requirement is present. Concurrent requirements join monotonically, so
+a stronger requirement arriving while weaker work holds the session slot is
+recorded and satisfied by a follow-up run rather than dropped. The contract is
+that the consumer computes its requirement and the preparer satisfies it; two
+components independently estimating the same quantity from different inputs is
+how a session can be individually correct at every step and collectively unable
+to generate.
+
+Background context maintenance retries checkpointed work, but only failures a
+retry could plausibly clear. A structurally impossible source — an authored
+passage larger than one maintenance chunk — and a maintenance model that is
+absent or misconfigured are terminal: they are not retried on the backoff
+schedule, they are logged as errors rather than falling silent, and admission
+reports them as a non-retryable oversized-context outcome instead of promising
+preparation that can never finish. This release does not automatically retry or
+switch writing models. That remains a future attempt-orchestration layer and
+must preserve one logical attempt ID, the same CAS boundary, and the rule that
+blocks, cancellations, conflicts, and invalid state are not silently retried.

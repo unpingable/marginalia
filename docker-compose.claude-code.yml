@@ -1,9 +1,16 @@
 # Optional Claude Code provider. AG invokes the mounted provider binary.
+#
+# Mount the launcher symlink the installer maintains, not a version directory.
+# The CLI updates itself in place, so a pinned version path becomes an empty
+# directory and every model on this provider silently reports
+# "configured command executable is unavailable" — but only after the next
+# container replacement, because a running container keeps the inode it started
+# with. Set MARGINALIA_CLAUDE_BINARY to pin a specific build deliberately.
 services:
   marginalia:
     environment:
       - BACKEND_TYPE=claude-code
       - CLAUDE_PATH=/opt/claude/claude
     volumes:
-      - ${REAL_HOME:-${HOME}}/.local/share/claude/versions/${CLAUDE_VERSION}:/opt/claude/claude:ro
+      - ${MARGINALIA_CLAUDE_BINARY:-${REAL_HOME:-${HOME}}/.local/bin/claude}:/opt/claude/claude:ro
       - ${REAL_HOME:-${HOME}}/.claude:/root/.claude

@@ -7,6 +7,8 @@ import math
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
+from pydantic import ValidationError
+
 from gov_webui.context_summary import (
     ContextMaintenanceRequired,
     ContextPolicy,
@@ -109,6 +111,37 @@ def choose_summary_prefix(
     raise ContextTooLarge("recent authored context cannot fit the input budget")
 
 
+def effective_context_policy(
+    policy: ContextPolicy,
+    context_window_tokens: int | None,
+) -> ContextPolicy:
+    """Narrow the project budget to what the selected model can actually accept.
+
+    ``target_provider_input_tokens`` is a per-project intent. A model declaring a
+    smaller window cannot honour it, and launching anyway turns a knowable
+    admission decision into an opaque provider error. Narrowing here keeps one
+    authority for the budget: everything downstream reads the returned policy.
+
+    A model whose window cannot satisfy the project's own floors is rejected as
+    too large rather than silently truncated.
+    """
+    if context_window_tokens is None:
+        return policy
+    ceiling = context_window_tokens - policy.output_reserve_tokens
+    if ceiling >= policy.target_provider_input_tokens:
+        return policy
+    narrowed = policy.model_dump()
+    narrowed["target_provider_input_tokens"] = ceiling
+    try:
+        return ContextPolicy(**narrowed)
+    except ValidationError as exc:
+        raise ContextTooLarge(
+            "the selected model's context window is too small for this project's "
+            f"context policy (window={context_window_tokens}, "
+            f"output_reserve={policy.output_reserve_tokens})"
+        ) from exc
+
+
 def maintenance_lookahead_tokens(policy: ContextPolicy) -> int:
     """Reserve meaningful growth so maintenance stays ahead of interactive use."""
     return min(12_000, policy.application_tokens // 3)
@@ -154,41 +187,63 @@ def build_generation_context(
             source_revision=session.revision,
         )
 
-    required_prefix = choose_summary_prefix(
-        session,
-        fixed_messages,
-        pending_user,
-        policy,
-        counter,
-        additional_reserve_tokens=additional_reserve_tokens,
-    )
+    def _requirement() -> int:
+        """The coverage a fresh plan would need, measured only when blocking."""
+        return len(
+            choose_summary_prefix(
+                session,
+                fixed_messages,
+                pending_user,
+                policy,
+                counter,
+                additional_reserve_tokens=additional_reserve_tokens,
+            )
+        )
+
     if summary is None:
-        raise ContextMaintenanceRequired("long conversation has no valid derived summary")
+        raise ContextMaintenanceRequired(
+            "long conversation has no valid derived summary",
+            required_covered_messages=_requirement(),
+        )
+
+    # Try the context that actually exists before asking for a bigger one.
+    #
+    # `choose_summary_prefix` plans against `summary_max_tokens`, the largest a
+    # summary is allowed to become. The summary in hand is usually smaller, so
+    # planning can demand coverage that the real composition does not need — and
+    # while maintenance produces that surplus coverage the writer is told to wait
+    # for preparation that was never necessary. Compose with the real summary and
+    # measure. Only a measurement that genuinely overflows may block a turn.
     covered = len(summary.source.covered_message_ids)
-    if covered < len(required_prefix):
-        raise ContextMaintenanceRequired("derived summary does not cover enough older history")
-    recent = durable[covered:]
-    summary_message = render_summary(summary)
-    bounded = [*fixed_messages, summary_message, *recent, pending]
-    application_tokens = counter.count_messages(bounded)
-    if application_tokens > application_limit:
-        raise ContextMaintenanceRequired("derived summary does not cover enough older history")
-    components = {
-        "fixed": counter.count_messages(fixed_messages),
-        "summary": counter.count_messages([summary_message]),
-        "recent": counter.count_messages(recent),
-        "prompt": counter.count_messages([pending]),
-    }
-    return BoundedGenerationContext(
-        messages=bounded,
-        metrics=ContextMetrics(
-            full_history_tokens=full_tokens,
-            application_tokens=application_tokens,
-            predicted_provider_tokens=application_tokens + policy.provider_overhead_tokens,
-            component_tokens=components,
-            recent_message_count=len(recent),
-            summarized_message_count=covered,
-            compacted=True,
-        ),
-        source_revision=session.revision,
+    if covered <= len(durable):
+        recent = durable[covered:]
+        summary_message = render_summary(summary)
+        bounded = [*fixed_messages, summary_message, *recent, pending]
+        application_tokens = counter.count_messages(bounded)
+        if application_tokens <= application_limit:
+            components = {
+                "fixed": counter.count_messages(fixed_messages),
+                "summary": counter.count_messages([summary_message]),
+                "recent": counter.count_messages(recent),
+                "prompt": counter.count_messages([pending]),
+            }
+            return BoundedGenerationContext(
+                messages=bounded,
+                metrics=ContextMetrics(
+                    full_history_tokens=full_tokens,
+                    application_tokens=application_tokens,
+                    predicted_provider_tokens=(
+                        application_tokens + policy.provider_overhead_tokens
+                    ),
+                    component_tokens=components,
+                    recent_message_count=len(recent),
+                    summarized_message_count=covered,
+                    compacted=True,
+                ),
+                source_revision=session.revision,
+            )
+
+    raise ContextMaintenanceRequired(
+        "derived summary does not cover enough older history",
+        required_covered_messages=_requirement(),
     )

@@ -21,6 +21,16 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
+class LibraryConcurrentModificationError(RuntimeError):
+    """The library file changed outside the application since it was loaded.
+
+    The store keeps the whole library in memory and rewrites the file wholesale,
+    so writing over an external edit would silently drop whatever it added —
+    conversation registrations most often. Refusing is the only safe answer: the
+    application cannot merge a change it never saw.
+    """
+
+
 class LibraryStoreError(RuntimeError):
     """The library sidecar could not be read or persisted."""
 
@@ -105,7 +115,12 @@ class LibraryStore:
         self.path = path
         self.default_context_id = default_context_id
         self._lock = threading.RLock()
+        # What the file looked like when this process last agreed with it. Set
+        # before loading so the first write of a fresh library is unguarded.
+        self._disk_fingerprint: str | None = None
         self._state = self._load_or_create()
+        self._disk_fingerprint = self._fingerprint()
+        self._committed_state = self._state.model_copy(deep=True)
 
     @staticmethod
     def _clean_name(name: str, *, label: str = "project") -> str:
@@ -295,16 +310,44 @@ class LibraryStore:
                 )
         return state
 
+    def _fingerprint(self) -> str | None:
+        """The on-disk library's digest, or None when absent or unreadable."""
+        try:
+            return hashlib.sha256(self.path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+
+    def _guard_external_change(self) -> None:
+        """Refuse to overwrite a file that changed since it was loaded."""
+        if self._disk_fingerprint is None:
+            return
+        if self._fingerprint() != self._disk_fingerprint:
+            raise LibraryConcurrentModificationError(
+                f"library at {self.path} changed outside the application; "
+                "refusing to overwrite it with in-memory state"
+            )
+
     def _write(self, state: LibraryState) -> None:
         payload = state.model_dump_json(indent=2) + "\n"
+        self._guard_external_change()
         try:
             self._write_text_atomic(self.path, payload)
         except OSError as exc:
             raise LibraryStoreError(f"cannot persist library at {self.path}: {exc}") from exc
+        self._disk_fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _save(self) -> None:
-        self._state.updated_at = _now()
-        self._write(self._state)
+        try:
+            self._state.updated_at = _now()
+            self._write(self._state)
+        except Exception:
+            # Mutation methods update the in-memory Pydantic objects before
+            # reaching this persistence boundary. A compare-and-swap refusal
+            # must roll those updates back as well as preserving the externally
+            # edited file.
+            self._state = self._committed_state.model_copy(deep=True)
+            raise
+        self._committed_state = self._state.model_copy(deep=True)
 
     def snapshot(self) -> LibraryState:
         with self._lock:

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f4efe5">
   <title>Marginalia</title>
+  <link rel="icon" href="/favicon.ico" type="image/svg+xml">
   <style>
     :root {
       color-scheme: light;
@@ -658,6 +659,7 @@
       artifactSource: null, manuscript: {nodes: [], version: 1}, snapshots: [],
       selectedMessageIds: new Set(), artifactView: "active", artifactQuery: "", entities: [], canonCounts: null,
       system: null, outlineMessageTargets: new Map(), artifactTargetNodeId: null, pendingOutlineNodeId: null,
+      loadedBuild: null, stale: false,
     };
     const $ = (selector) => document.querySelector(selector);
     const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -760,11 +762,27 @@
       const selected = availableModels.some((model) => model.id === requested)
         ? requested : state.defaultModel || availableModels[0]?.id || "";
       select.replaceChildren();
+      // Group by the catalog's own category, in first-appearance order, so the
+      // deployment controls menu order and the picker never classifies a model
+      // itself. Ungrouped entries (a catalog without the taxonomy) stay flat.
+      const groups = new Map();
       state.models.forEach((model) => {
         const option = new Option(model.label || model.id, model.id);
         option.disabled = model.available === false;
         if (model.unavailable_reason) option.title = model.unavailable_reason;
-        select.append(option);
+        const key = model.category || "";
+        if (!key) {
+          select.append(option);
+          return;
+        }
+        let group = groups.get(key);
+        if (!group) {
+          group = document.createElement("optgroup");
+          group.label = model.category_label || key;
+          groups.set(key, group);
+          select.append(group);
+        }
+        group.append(option);
       });
       if (requested && !state.models.some((model) => model.id === requested)) {
         const unavailable = new Option(`Unavailable: ${requested}`, requested);
@@ -797,6 +815,53 @@
       const revision = deployment.build_sha && deployment.build_sha !== "unknown"
         ? ` · ${deployment.build_sha.slice(0, 8)}` : "";
       $("#version-display").textContent = `v${deployment.version || "unknown"}${revision}`;
+      noteServerBuild(deployment.build_sha);
+    }
+
+    // A tab keeps running the JavaScript it loaded with, so a redeploy can leave
+    // it calling routes this build no longer serves. Notice that explicitly
+    // instead of letting the next turn fail as something it is not.
+    function noteServerBuild(buildSha) {
+      if (!buildSha) return;
+      if (state.loadedBuild === null) {
+        state.loadedBuild = buildSha;
+        return;
+      }
+      if (buildSha !== state.loadedBuild && !state.stale) {
+        state.stale = true;
+        applyStaleClientState();
+      }
+    }
+
+    function applyStaleClientState() {
+      if (!state.stale) return;
+      $("#send").disabled = true;
+      let banner = $("#stale-client");
+      if (!banner) {
+        banner = document.createElement("div");
+        banner.id = "stale-client";
+        banner.className = "notice error";
+        banner.setAttribute("role", "alert");
+        const text = document.createElement("span");
+        text.textContent =
+          "Marginalia was updated on the server. Reload to keep writing — your prompt is kept.";
+        const reload = document.createElement("button");
+        reload.type = "button";
+        reload.textContent = "Reload";
+        reload.addEventListener("click", () => window.location.reload());
+        banner.append(text, reload);
+        const host = $("#chat-panel") || document.body;
+        host.prepend(banner);
+      }
+    }
+
+    async function checkServerBuild() {
+      try {
+        const system = await api("/v1/system");
+        noteServerBuild((system.deployment || {}).build_sha);
+      } catch (_) {
+        // A transient failure is not evidence of a redeploy; try again later.
+      }
     }
 
     async function loadWorkspaces() {
@@ -1415,6 +1480,10 @@
         applyMaintenanceState();
         return toast("Marginalia is under maintenance; your prompt is still here.");
       }
+      if (state.stale) {
+        applyStaleClientState();
+        return toast("Marginalia was updated; reload before sending. Your prompt is kept.");
+      }
       if (!content || state.busy) return;
       state.busy = true;
       $("#send").disabled = true;
@@ -1613,6 +1682,24 @@
         edit.textContent = "Edit";
         edit.addEventListener("click", () => editCapture(capture));
         actions.append(accept, edit, reject);
+        if (capture.kind === "world_rule") {
+          const closure = document.createElement("button");
+          closure.type = "button";
+          closure.className = "text-button";
+          closure.textContent = "Category remains open";
+          closure.title = "Optionally mark this rule as the complete set of a named category.";
+          closure.addEventListener("click", () => {
+            const category = window.prompt(
+              "Complete category (leave blank to keep it open)",
+              card.dataset.closesCategory || "",
+            );
+            if (category === null) return;
+            card.dataset.closesCategory = category.trim();
+            closure.textContent = category.trim()
+              ? "Closes category: " + category.trim() : "Category remains open";
+          });
+          actions.append(closure);
+        }
         if (capture.conversation_id) {
           const source = document.createElement("button");
           source.className = "text-button";
@@ -1630,7 +1717,7 @@
         if (accept) {
           await api(`/governor/fiction/capture/${encodeURIComponent(capture.id)}/accept`, {
             method: "POST",
-            body: JSON.stringify({name: capture.subject || "", description: capture.statement || "", capture_type: capture.kind || "", project_id: state.activeProjectId}),
+            body: JSON.stringify({name: capture.subject || "", description: capture.statement || "", capture_type: capture.kind || "", project_id: state.activeProjectId, closes_category: card.dataset.closesCategory || ""}),
           });
           await loadBible();
           toast("Added to canon");
@@ -2488,6 +2575,12 @@
       const failure = results.find((result) => result.status === "rejected");
       if (failure) toast(failure.reason?.message || "Some project state could not be loaded");
       applyMaintenanceState();
+      // An idle tab is exactly the one that goes stale, so poll rather than
+      // waiting for the writer to discover it mid-turn.
+      window.setInterval(checkServerBuild, 120000);
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") checkServerBuild();
+      });
     }
     start();
   </script>

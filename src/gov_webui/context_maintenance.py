@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
@@ -12,6 +13,7 @@ from gov_webui.context_budget import TokenCounter, as_messages
 from gov_webui.context_summary import (
     SUMMARY_PROMPT_VERSION,
     ContextPolicy,
+    CounterIdentity,
     ContextSummary,
     ContextSummaryError,
     ContextTooLarge,
@@ -39,6 +41,12 @@ class SummaryModelResult:
     provider_id: str | None = None
     model_id: str | None = None
 
+
+# Leaf chunks are independent, so latency need not be chunk_count x round-trip.
+# Bounded rather than unbounded: a maintenance run must not saturate a shared
+# provider or a subscription CLI's process budget while the writer is using the
+# same backend for generation.
+DEFAULT_CHUNK_CONCURRENCY = 4
 
 MERGED_SUMMARY_MAX_FACTS = 60
 MERGED_SUMMARY_MAX_TEXT_CHARS = 300
@@ -81,6 +89,24 @@ def _validate_sections_with_limits(
 SummaryGeneratorCall = Callable[[list[dict[str, str]], str], Awaitable[SummaryModelResult]]
 
 
+def oversized_source_message(
+    messages: list[SessionMessage],
+    *,
+    max_tokens: int,
+    counter: TokenCounter,
+) -> SessionMessage | None:
+    """The first message that cannot fit one maintenance chunk, if any.
+
+    Such a message makes summarisation structurally impossible: no retry and no
+    amount of provider capacity can chunk it. Callers use this to fail fast with
+    an accurate reason instead of telling the writer preparation is in progress.
+    """
+    for message in messages:
+        if counter.count_messages(as_messages([message])) > max_tokens:
+            return message
+    return None
+
+
 def _chunks(
     messages: list[SessionMessage],
     *,
@@ -89,11 +115,9 @@ def _chunks(
 ) -> list[list[SessionMessage]]:
     chunks: list[list[SessionMessage]] = []
     current: list[SessionMessage] = []
+    if oversized_source_message(messages, max_tokens=max_tokens, counter=counter) is not None:
+        raise ContextTooLarge("one authored message exceeds the context-maintenance chunk budget")
     for message in messages:
-        if counter.count_messages(as_messages([message])) > max_tokens:
-            raise ContextTooLarge(
-                "one authored message exceeds the context-maintenance chunk budget"
-            )
         candidate = [*current, message]
         if current and counter.count_messages(as_messages(candidate)) > max_tokens:
             chunks.append(current)
@@ -180,6 +204,8 @@ class ContextMaintainer:
         model_id: str | None,
         generate: SummaryGeneratorCall,
         compatible_configured_models: frozenset[str] | None = None,
+        counter_identity: CounterIdentity | None = None,
+        chunk_concurrency: int = DEFAULT_CHUNK_CONCURRENCY,
     ) -> None:
         self.store = store
         self.policy = policy
@@ -188,6 +214,8 @@ class ContextMaintainer:
         self.provider_id = provider_id
         self.model_id = model_id
         self.generate = generate
+        self.counter_identity = counter_identity
+        self.chunk_concurrency = max(1, chunk_concurrency)
         self.compatible_configured_models = compatible_configured_models or frozenset(
             {configured_model}
         )
@@ -211,21 +239,32 @@ class ContextMaintainer:
             work is not None
             and work.generator_model in self.compatible_configured_models
             and work.prompt_version == SUMMARY_PROMPT_VERSION
+            # Chunk boundaries and every size bound in this checkpoint were chosen
+            # by a specific counter. Reusing them under a different one would mix
+            # two notions of how large a chunk is.
+            and (self.counter_identity is None or self.counter_identity.matches(work.counter))
             and work.source.session_id == source.session_id
             and work.source.context_id == source.context_id
-            and len(work.source.covered_message_ids) <= len(source_messages)
         ):
-            covered_count = len(work.source.covered_message_ids)
-            covered_prefix = source_messages[:covered_count]
-            reusable = [
-                item.id for item in covered_prefix
-            ] == work.source.covered_message_ids and message_prefix_hash(
-                covered_prefix
-            ) == work.source.prefix_sha256
+            covered_ids = work.source.covered_message_ids
+            overlap = min(len(covered_ids), len(source_messages))
+            covered_prefix = source_messages[:overlap]
+            if overlap and [item.id for item in covered_prefix] == covered_ids[:overlap]:
+                if len(covered_ids) <= len(source_messages):
+                    reusable = message_prefix_hash(covered_prefix) == work.source.prefix_sha256
+                else:
+                    # Cached work reaches past this shorter requirement. Chunk
+                    # boundaries are packed left to right, so the leading chunks
+                    # are the same ones, and every reuse below is still gated on
+                    # a content digest recomputed from the current messages.
+                    # Discarding the whole cache here only bought re-running the
+                    # same provider calls.
+                    reusable = True
         if not reusable:
             work = SummaryWork(
                 source=source,
                 generator_model=self.configured_model,
+                counter=self.counter_identity,
                 chunks=[],
                 updated_at=utc_now(),
             )
@@ -234,31 +273,41 @@ class ContextMaintainer:
                 update={
                     "source": source,
                     "generator_model": self.configured_model,
+                    "counter": self.counter_identity or work.counter,
                     "updated_at": utc_now(),
                 }
             )
 
         completed = {item.source_sha256: item for item in work.chunks}
-        ordered: list[SummaryWorkChunk] = []
-        for chunk in chunks:
+        resolved: dict[int, SummaryWorkChunk] = {}
+        outstanding: list[tuple[int, list[SessionMessage], str]] = []
+        for index, chunk in enumerate(chunks):
             digest = message_prefix_hash(chunk)
             cached = completed.get(digest)
             if cached is not None and cached.message_ids == [item.id for item in chunk]:
-                ordered.append(cached)
+                resolved[index] = cached
                 continue
-            prompt = summary_prompt(chunk)
-            if self.counter.count_messages(prompt) > self.policy.application_tokens:
+            outstanding.append((index, chunk, digest))
+
+        # Size every outstanding prompt before spending a single call. This was
+        # previously interleaved with generation, so a chunk that could never fit
+        # was discovered only after paying for the chunks ahead of it.
+        for _, chunk, _ in outstanding:
+            if self.counter.count_messages(summary_prompt(chunk)) > self.policy.application_tokens:
                 raise ContextTooLarge("context-maintenance source prompt exceeds its input budget")
-            result = await self.generate(prompt, self.configured_model)
+
+        async def summarize(
+            index: int, chunk: list[SessionMessage], digest: str
+        ) -> tuple[int, SummaryWorkChunk]:
+            result = await self.generate(summary_prompt(chunk), self.configured_model)
             if self.counter.count_text(result.content) > self.policy.summary_max_tokens:
                 raise ContextTooLarge("context-maintenance output exceeds the summary budget")
             sections = parse_summary_sections(result.content)
-            unknown = sections.evidence_ids() - {item.id for item in chunk}
-            if unknown:
+            if sections.evidence_ids() - {item.id for item in chunk}:
                 raise ContextSummaryError(
                     "context-maintenance output cited messages outside its source chunk"
                 )
-            item = SummaryWorkChunk(
+            return index, SummaryWorkChunk(
                 source_sha256=digest,
                 message_ids=[message.id for message in chunk],
                 sections=sections,
@@ -267,9 +316,56 @@ class ContextMaintainer:
                 provider_id=result.provider_id,
                 model_id=result.model_id,
             )
-            ordered.append(item)
-            work = work.model_copy(update={"chunks": ordered, "updated_at": utc_now()})
-            self.store.save_work(work)
+
+        # Leaf chunks are independent: each summarises its own messages and cites
+        # only its own IDs. Running them strictly one at a time made maintenance
+        # latency the product of chunk count and provider round-trip, which is
+        # what put a multi-minute stall in front of the writer.
+        #
+        # Ordered batches rather than a semaphore over every chunk at once: a
+        # batch bounds how much a maintenance run can take from a provider the
+        # writer is also generating against, and it stops at the first failing
+        # batch instead of paying for every remaining chunk against a provider
+        # that has already refused one. The cost is that a batch waits for its
+        # slowest member, which is worth it for a failure mode this predictable.
+        width = max(1, self.chunk_concurrency)
+        for offset in range(0, len(outstanding), width):
+            batch = outstanding[offset : offset + width]
+            outcomes = await asyncio.gather(
+                *(summarize(index, chunk, digest) for index, chunk, digest in batch),
+                return_exceptions=True,
+            )
+            failure: BaseException | None = None
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    failure = failure or outcome
+                    continue
+                index, item = outcome
+                resolved[index] = item
+            if failure is not None:
+                # Work already paid for survives into the checkpoint so a retry
+                # resumes rather than restarting.
+                if resolved:
+                    work = work.model_copy(
+                        update={
+                            "chunks": [resolved[key] for key in sorted(resolved)],
+                            "updated_at": utc_now(),
+                        }
+                    )
+                    self.store.save_work(work)
+                raise failure
+            if resolved:
+                work = work.model_copy(
+                    update={
+                        "chunks": [resolved[key] for key in sorted(resolved)],
+                        "updated_at": utc_now(),
+                    }
+                )
+                self.store.save_work(work)
+
+        ordered: list[SummaryWorkChunk] = [resolved[index] for index in range(len(chunks))]
+        work = work.model_copy(update={"chunks": ordered, "updated_at": utc_now()})
+        self.store.save_work(work)
 
         provider_id: str | None = None
         model_id: str | None = None
@@ -458,6 +554,7 @@ class ContextMaintainer:
                 configured_model=self.configured_model,
                 provider_id=provider_id or self.provider_id,
                 model_id=model_id or self.model_id,
+                counter=self.counter_identity,
                 receipt_ids=receipts,
             ),
             created_at=utc_now(),

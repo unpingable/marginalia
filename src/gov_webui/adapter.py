@@ -28,6 +28,7 @@ not part of the served Marginalia product.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import hashlib
 import difflib
 import io
@@ -43,6 +44,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Literal
+from urllib.parse import urlsplit
 from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import FastAPI, HTTPException, Request
@@ -54,12 +56,20 @@ from gov_webui.context_budget import (
     TiktokenCounter,
     build_generation_context,
     choose_summary_prefix,
+    effective_context_policy,
     maintenance_lookahead_tokens,
 )
 from gov_webui.context_ops import ContextOperations
-from gov_webui.context_maintenance import ContextMaintainer, SummaryModelResult
+from gov_webui.context_maintenance import (
+    DEFAULT_CHUNK_CONCURRENCY,
+    ContextMaintainer,
+    SummaryModelResult,
+    oversized_source_message,
+)
 from gov_webui.context_summary import (
     ContextMaintenanceRequired,
+    ContextMaintenanceUnavailable,
+    CounterIdentity,
     ContextSummaryError,
     ContextSummaryStore,
     ContextTooLarge,
@@ -80,7 +90,10 @@ from gov_webui.creative_project import (
     CreativeProjectVersionConflict,
     render_project_context,
 )
+from gov_webui.canon_scope import supersession_statements
+from gov_webui.fixed_context import accepted_canon_message
 from gov_webui.canon_review_store import (
+    CanonResolutionStandsError,
     CanonReviewNotFoundError,
     CanonReviewStore,
     CanonReviewStoreError,
@@ -124,6 +137,11 @@ from gov_webui.snapshot_store import (
     ProjectSnapshotStore,
     SnapshotNotFoundError,
     SnapshotStoreError,
+)
+from gov_webui.usage_accounting import (
+    EstimatedUsage,
+    RequestAccounting,
+    observed_from_normalized_usage,
 )
 from gov_webui.session_store import (
     ChatSession,
@@ -179,6 +197,60 @@ MARGINALIA_CONTEXT_MAINTENANCE_MODEL = os.environ.get(
 ).strip()
 CONTEXT_MAINTENANCE_RETRY_DELAYS_SECONDS = (15.0, 60.0, 180.0)
 
+
+def _allowed_origins() -> list[str]:
+    """Validate the optional cross-origin browser allowlist."""
+    result: list[str] = []
+    for raw in os.environ.get("MARGINALIA_ALLOWED_ORIGINS", "").split(","):
+        origin = raw.strip().rstrip("/")
+        if not origin:
+            continue
+        parsed = urlsplit(origin)
+        if (
+            origin == "*"
+            or parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise RuntimeError(
+                "MARGINALIA_ALLOWED_ORIGINS must contain comma-separated http(s) origins "
+                "without credentials, paths, queries, fragments, or wildcards"
+            )
+        if origin not in result:
+            result.append(origin)
+    return result
+
+
+MARGINALIA_ALLOWED_ORIGINS = _allowed_origins()
+
+
+def _maintenance_chunk_concurrency() -> int:
+    """How many independent summary chunks may be in flight at once.
+
+    Bounded deliberately: maintenance often shares a provider with the writer's
+    own generation, and a wide fan-out would take capacity from the turn the
+    writer is waiting on.
+    """
+    raw = os.environ.get("MARGINALIA_MAINTENANCE_CHUNK_CONCURRENCY", "").strip()
+    if not raw:
+        return DEFAULT_CHUNK_CONCURRENCY
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            "MARGINALIA_MAINTENANCE_CHUNK_CONCURRENCY must be an integer between 1 and 16"
+        ) from exc
+    if not 1 <= value <= 16:
+        raise RuntimeError("MARGINALIA_MAINTENANCE_CHUNK_CONCURRENCY must be between 1 and 16")
+    return value
+
+
+MARGINALIA_MAINTENANCE_CHUNK_CONCURRENCY = _maintenance_chunk_concurrency()
+
 if GOVERNOR_MODE != "fiction" and not MARGINALIA_ENABLE_DONOR_ROUTES:
     raise RuntimeError(
         "Marginalia is fiction-only; GOVERNOR_MODE must be 'fiction'. "
@@ -223,7 +295,15 @@ def _webui_version() -> str:
         return "0.1.0"
 
 
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Pick up checkpointed maintenance the previous process did not finish."""
+    _reconcile_interrupted_maintenance()
+    yield
+
+
 app = FastAPI(
+    lifespan=_lifespan,
     title="Marginalia",
     description="Standalone governed creative-writing application",
     version=_webui_version(),
@@ -234,7 +314,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=MARGINALIA_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -253,6 +333,10 @@ _AUTH_EXEMPT_PATHS = {"/health", "/api/info", "/docs", "/openapi.json"}
 
 _PRODUCT_EXACT_PATHS = {
     "/",
+    # Browsers request this unconditionally alongside the page. Without it the
+    # product-route boundary rejected the request and every page load logged a
+    # 404 — the route alone is not enough.
+    "/favicon.ico",
     "/health",
     "/health/live",
     "/health/ready",
@@ -395,8 +479,18 @@ class ModelInfo(BaseModel):
     label: str | None = None
     provider_id: str | None = None
     model_id: str | None = None
+    protocol: str | None = None
     available: bool = True
     unavailable_reason: str | None = None
+    # Presentation taxonomy. ``kind`` and ``access`` follow from the protocol,
+    # ``inference`` is declared by the deployment, and ``category`` joins them
+    # into the one menu group the writer sees. Serving them from the catalog
+    # keeps the picker from inventing a second, drifting classification.
+    kind: str | None = None
+    inference: str | None = None
+    access: str | None = None
+    category: str | None = None
+    category_label: str | None = None
     created: int = 0
     owned_by: str = "system"
 
@@ -506,7 +600,11 @@ _governed_chat_adapters: dict[str, GovernedChatAdapter] = {}
 _creative_project_stores: dict[str, CreativeProjectStore] = {}
 _context_summary_stores: dict[str, ContextSummaryStore] = {}
 _context_maintenance_adapters: dict[str, GovernedChatAdapter] = {}
-_context_maintenance_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+ContextMaintenanceKey = tuple[str, str, str, str, str, str, float, int | None]
+_context_maintenance_tasks: dict[ContextMaintenanceKey, asyncio.Task[None]] = {}
+# Coverage requirements observed while a run was already in flight. Requirements
+# are monotone, so a stronger one must outlive the weaker work that blocked it.
+_context_maintenance_pending: dict[ContextMaintenanceKey, int] = {}
 _artifact_stores: dict[str, Any] = {}
 _canon_review_stores: dict[str, CanonReviewStore] = {}
 _manuscript_stores: dict[str, ManuscriptStore] = {}
@@ -767,39 +865,9 @@ def _build_fiction_canon_context_message(
     """Render accepted canon as counted generation input, never derived summary."""
     if GOVERNOR_MODE != "fiction":
         return None
-    from governor.continuity import AnchorType, create_registry
-
     project = _project_record(project_id)
     context = _get_context_manager().get_or_create(project.context_id, mode="fiction")
-    anchors = create_registry(context.governor_dir).all()
-    accepted = []
-    for anchor in anchors:
-        if anchor.anchor_type not in {
-            AnchorType.CANON,
-            AnchorType.DEFINITION,
-            AnchorType.PROHIBITION,
-        }:
-            continue
-        item = {
-            "id": anchor.id,
-            "kind": anchor.anchor_type.value,
-            "description": anchor.description,
-        }
-        patterns = getattr(anchor, "forbidden_patterns", None)
-        if patterns:
-            item["forbidden_patterns"] = list(patterns)
-        accepted.append(item)
-    if not accepted:
-        return None
-    return {
-        "role": "system",
-        "content": (
-            "The following accepted Story Bible entries are authoritative for continuity.\n"
-            "[MARGINALIA_ACCEPTED_CANON_V1]\n"
-            + json.dumps(accepted, ensure_ascii=False, separators=(",", ":"))
-            + "\n[/MARGINALIA_ACCEPTED_CANON_V1]"
-        ),
-    }
+    return accepted_canon_message(context.governor_dir)
 
 
 def _build_project_context_message(project_id: str | None = None) -> dict[str, str] | None:
@@ -824,15 +892,7 @@ async def list_models() -> ModelList:
             return ModelList(
                 default_model=available_default.id if available_default else None,
                 data=[
-                    ModelInfo(
-                        id=model.id,
-                        label=model.label,
-                        owned_by=model.provider_id,
-                        provider_id=model.provider_id,
-                        model_id=model.model_id,
-                        available=model.availability_error() is None,
-                        unavailable_reason=model.availability_error(),
-                    )
+                    ModelInfo(**model.public_dict(), owned_by=model.provider_id)
                     for model in catalog.models
                     if model.purpose == "writing"
                 ],
@@ -859,15 +919,7 @@ async def get_model(model_id: str) -> ModelInfo:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         if model.purpose != "writing":
             raise HTTPException(status_code=404, detail=f"model {model_id!r} is not exposed")
-        return ModelInfo(
-            id=model.id,
-            label=model.label,
-            owned_by=model.provider_id,
-            provider_id=model.provider_id,
-            model_id=model.model_id,
-            available=model.availability_error() is None,
-            unavailable_reason=model.availability_error(),
-        )
+        return ModelInfo(**model.public_dict(), owned_by=model.provider_id)
     provider = await _get_governed_chat_adapter().provider()
     return ModelInfo(id=model_id, owned_by=provider.get("type", "daemon"))
 
@@ -2071,6 +2123,15 @@ class ServiceMaintenanceError(RuntimeError):
     """An operator has temporarily paused authored generation."""
 
 
+class OutdatedClientError(RuntimeError):
+    """A client used a generation contract this build no longer serves.
+
+    A long-lived browser tab keeps running the JavaScript it loaded with, so a
+    redeploy can leave it calling a route shape the server has moved past. Saying
+    so plainly beats letting it fail as whatever the old call now looks like.
+    """
+
+
 def _maintenance_message() -> str | None:
     path = Path(MARGINALIA_MAINTENANCE_FILE)
     try:
@@ -2101,8 +2162,12 @@ def _generation_failure(exc: BaseException) -> FailedGeneration:
         failure = FailedGeneration(
             outcome="failure",
             kind=GenerationFailureKind.TIMEOUT,
-            message="Generation timed out before a validated response was available.",
-            retryable=True,
+            message=(
+                "Marginalia stopped waiting before a validated response was available. "
+                "The provider may still have executed or billed the request; do not retry "
+                "unless you have confirmed its outcome."
+            ),
+            retryable=False,
             incident_id=incident_id,
         )
     elif isinstance(exc, ContextTooLarge):
@@ -2110,6 +2175,17 @@ def _generation_failure(exc: BaseException) -> FailedGeneration:
             outcome="failure",
             kind=GenerationFailureKind.CONTEXT_TOO_LARGE,
             message="The required story context is too large for a safe generation.",
+            retryable=False,
+            incident_id=incident_id,
+        )
+    elif isinstance(exc, OutdatedClientError):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.CLIENT_OUTDATED,
+            message=(
+                "This Marginalia tab is running an outdated version. "
+                "Reload the page to continue; your prompt is preserved."
+            ),
             retryable=False,
             incident_id=incident_id,
         )
@@ -2129,6 +2205,21 @@ def _generation_failure(exc: BaseException) -> FailedGeneration:
                 "The story context is being prepared. Your prompt is still available to retry."
             ),
             retryable=True,
+            incident_id=incident_id,
+        )
+    elif isinstance(exc, DaemonRPCError) and any(
+        marker in exc.rpc_message.casefold()
+        for marker in ("response became idle", "deadline", "timed out", "timeout")
+    ):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.TIMEOUT,
+            message=(
+                "Marginalia stopped waiting before a validated response was available. "
+                "The provider may still have executed or billed the request; do not retry "
+                "unless you have confirmed its outcome."
+            ),
+            retryable=False,
             incident_id=incident_id,
         )
     elif isinstance(exc, DaemonRPCError):
@@ -2200,6 +2291,7 @@ def _failure_response(failure: FailedGeneration) -> JSONResponse:
         GenerationFailureKind.CONTEXT_MAINTENANCE: 503,
         GenerationFailureKind.CONTEXT_TOO_LARGE: 422,
         GenerationFailureKind.SERVICE_MAINTENANCE: 503,
+        GenerationFailureKind.CLIENT_OUTDATED: 409,
     }.get(failure.kind, 502)
     payload = GenerationFailureResponse(
         failure_type=failure.kind,
@@ -2297,16 +2389,39 @@ async def _generate_context_summary(
     )
 
 
+def _fixed_context_messages(project_id: str | None) -> list[dict[str, str]]:
+    """Application-owned system blocks that every generation budget must count.
+
+    Context maintenance plans against the same blocks the request path sends, so
+    a summary can never be planned for a smaller context than generation needs.
+    """
+    fixed: list[dict[str, str]] = []
+    project_context = _build_project_context_message(project_id)
+    canon_context = _build_fiction_canon_context_message(project_id)
+    if project_context:
+        fixed.append(project_context)
+    if canon_context:
+        fixed.append(canon_context)
+    constraints_msg, _ = _build_constraints_message()
+    if constraints_msg:
+        fixed.append(constraints_msg)
+    return fixed
+
+
 async def _perform_context_maintenance_once(
     *,
     project_id: str | None,
     session_id: str,
     writing_model: ConfiguredModel | None,
+    required_covered_messages: int | None = None,
 ) -> None:
     """Perform one resumable context refresh outside the authored request path."""
     try:
         store = _get_context_summary_store(project_id)
-        policy = store.policy()
+        policy = effective_context_policy(
+            store.policy(),
+            writing_model.context_window_tokens if writing_model else None,
+        )
         if not policy.enabled:
             return
         session = _get_session_store(project_id).get(session_id)
@@ -2326,16 +2441,27 @@ async def _perform_context_maintenance_once(
             (policy.application_tokens - maintenance_lookahead_tokens(policy))
             * policy.maintenance_watermark
         )
-        if history_tokens < threshold:
+        # The watermark is a proactive hint measured on history alone. Admission
+        # measures fixed context + history + prompt, so it can require coverage
+        # while history is still under the watermark. A proactive hint must never
+        # suppress work a generation attempt has already proven necessary.
+        if required_covered_messages is None and history_tokens < threshold:
             return
         source_messages = choose_summary_prefix(
             session,
-            [],
+            _fixed_context_messages(project_id),
             "Continue the story.",
             policy,
             counter,
             additional_reserve_tokens=maintenance_lookahead_tokens(policy),
         )
+        # Generation reports the coverage its real prompt needed. Planning here
+        # from a placeholder prompt alone can under-cover that requirement, and
+        # the "already sufficient" check below would then no-op forever.
+        if required_covered_messages is not None:
+            floor = min(required_covered_messages, len(session.messages))
+            if floor > len(source_messages):
+                source_messages = session.messages[:floor]
         if not source_messages:
             return
         try:
@@ -2348,10 +2474,12 @@ async def _perform_context_maintenance_once(
             return
         catalog = _configured_provider_catalog()
         if catalog is None:
-            raise ContextSummaryError("context maintenance requires configured model providers")
+            raise ContextMaintenanceUnavailable(
+                "context maintenance requires configured model providers"
+            )
         maintenance_model = catalog.require_available(MARGINALIA_CONTEXT_MAINTENANCE_MODEL)
         if maintenance_model.purpose != "context-maintenance":
-            raise ContextSummaryError(
+            raise ContextMaintenanceUnavailable(
                 "configured context-maintenance model is not marked for context maintenance"
             )
 
@@ -2374,6 +2502,11 @@ async def _perform_context_maintenance_once(
             model_id=maintenance_model.model_id,
             generate=generate,
             compatible_configured_models=catalog.compatible_model_ids(maintenance_model),
+            counter_identity=CounterIdentity(
+                tokenizer_encoding=encoding,
+                token_safety_multiplier=multiplier,
+            ),
+            chunk_concurrency=MARGINALIA_MAINTENANCE_CHUNK_CONCURRENCY,
         )
         summary = await maintainer.maintain(session, source_messages)
         telemetry_logger.info(
@@ -2398,6 +2531,7 @@ async def _opportunistic_context_maintenance(
     project_id: str | None,
     session_id: str,
     writing_model: ConfiguredModel | None,
+    required_covered_messages: int | None = None,
 ) -> None:
     """Retry resumable derived maintenance without delaying the writer."""
     attempts = len(CONTEXT_MAINTENANCE_RETRY_DELAYS_SECONDS) + 1
@@ -2407,10 +2541,22 @@ async def _opportunistic_context_maintenance(
                 project_id=project_id,
                 session_id=session_id,
                 writing_model=writing_model,
+                required_covered_messages=required_covered_messages,
             )
             return
         except asyncio.CancelledError:
             raise
+        except (ContextTooLarge, ContextMaintenanceUnavailable):
+            # Structurally impossible or misconfigured: retrying cannot change the
+            # outcome, so stop immediately and say so loudly rather than burning
+            # the backoff schedule and then falling silent.
+            logger.error(
+                "Context maintenance cannot proceed for session=%s; "
+                "it will not be retried until the underlying condition changes",
+                session_id,
+                exc_info=True,
+            )
+            return
         except Exception:
             logger.warning(
                 "Context maintenance will retry session=%s attempt=%s/%s",
@@ -2419,8 +2565,42 @@ async def _opportunistic_context_maintenance(
                 attempts,
             )
             if attempt >= len(CONTEXT_MAINTENANCE_RETRY_DELAYS_SECONDS):
+                logger.error(
+                    "Context maintenance gave up for session=%s after %s attempts",
+                    session_id,
+                    attempts,
+                )
                 return
             await asyncio.sleep(CONTEXT_MAINTENANCE_RETRY_DELAYS_SECONDS[attempt])
+
+
+def _join_requirement(existing: int | None, incoming: int | None) -> int | None:
+    """Coverage requirements join monotonically: satisfy the strongest observed."""
+    if existing is None:
+        return incoming
+    if incoming is None:
+        return existing
+    return max(existing, incoming)
+
+
+def _context_maintenance_key(
+    project_id: str | None,
+    session_id: str,
+    writing_model: ConfiguredModel | None,
+) -> ContextMaintenanceKey:
+    """Identity of source-selection policy for one maintenance run."""
+    if writing_model is None:
+        return (project_id or "default", session_id, "", "", "", "", 1.0, None)
+    return (
+        project_id or "default",
+        session_id,
+        writing_model.id,
+        writing_model.provider_id,
+        writing_model.model_id,
+        writing_model.tokenizer_encoding,
+        writing_model.token_safety_multiplier,
+        writing_model.context_window_tokens,
+    )
 
 
 def _schedule_context_maintenance(
@@ -2428,8 +2608,9 @@ def _schedule_context_maintenance(
     project_id: str | None,
     session_id: str,
     writing_model: ConfiguredModel | None,
+    required_covered_messages: int | None = None,
 ) -> None:
-    key = (project_id or "default", session_id)
+    key = _context_maintenance_key(project_id, session_id, writing_model)
     try:
         if not _get_context_summary_store(project_id).policy().enabled:
             return
@@ -2438,12 +2619,22 @@ def _schedule_context_maintenance(
         return
     active = _context_maintenance_tasks.get(key)
     if active is not None and not active.done():
+        # One run per session, but never at the cost of forgetting a stronger
+        # requirement: record it and let the completion callback follow up.
+        if required_covered_messages is not None:
+            pending = _context_maintenance_pending.get(key)
+            if pending is None or required_covered_messages > pending:
+                _context_maintenance_pending[key] = required_covered_messages
         return
+    requirement = _join_requirement(
+        required_covered_messages, _context_maintenance_pending.pop(key, None)
+    )
     task = asyncio.create_task(
         _opportunistic_context_maintenance(
             project_id=project_id,
             session_id=session_id,
             writing_model=writing_model,
+            required_covered_messages=requirement,
         )
     )
     _context_maintenance_tasks[key] = task
@@ -2451,6 +2642,16 @@ def _schedule_context_maintenance(
     def finished(completed: asyncio.Task[None]) -> None:
         if _context_maintenance_tasks.get(key) is completed:
             _context_maintenance_tasks.pop(key, None)
+        follow_up = _context_maintenance_pending.pop(key, None)
+        if follow_up is not None and (requirement is None or follow_up > requirement):
+            # A stronger requirement arrived mid-run; satisfy it rather than
+            # leaving the writer to discover the shortfall on the next turn.
+            _schedule_context_maintenance(
+                project_id=project_id,
+                session_id=session_id,
+                writing_model=writing_model,
+                required_covered_messages=follow_up,
+            )
 
     task.add_done_callback(finished)
 
@@ -2461,14 +2662,23 @@ async def _bounded_session_messages(
     target: tuple[SessionStore, ChatSession, ChatMessage],
     fixed_messages: list[dict[str, str]],
     writing_model: ConfiguredModel | None,
-) -> list[dict[str, str]]:
+) -> tuple[list[dict[str, str]], int]:
     """Build bounded context without awaiting remote maintenance."""
     _, session, pending_user = target
     store = _get_context_summary_store(request.project_id)
-    policy = store.policy()
+    policy = effective_context_policy(
+        store.policy(),
+        writing_model.context_window_tokens if writing_model else None,
+    )
     if not policy.enabled:
         durable = [{"role": item.role, "content": item.content} for item in session.messages]
-        return [*fixed_messages, *durable, {"role": "user", "content": pending_user.content}]
+        unbounded = [
+            *fixed_messages,
+            *durable,
+            {"role": "user", "content": pending_user.content},
+        ]
+        # No bounded budget in force, so there is no estimate to compare against.
+        return unbounded, 0
 
     encoding = writing_model.tokenizer_encoding if writing_model else policy.tokenizer_encoding
     multiplier = (
@@ -2496,11 +2706,26 @@ async def _bounded_session_messages(
             summary=summary,
             additional_reserve_tokens=maintenance_lookahead_tokens(policy),
         )
-    except ContextMaintenanceRequired:
+    except ContextMaintenanceRequired as exc:
+        # If the history that must be summarised contains a passage no chunk can
+        # hold, maintenance can never satisfy this requirement. Say that now,
+        # non-retryably, instead of promising preparation that will never finish.
+        if exc.required_covered_messages is not None and oversized_source_message(
+            session.messages[: exc.required_covered_messages],
+            max_tokens=policy.summary_chunk_tokens,
+            counter=counter,
+        ):
+            raise ContextTooLarge(
+                "an authored passage is too large to summarize for bounded context"
+            ) from None
+        # The admission check already measured the coverage this real prompt needs.
+        # Forward that exact value rather than re-deriving it here: a second
+        # estimator is how the two sides drifted apart in the first place.
         _schedule_context_maintenance(
             project_id=request.project_id,
             session_id=session.id,
             writing_model=writing_model,
+            required_covered_messages=exc.required_covered_messages,
         )
         raise ContextMaintenanceRequired("story context preparation is in progress") from None
 
@@ -2518,7 +2743,10 @@ async def _bounded_session_messages(
         built.metrics.recent_message_count,
         built.metrics.summarized_message_count,
     )
-    return built.messages
+    # The estimate travels to the response so it can be compared against what the
+    # provider actually counted. That comparison is the only evidence available
+    # for whether the budgeting model describes reality.
+    return built.messages, built.metrics.application_tokens
 
 
 @app.post("/v1/chat/completions", response_model=None)
@@ -2543,26 +2771,17 @@ async def chat_completions(
         return _failure_response(_generation_failure(exc))
 
     # These application-owned system blocks are counted before provider launch.
-    fixed_messages: list[dict[str, str]] = []
-    try:
-        project_context = _build_project_context_message(request.project_id)
-        canon_context = _build_fiction_canon_context_message(request.project_id)
-    except CreativeProjectError as exc:
-        raise HTTPException(status_code=500, detail=f"Project state error: {exc}")
-    if project_context:
-        fixed_messages.append(project_context)
-    if canon_context:
-        fixed_messages.append(canon_context)
-
     # Retained donor constraint blocks are relevant only when explicitly
     # running old code/research tests; normal Marginalia is fiction-only.
-    constraints_msg, contract_meta = _build_constraints_message()
-    if constraints_msg:
-        fixed_messages.append(constraints_msg)
+    try:
+        fixed_messages = _fixed_context_messages(request.project_id)
+    except CreativeProjectError as exc:
+        raise HTTPException(status_code=500, detail=f"Project state error: {exc}")
 
+    estimated_prompt_tokens: int | None = None
     try:
         if commit_target is not None:
-            messages = await _bounded_session_messages(
+            messages, estimated_prompt_tokens = await _bounded_session_messages(
                 request=request,
                 target=commit_target,
                 fixed_messages=fixed_messages,
@@ -2576,7 +2795,18 @@ async def chat_completions(
             for fixed in fixed_messages:
                 messages.insert(insert_idx, fixed)
                 insert_idx += 1
-            policy = _get_context_summary_store(request.project_id).policy()
+            policy = effective_context_policy(
+                _get_context_summary_store(request.project_id).policy(),
+                model_identity.context_window_tokens if model_identity else None,
+            )
+            if policy.enabled and request.session_id is None:
+                # Bounded context is keyed by conversation. A writing-room turn
+                # always names its session; one that does not is a client that
+                # predates session-backed generation, and serving it would send
+                # unbounded history to the provider.
+                raise OutdatedClientError(
+                    "bounded context requires a session-backed generation request"
+                )
             if policy.enabled:
                 encoding = (
                     model_identity.tokenizer_encoding
@@ -2605,6 +2835,7 @@ async def chat_completions(
         )
 
     execution = governor_progress.begin(model_identity.provider_id if model_identity else "codex")
+    generation_started = time.monotonic()
     try:
         result = await governed_chat.chat_send(
             messages=messages,
@@ -2648,6 +2879,22 @@ async def chat_completions(
         )
         governor_progress.failed(execution, failure.kind.value)
         return _failure_response(failure)
+    if model_identity is not None:
+        accounting = RequestAccounting(
+            provider_id=model_identity.provider_id or "",
+            model_id=model_identity.model_id or "",
+            estimated=(
+                EstimatedUsage(prompt_tokens=estimated_prompt_tokens)
+                if estimated_prompt_tokens
+                else None
+            ),
+            observed=observed_from_normalized_usage(outcome.usage),
+            latency_ms=(time.monotonic() - generation_started) * 1000,
+        )
+        # Economics, not admission. Nothing here may influence whether a request
+        # is allowed to proceed; it records what one cost after the fact.
+        telemetry_logger.info("request_accounting %s", json.dumps(accounting.to_dict()))
+
     request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
     try:
         committed_messages = (
@@ -3596,6 +3843,7 @@ class CaptureAcceptRequest(BaseModel):
     description: str = ""  # Description text
     capture_type: str = ""  # character, world_rule, relationship, constraint
     project_id: str | None = None
+    closes_category: str = Field(default="", max_length=240)
 
 
 class CaptureUpdateRequest(BaseModel):
@@ -3620,6 +3868,7 @@ class WorldRuleRequest(BaseModel):
 
     rule: str
     project_id: str | None = None
+    closes_category: str = Field(default="", max_length=240)
 
 
 class ForbiddenRequest(BaseModel):
@@ -3744,6 +3993,87 @@ class ArtifactCanonProposalRequest(BaseModel):
     kind: str
     subject: str = Field(default="", max_length=240)
     statement: str | None = Field(default=None, max_length=20_000)
+
+
+# =============================================================================
+# Canon anchor helpers
+#
+# The continuity registry is keyed by anchor id and `register` overwrites, so
+# any scheme that derives an id from a subject name silently destroys whatever
+# that subject already had. These helpers keep accepted canon additive and keep
+# generated ids genuinely unused.
+# =============================================================================
+
+_CANON_STATEMENT_SEPARATOR = "; "
+
+# A statement whose subject or object is a bare reference cannot be read on its
+# own, and the canon block is exactly that: a flat list with no surrounding
+# prose. "Halo: subject to the same prohibition for the same reason" resolves
+# against whatever prohibition happens to sit nearest it.
+# A statement whose subject or object is a bare reference cannot be read on its
+# own, and the canon block is exactly that: a flat list with no surrounding
+# prose. "Halo: subject to the same prohibition for the same reason" resolves
+# against whatever prohibition happens to sit nearest it.
+_ANAPHORIC_OPENERS = (
+    "the same ",
+    "it ",
+    "they ",
+    "them ",
+    "such ",
+    "also ",
+    "likewise",
+    "similarly",
+)
+
+# Back-references to an antecedent that never travels with the entry. Kept
+# narrow on purpose: "wears the same coat" is ordinary canon and must pass,
+# while "for the same reason" names nothing a reader can recover.
+_ANAPHORIC_DEMONSTRATIVE = re.compile(
+    r"^(?:this|that|these|those)\s+(?:is|are|was|were|has|have|had|will|must|may|can|"
+    r"cannot|should|would|does|do|did)\b",
+    re.IGNORECASE,
+)
+
+_ANAPHORIC_PHRASES = re.compile(
+    r"\b(?:the same (?:reason|prohibition|rule|way|thing|constraint|restriction|"
+    r"limitation|principle)|as above|as noted|as described|likewise|similarly)\b",
+    re.IGNORECASE,
+)
+
+
+def _statement_is_anaphoric(statement: str) -> bool:
+    """True when a statement only makes sense beside text that is not shipped."""
+    cleaned = " ".join(statement.split())
+    if not cleaned:
+        return True
+    if cleaned.lower().startswith(_ANAPHORIC_OPENERS):
+        return True
+    return bool(_ANAPHORIC_DEMONSTRATIVE.search(cleaned) or _ANAPHORIC_PHRASES.search(cleaned))
+
+
+def _next_anchor_id(registry: Any, prefix: str, review_store: CanonReviewStore) -> str:
+    """Reserve a durable id that deletion cannot make reusable."""
+    return review_store.allocate_anchor_id(prefix, {anchor.id for anchor in registry.all()})
+
+
+def _merge_canon_description(existing: str | None, *, subject: str, statement: str) -> str:
+    """Fold one newly accepted statement into a subject's canon, additively.
+
+    Capture is incremental: the writer accepts one observation at a time about a
+    character who already has canon. Replacing the anchor throws away every
+    earlier acceptance, so accumulate instead, preserving order and dropping
+    exact repeats.
+    """
+    prefix = f"{subject}: " if subject else ""
+    parts: list[str] = []
+    if existing:
+        body = existing[len(prefix) :] if prefix and existing.startswith(prefix) else existing
+        parts = [part.strip() for part in body.split(_CANON_STATEMENT_SEPARATOR) if part.strip()]
+    for part in statement.split(_CANON_STATEMENT_SEPARATOR):
+        cleaned = part.strip()
+        if cleaned and cleaned not in parts:
+            parts.append(cleaned)
+    return prefix + _CANON_STATEMENT_SEPARATOR.join(parts)
 
 
 @app.get("/governor/fiction/characters")
@@ -3887,7 +4217,8 @@ async def add_world_rule(request: WorldRuleRequest) -> dict[str, Any]:
 
     registry = create_registry(ctx.governor_dir)
 
-    rule_id = f"world-{len([a for a in registry.all() if 'world-' in a.id]) + 1}"
+    review_store = _get_canon_review_store(request.project_id)
+    rule_id = _next_anchor_id(registry, "world", review_store)
 
     anchor = Anchor(
         id=rule_id,
@@ -3897,6 +4228,8 @@ async def add_world_rule(request: WorldRuleRequest) -> dict[str, Any]:
     )
     registry.register(anchor)
     registry.save(ctx.governor_dir / "continuity" / "anchors.json")
+    if request.closes_category:
+        review_store.record_explicit_closure(rule_id, request.closes_category)
 
     return {
         "success": True,
@@ -3942,7 +4275,7 @@ async def add_forbidden(request: ForbiddenRequest) -> dict[str, Any]:
 
     registry = create_registry(ctx.governor_dir)
 
-    forbid_id = f"forbid-{len([a for a in registry.all() if 'forbid-' in a.id]) + 1}"
+    forbid_id = _next_anchor_id(registry, "forbid", _get_canon_review_store(request.project_id))
 
     anchor = Anchor(
         id=forbid_id,
@@ -3985,22 +4318,30 @@ async def capture_scan(request: CaptureRequest) -> dict[str, Any]:
     store = _get_canon_review_store(project.id)
 
     captures = []
+    settled = 0
     for item in items:
-        candidate = store.add(
-            kind=item.kind if isinstance(item.kind, str) else item.kind.value,
-            confidence=round(item.confidence, 2),
-            subject=item.subject_guess or "",
-            statement=item.statement,
-            field=item.field_guess or "",
-            spans=[list(span) for span in item.evidence_spans],
-            conversation_id=request.conversation_id,
-            message_id=request.message_id,
-            draft=item.draft_payload or None,
-        )
+        try:
+            candidate = store.add(
+                kind=item.kind if isinstance(item.kind, str) else item.kind.value,
+                confidence=round(item.confidence, 2),
+                subject=item.subject_guess or "",
+                statement=item.statement,
+                field=item.field_guess or "",
+                spans=[list(span) for span in item.evidence_spans],
+                conversation_id=request.conversation_id,
+                message_id=request.message_id,
+                draft=item.draft_payload or None,
+            )
+        except CanonResolutionStandsError:
+            # Re-deriving a claim the author already answered is not a new
+            # finding, and re-queuing it would make them answer it again.
+            settled += 1
+            continue
         captures.append(candidate.model_dump(mode="json"))
 
     return {
         "captures": captures,
+        "already_resolved": settled,
         "receipt": {
             "classifier_version": receipt.classifier_version,
             "content_hash": receipt.content_hash,
@@ -4048,16 +4389,98 @@ async def accept_capture(capture_id: str, request: CaptureAcceptRequest) -> dict
 
     registry = create_registry(ctx.governor_dir)
 
+    # A candidate may change canon only if what is wrong with the stored record
+    # can be shown against its source. A reading of what the author's words
+    # imply is a question for the author, not a defect to be repaired, so it
+    # stays a diagnostic and carries no edit.
+    if not cap.mutation_admissible:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"this candidate rests on an interpretation ({cap.warrant}) and cannot "
+                "change canon; it stands as a diagnostic for the author to answer"
+            ),
+        )
+
+    # Every proposition the candidate leans on must itself be the author's. One
+    # that is not means the argument runs through something the model supplied,
+    # which is the whole failure this boundary exists to stop.
+    unwarranted = [
+        proposition for proposition in cap.relied_on if registry.get(proposition) is None
+    ]
+    if unwarranted:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "this candidate depends on propositions that are not established canon: "
+                + ", ".join(sorted(unwarranted))
+            ),
+        )
+
+    # An argument that turns on how many members a category has needs the author
+    # to have closed it. Retrieval can only ever show the members written so far,
+    # and fiction withholds the rest on purpose: the subtype introduced three
+    # chapters from now refines the world model, it does not prove the earlier
+    # generic rule was overbroad.
+    if cap.category:
+        closures = [
+            anchor_id
+            for anchor_id in review_store.explicit_closure_anchor_ids(cap.category)
+            if registry.get(anchor_id) is not None
+        ]
+        if not closures:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"this candidate reasons about every member of {cap.category!r}, but "
+                    "canon does not state that category is complete; the members written "
+                    "so far are not the whole of it"
+                ),
+            )
+
+    # Claiming one record invalidates another is a claim about validity, and
+    # registration order does not establish it. Canon is entered in whatever
+    # order the author reached for it; a rule added today may describe the
+    # history that explains a rule added last week. Only an explicit retirement
+    # naming the anchor retires it.
+    if cap.warrant == "contradictory_state" and cap.target_anchor_id:
+        retirements = supersession_statements(registry.all(), cap.target_anchor_id)
+        if not retirements:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"nothing in canon retires {cap.target_anchor_id}; a record entered "
+                    "later is not thereby truer, and later disclosure may describe "
+                    "earlier world-time"
+                ),
+            )
+
     kind = request.capture_type or cap.kind or "character"
     name = request.name or cap.subject
     desc = request.description or cap.statement
 
+    # A promoted statement is read alone, in a flat list, with no neighbouring
+    # prose to resolve a bare reference against. Refuse before it becomes canon.
+    if _statement_is_anaphoric(desc):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "this statement refers to something outside itself and would not "
+                "be readable as canon; edit it to name its subject before accepting"
+            ),
+        )
+
     if kind in ("character", "relationship"):
         char_id = f"char-{name.lower().replace(' ', '-')}" if name else f"char-cap-{capture_id}"
+        existing = registry.get(char_id)
         anchor = Anchor(
             id=char_id,
             anchor_type=AnchorType.CANON,
-            description=f"{name}: {desc}" if name else desc,
+            description=_merge_canon_description(
+                existing.description if existing else None,
+                subject=name,
+                statement=desc,
+            ),
             severity=Severity.REJECT,
         )
         registry.register(anchor)
@@ -4066,29 +4489,31 @@ async def accept_capture(capture_id: str, request: CaptureAcceptRequest) -> dict
         return {"success": True, "message": f"Canon: {name or char_id}", "id": char_id}
 
     elif kind in ("world_rule", "constraint"):
-        rule_count = len([a for a in registry.all() if "rule-" in a.id])
-        rule_id = f"rule-{rule_count + 1}"
+        rule_id = _next_anchor_id(registry, "rule", review_store)
+        # The subject travels with the statement. Dropping it turns "Halo won't
+        # serve again" into a rule about nobody, applied to everybody.
+        described = f"{name}: {desc}" if name else desc
 
         if kind == "constraint":
-            patterns = [p.strip() for p in desc.split(",") if p.strip()]
             anchor = Anchor(
                 id=rule_id,
                 anchor_type=AnchorType.PROHIBITION,
-                description=desc,
-                forbidden_patterns=patterns,
+                description=described,
                 severity=Severity.REJECT,
             )
         else:
             anchor = Anchor(
                 id=rule_id,
                 anchor_type=AnchorType.DEFINITION,
-                description=desc,
+                description=described,
                 severity=Severity.WARN,
             )
         registry.register(anchor)
         registry.save(ctx.governor_dir / "continuity" / "anchors.json")
+        if request.closes_category:
+            review_store.record_explicit_closure(rule_id, request.closes_category)
         review_store.resolve(capture_id, status="accepted", promoted_to=rule_id)
-        return {"success": True, "message": f"Canon: {desc[:40]}", "id": rule_id}
+        return {"success": True, "message": f"Canon: {described[:40]}", "id": rule_id}
 
     raise HTTPException(status_code=400, detail=f"Unknown capture kind: {kind}")
 
@@ -5493,6 +5918,85 @@ async def system_status() -> dict[str, Any]:
         ),
         "backup_destination": _get_backup_manager().backup_root_status(),
     }
+
+
+# A page-and-margin mark: the vertical rule is the margin the product is named
+# for. Inline rather than a static file so it cannot go missing from an image
+# build, and so the browser's unconditional /favicon.ico request stops being a
+# 404 on every page load.
+_FAVICON_SVG = """<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+  <rect width="32" height="32" rx="4" fill="#f7f4ee"/>
+  <rect x="7" y="5" width="2" height="22" fill="#2f2a24"/>
+  <rect x="13" y="9" width="12" height="2" fill="#2f2a24"/>
+  <rect x="13" y="15" width="12" height="2" fill="#2f2a24"/>
+  <rect x="13" y="21" width="8" height="2" fill="#2f2a24"/>
+</svg>"""
+
+
+# How many stranded sessions one startup may pick up. Bounded because a cold
+# start should serve the writer first: reconciliation is catching up on work that
+# is already durably checkpointed, not recovering lost data.
+MAINTENANCE_RECONCILE_LIMIT = 4
+
+
+def _reconcile_interrupted_maintenance() -> list[str]:
+    """Resume maintenance that a process replacement left stranded.
+
+    Checkpoints are durable but progress is process-local, so a container
+    replacement mid-run leaves finished chunks on disk with nothing to carry them
+    forward. Nothing resumed them until the writer's next attempt, and she paid
+    the latency again for work already done.
+
+    Best effort by construction: every failure here is logged and swallowed,
+    because a reconciliation problem must never stop the application from
+    serving.
+    """
+    resumed: list[str] = []
+    try:
+        projects = _get_library_store().list_projects(include_archived=False)
+    except Exception:
+        logger.warning("Maintenance reconciliation could not list projects", exc_info=True)
+        return resumed
+
+    for project in projects:
+        if len(resumed) >= MAINTENANCE_RECONCILE_LIMIT:
+            break
+        try:
+            store = _get_context_summary_store(project.id)
+            if not store.policy().enabled:
+                continue
+            for session_id in store.interrupted_sessions():
+                if len(resumed) >= MAINTENANCE_RECONCILE_LIMIT:
+                    break
+                _schedule_context_maintenance(
+                    project_id=project.id,
+                    session_id=session_id,
+                    writing_model=None,
+                )
+                resumed.append(session_id)
+        except Exception:
+            logger.warning(
+                "Maintenance reconciliation skipped project=%s", project.id, exc_info=True
+            )
+            continue
+
+    if resumed:
+        telemetry_logger.info(
+            "context_maintenance_reconciled sessions=%s limit=%s",
+            len(resumed),
+            MAINTENANCE_RECONCILE_LIMIT,
+        )
+    return resumed
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> Response:
+    """Answer the browser's unconditional icon request instead of 404ing."""
+    return Response(
+        content=_FAVICON_SVG,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/")

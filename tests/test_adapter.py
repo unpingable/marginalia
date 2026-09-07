@@ -367,7 +367,8 @@ class TestGenerationOutcomeBoundary:
     @pytest.mark.parametrize(
         ("error", "status", "failure_type"),
         [
-            pytest.param("timeout", 504, "timeout", id="provider-timeout-without-waiting"),
+            pytest.param("timeout", 504, "timeout", id="governor-timeout-without-waiting"),
+            pytest.param("provider_idle", 504, "timeout", id="provider-idle-is-unresolved"),
             pytest.param("cli_nonzero", 502, "provider_execution", id="cli-nonzero"),
             pytest.param("rpc", 502, "provider_execution", id="rpc-error"),
             pytest.param("transport", 502, "transport", id="transport-error"),
@@ -380,7 +381,8 @@ class TestGenerationOutcomeBoundary:
         from gov_webui.daemon_client import DaemonRPCError, DaemonTimeoutError
 
         failures = {
-            "timeout": DaemonTimeoutError("injected provider deadline"),
+            "timeout": DaemonTimeoutError("injected governor deadline"),
+            "provider_idle": DaemonRPCError(-32603, "provider response became idle"),
             "cli_nonzero": DaemonRPCError(-32000, "Codex CLI failed with exit status 1"),
             "rpc": DaemonRPCError(-32603, "governor RPC execution failed"),
             "transport": ConnectionError("daemon socket closed"),
@@ -395,6 +397,9 @@ class TestGenerationOutcomeBoundary:
         assert response.status_code == status
         assert response.json()["outcome"] == "failure"
         assert response.json()["failure_type"] == failure_type
+        if error in {"timeout", "provider_idle"}:
+            assert response.json()["retryable"] is False
+            assert "may still have executed or billed" in response.json()["message"]
         assert "choices" not in response.json()
         assert client.get(f"/sessions/{session_id}").json() == before
 
