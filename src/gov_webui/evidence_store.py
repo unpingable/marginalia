@@ -95,16 +95,19 @@ class EncryptedEvidenceStore:
         created = _utc(now)
         plaintext = _canonical(response)
         response_digest = "sha256:" + hashlib.sha256(plaintext).hexdigest()
-        evidence_id = "ev_" + hashlib.sha256(
-            b"marginalia.evidence-id/v1\0"
-            + logical_request_id.encode()
-            + b"\0"
-            + dispatch_id.encode()
-            + b"\0"
-            + docket_attempt.encode()
-            + b"\0"
-            + response_digest.encode()
-        ).hexdigest()
+        evidence_id = (
+            "ev_"
+            + hashlib.sha256(
+                b"marginalia.evidence-id/v1\0"
+                + logical_request_id.encode()
+                + b"\0"
+                + dispatch_id.encode()
+                + b"\0"
+                + docket_attempt.encode()
+                + b"\0"
+                + response_digest.encode()
+            ).hexdigest()
+        )
         path = self.blobs / f"{evidence_id}.json"
         keyring = Keyring.load(self.keyring_path)
         metadata = {
@@ -181,7 +184,9 @@ class EncryptedEvidenceStore:
         key_id = envelope["key_id"]
         if key_id not in keyring.keys:
             raise EvidenceStoreError(f"evidence key version is unavailable: {key_id}")
-        metadata = {key: value for key, value in envelope.items() if key not in {"nonce", "ciphertext"}}
+        metadata = {
+            key: value for key, value in envelope.items() if key not in {"nonce", "ciphertext"}
+        }
         try:
             plaintext = AESGCM(keyring.keys[key_id]).decrypt(
                 _unb64(envelope["nonce"]),
@@ -222,21 +227,26 @@ class EncryptedEvidenceStore:
                 self._audit("purge", evidence_id, "generation-worker", current)
                 purged.append(evidence_id)
             except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
-                raise EvidenceStoreError(f"cannot evaluate evidence expiry: {path.name}: {exc}") from exc
+                raise EvidenceStoreError(
+                    f"cannot evaluate evidence expiry: {path.name}: {exc}"
+                ) from exc
         return purged
 
     def _audit(self, action: str, evidence_id: str, actor: str, now: datetime) -> None:
         if not actor.strip():
             raise EvidenceStoreError("evidence access requires an actor identity")
-        record = _canonical(
-            {
-                "schema": "marginalia.evidence-access/v1",
-                "action": action,
-                "actor": actor,
-                "evidence_id": evidence_id,
-                "at": now.isoformat(),
-            }
-        ) + b"\n"
+        record = (
+            _canonical(
+                {
+                    "schema": "marginalia.evidence-access/v1",
+                    "action": action,
+                    "actor": actor,
+                    "evidence_id": evidence_id,
+                    "at": now.isoformat(),
+                }
+            )
+            + b"\n"
+        )
         with self.audit_lock_path.open("a+b") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             descriptor = os.open(

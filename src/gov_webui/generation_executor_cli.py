@@ -85,8 +85,7 @@ def main() -> int:
             sys.stdout.write(result + "\n")
         else:
             sys.stdout.write(
-                json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-                + "\n"
+                json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
             )
         return 0
     except Exception as exc:

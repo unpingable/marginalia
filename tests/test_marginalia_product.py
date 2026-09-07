@@ -65,6 +65,7 @@ def product_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     adapter._manuscript_stores.clear()
     adapter._snapshot_stores.clear()
     adapter._context_summary_stores.clear()
+    adapter._generation_stores.clear()
     adapter._context_maintenance_adapters.clear()
     adapter._context_maintenance_tasks.clear()
     adapter._context_maintenance_pending.clear()
@@ -90,6 +91,7 @@ def product_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     adapter._manuscript_stores.clear()
     adapter._snapshot_stores.clear()
     adapter._context_summary_stores.clear()
+    adapter._generation_stores.clear()
     adapter._context_maintenance_adapters.clear()
     adapter._context_maintenance_tasks.clear()
     adapter._context_maintenance_pending.clear()
@@ -391,6 +393,72 @@ def test_project_settings_persist_and_reach_every_governed_fiction_request(
         assert "haunted-house" in prompt
         assert "questioning developmental" in prompt
         assert "Tactile, patient" in prompt
+
+
+def test_durable_generation_toggle_is_prominent_and_guarded(product_client, monkeypatch) -> None:
+    client, adapter = product_client
+
+    unavailable = client.get("/v1/generation/settings")
+    assert unavailable.status_code == 200
+    assert unavailable.json()["available"] is False
+    refused = client.put("/v1/generation/settings", json={"enabled": True})
+    assert refused.status_code == 503
+
+    monkeypatch.setattr(adapter, "MARGINALIA_DURABLE_GENERATION_AVAILABLE", True)
+    enabled = client.put(
+        "/v1/generation/settings",
+        json={"enabled": True, "fallback_model": "fallback-model"},
+    )
+    assert enabled.status_code == 200
+    assert enabled.json() == {
+        "available": True,
+        "enabled": True,
+        "fallback_model": "fallback-model",
+        "status": "ready",
+    }
+
+    page = client.get("/").text
+    assert "Generation reliability" in page
+    assert 'id="durable-generation"' in page
+    assert "stops new durable dispatches" in page
+
+
+def test_durable_chat_is_idempotent_and_does_not_dispatch_synchronously(
+    product_client, monkeypatch
+) -> None:
+    client, adapter = product_client
+    monkeypatch.setattr(adapter, "MARGINALIA_DURABLE_GENERATION_AVAILABLE", True)
+    assert client.put("/v1/generation/settings", json={"enabled": True}).status_code == 200
+    session = client.post(
+        "/sessions/",
+        json={"title": "Durable", "model": "fiction-model", "project_id": "default"},
+    ).json()
+    request = {
+        "model": "fiction-model",
+        "project_id": "default",
+        "session_id": session["id"],
+        "client_request_id": "browser-request-1",
+        "messages": [{"role": "user", "content": "Continue safely."}],
+    }
+
+    first = client.post("/v1/chat/completions", json=request)
+    repeated = client.post("/v1/chat/completions", json=request)
+    assert first.status_code == repeated.status_code == 202
+    assert first.json()["request_id"] == repeated.json()["request_id"]
+    assert adapter._governed_chat_adapter.chat_send.await_count == 0
+    logical = adapter._get_generation_store("default").get_request(first.json()["request_id"])
+    assert logical is not None
+    assert len(adapter._get_generation_store("default").list_dispatches(logical.id)) == 1
+
+    conflicting = client.post(
+        "/v1/chat/completions",
+        json={
+            **request,
+            "messages": [{"role": "user", "content": "Different frozen work."}],
+        },
+    )
+    assert conflicting.status_code == 409
+    assert "different frozen work" in conflicting.json()["detail"]
 
 
 def test_project_b_cannot_receive_project_a_prompt_context(product_client) -> None:

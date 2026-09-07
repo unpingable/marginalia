@@ -126,8 +126,40 @@ def test_fallback_cannot_replace_an_indeterminate_dispatch(tmp_path: Path) -> No
     store.mark_unknown(first.id, "no provider lookup facility")
 
     with pytest.raises(GenerationTransitionError):
-        store.reserve_dispatch(
-            request.id,
-            model="writer-fallback",
-            route="provider-fallback",
-        )
+        store.reserve_fallback(request.id)
+
+
+def test_qualified_failure_can_use_only_the_next_frozen_fallback(tmp_path: Path) -> None:
+    store = GenerationStore(tmp_path / "generation.sqlite")
+    request = create(store).request
+    store.set_dispatch_enabled("project-a", True)
+    first = store.reserve_dispatch(request.id)
+    store.mark_executing(first.id)
+    store.mark_failed(first.id, "qualified provider refusal")
+
+    fallback = store.reserve_fallback(request.id)
+
+    assert fallback.ordinal == 1
+    assert (fallback.actual_model, fallback.actual_route) == (
+        "writer-fallback",
+        "provider-fallback",
+    )
+    assert store.dispatch_payload(fallback.id)["model"] == "writer-fallback"
+    assert [item["event_type"] for item in store.events(request.id)][-1] == "fallback_reserved"
+
+
+def test_fallback_is_stopped_by_kill_switch_and_exhaustion(tmp_path: Path) -> None:
+    store = GenerationStore(tmp_path / "generation.sqlite")
+    request = create(store).request
+    store.set_dispatch_enabled("project-a", True)
+    first = store.reserve_dispatch(request.id)
+    store.mark_failed(first.id, "qualified provider refusal")
+    store.set_dispatch_enabled("project-a", False)
+    with pytest.raises(GenerationDisabled):
+        store.reserve_fallback(request.id)
+
+    store.set_dispatch_enabled("project-a", True)
+    fallback = store.reserve_fallback(request.id)
+    store.mark_failed(fallback.id, "qualified fallback refusal")
+    with pytest.raises(GenerationTransitionError, match="exhausted"):
+        store.reserve_fallback(request.id)

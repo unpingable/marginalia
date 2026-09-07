@@ -127,12 +127,21 @@ class WorkerConfig:
 class GovernedGeneration:
     """One logical request's persisted ag-ng/Docket transition driver."""
 
-    def __init__(self, config: WorkerConfig, store: GenerationStore, request: LogicalRequest) -> None:
+    def __init__(
+        self,
+        config: WorkerConfig,
+        store: GenerationStore,
+        request: LogicalRequest,
+        dispatch: Dispatch,
+    ) -> None:
         self.config = config
         self.store = store
         self.request = request
         self.context_root = store.path.parent.parent
-        self.root = store.path.parent / "governed-generations" / request.id
+        self.dispatch = dispatch
+        self.root = (
+            store.path.parent / "governed-generations" / request.id / "dispatches" / dispatch.id
+        )
         self.config_dir = self.root / "config"
         self.state_dir = self.root / "state"
         self.logs_dir = self.root / "commands"
@@ -142,7 +151,7 @@ class GovernedGeneration:
         self.dispatch_started = self.state_dir / "dispatch-command-started"
         self._sequence = self._last_command_sequence()
 
-    def prepare(self, dispatch: Dispatch) -> None:
+    def prepare(self) -> None:
         for directory in (self.root, self.config_dir, self.state_dir, self.logs_dir):
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(directory, 0o700)
@@ -158,8 +167,8 @@ class GovernedGeneration:
             evidence_root=self.context_root / "marginalia" / "generation-evidence",
             evidence_keyring=self.config.evidence_keyring,
             evidence_retention_days=self.config.retention_days,
-            marginalia_dispatch_id=dispatch.id,
-            request_digest=dispatch.request_digest,
+            marginalia_dispatch_id=self.dispatch.id,
+            request_digest=self.dispatch.request_digest,
             subject=subject,
             scope=scope,
         )
@@ -442,17 +451,20 @@ def process_one(config: WorkerConfig, store: GenerationStore, request: LogicalRe
     dispatches = store.list_dispatches(request.id)
     if not dispatches:
         dispatch = store.reserve_dispatch(request.id)
-    elif len(dispatches) == 1:
-        dispatch = dispatches[0]
     else:
-        raise GenerationWorkerError("multiple dispatches require Gate 3F fallback selection")
-    governed = GovernedGeneration(config, store, request)
-    governed.prepare(dispatch)
+        dispatch = dispatches[-1]
+        if any(item.status is not DispatchStatus.FAILED for item in dispatches[:-1]):
+            raise GenerationWorkerError("fallback history contains a non-failed prior dispatch")
+    governed = GovernedGeneration(config, store, request, dispatch)
+    governed.prepare()
     try:
         return governed.drive()
     except Exception as exc:
         durable = store.get_dispatch(dispatch.id)
-        if durable is not None and durable.status in {DispatchStatus.RESERVED, DispatchStatus.EXECUTING}:
+        if durable is not None and durable.status in {
+            DispatchStatus.RESERVED,
+            DispatchStatus.EXECUTING,
+        }:
             store.mark_unknown(dispatch.id, str(exc))
         raise
 
@@ -462,8 +474,28 @@ def run_once(config: WorkerConfig) -> list[dict[str, str]]:
     for path in sorted(config.contexts_root.glob("*/marginalia/generation.sqlite")):
         store = GenerationStore(path)
         for request in store.list_requests(
-            (LogicalStatus.QUEUED, LogicalStatus.DISPATCHING, LogicalStatus.UNKNOWN)
+            (
+                LogicalStatus.QUEUED,
+                LogicalStatus.DISPATCHING,
+                LogicalStatus.UNKNOWN,
+                LogicalStatus.FAILED,
+            )
         ):
+            if request.status is LogicalStatus.FAILED:
+                used = len(store.list_dispatches(request.id))
+                available = 1 + len(request.fallback_policy)
+                if used >= available or not store.dispatch_enabled(request.project_id):
+                    continue
+                try:
+                    store.reserve_fallback(request.id)
+                except Exception as exc:
+                    results.append(
+                        {"request_id": request.id, "state": "fallback_error", "error": str(exc)}
+                    )
+                    continue
+                refreshed = store.get_request(request.id)
+                assert refreshed is not None
+                request = refreshed
             try:
                 state = process_one(config, store, request)
                 results.append({"request_id": request.id, "state": state})

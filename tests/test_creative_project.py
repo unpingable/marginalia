@@ -86,6 +86,27 @@ def test_project_update_rejects_stale_version(tmp_path: Path) -> None:
         )
 
 
+def test_second_process_view_reloads_before_version_check(tmp_path: Path) -> None:
+    root = tmp_path / "context"
+    first = CreativeProjectStore(root, "novel")
+    second = CreativeProjectStore(root, "novel")
+    first.update(
+        project_brief="First process",
+        collaborator_stance="",
+        voice_style_guidance="",
+        expected_version=1,
+    )
+
+    with pytest.raises(CreativeProjectVersionConflict, match="current version is 2"):
+        second.update(
+            project_brief="Stale second process",
+            collaborator_stance="",
+            voice_style_guidance="",
+            expected_version=1,
+        )
+    assert second.get().project_brief == "First process"
+
+
 def test_prompt_block_contains_only_the_selected_projects_guidance(tmp_path: Path) -> None:
     store = CreativeProjectStore(tmp_path / "project", "project-a")
     config = store.update(

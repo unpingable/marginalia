@@ -71,6 +71,7 @@ def test_execute_runs_provider_once_and_exact_replay_returns_same_outcome(tmp_pa
         nonlocal calls
         calls += 1
         assert payload["messages"][0]["content"] == "Write"
+        assert payload["model"] == "model-a"
         return {"outcome": "authored", "content": "Result"}
 
     def evidence(response, **_identity):

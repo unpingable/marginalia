@@ -19,9 +19,12 @@ from gov_webui.generation_worker import (
 
 
 def test_program_counter_is_read_from_the_single_authoritative_variant() -> None:
-    assert GovernedGeneration._program_counter(
-        {"current": {"state": {"authorization_consumed": {"meta": {}}}}}
-    ) == "authorization_consumed"
+    assert (
+        GovernedGeneration._program_counter(
+            {"current": {"state": {"authorization_consumed": {"meta": {}}}}}
+        )
+        == "authorization_consumed"
+    )
 
 
 def test_ring_pkcs8_key_requires_matching_embedded_public_key() -> None:
@@ -37,7 +40,9 @@ def test_ring_pkcs8_key_requires_matching_embedded_public_key() -> None:
         ring_ed25519_public_key(document[:-1] + bytes([document[-1] ^ 1]))
 
 
-def test_prepare_writes_exact_occurrence_bound_plan_and_catalog(tmp_path: Path, monkeypatch) -> None:
+def test_prepare_writes_exact_occurrence_bound_plan_and_catalog(
+    tmp_path: Path, monkeypatch
+) -> None:
     contexts = tmp_path / "contexts"
     context = contexts / "ctx-a"
     store = GenerationStore(context / "marginalia" / "generation.sqlite")
@@ -76,7 +81,7 @@ def test_prepare_writes_exact_occurrence_bound_plan_and_catalog(tmp_path: Path, 
         issuer_key=issuer,
         evidence_keyring=keyring,
     )
-    governed = GovernedGeneration(config, store, request)
+    governed = GovernedGeneration(config, store, request, dispatch)
     monkeypatch.setattr(governed, "_trust_config", lambda: {"issuers": []})
 
     def fake_run(*arguments):
@@ -87,18 +92,23 @@ def test_prepare_writes_exact_occurrence_bound_plan_and_catalog(tmp_path: Path, 
         return {}
 
     monkeypatch.setattr(governed, "_run", fake_run)
-    governed.prepare(dispatch)
+    governed.prepare()
 
     plan = json.loads(governed.executor_plan_path.read_text())
     catalog = json.loads((governed.config_dir / "catalog.json").read_text())
     assert plan["marginalia_dispatch_id"] == dispatch.id
     assert plan["request_digest"] == dispatch.request_digest
-    assert catalog["entries"]["marginalia.generation-dispatch/v1"]["observation_basis"][
-        "requirement"
-    ]["basis_identity"] == request.request_digest
+    assert (
+        catalog["entries"]["marginalia.generation-dispatch/v1"]["observation_basis"]["requirement"][
+            "basis_identity"
+        ]
+        == request.request_digest
+    )
 
 
-def test_restart_after_dispatch_marker_uses_recover_not_dispatch(tmp_path: Path, monkeypatch) -> None:
+def test_restart_after_dispatch_marker_uses_recover_not_dispatch(
+    tmp_path: Path, monkeypatch
+) -> None:
     config = WorkerConfig(
         contexts_root=tmp_path,
         ag_loopctl=tmp_path / "ag",
@@ -122,7 +132,9 @@ def test_restart_after_dispatch_marker_uses_recover_not_dispatch(tmp_path: Path,
         original_route="route",
         request={"context_id": "ctx", "messages": [], "model": "model"},
     ).request
-    governed = GovernedGeneration(config, store, request)
+    store.set_dispatch_enabled("project", True)
+    dispatch = store.reserve_dispatch(request.id)
+    governed = GovernedGeneration(config, store, request, dispatch)
     governed.state_dir.mkdir(parents=True)
     governed._mark_dispatch_started()
     operations = []
@@ -164,10 +176,12 @@ def test_restart_continues_immutable_command_log_sequence(tmp_path: Path) -> Non
         original_route="route",
         request={"context_id": "ctx", "messages": [], "model": "model"},
     ).request
-    first = GovernedGeneration(config, store, request)
+    store.set_dispatch_enabled("project", True)
+    dispatch = store.reserve_dispatch(request.id)
+    first = GovernedGeneration(config, store, request, dispatch)
     first.logs_dir.mkdir(parents=True)
     (first.logs_dir / "0007-inspect.command.json").write_text("{}", encoding="utf-8")
 
-    restarted = GovernedGeneration(config, store, request)
+    restarted = GovernedGeneration(config, store, request, dispatch)
 
     assert restarted._sequence == 7

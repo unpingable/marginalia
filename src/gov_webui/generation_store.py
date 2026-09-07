@@ -108,6 +108,13 @@ class CreateResult:
     created: bool
 
 
+@dataclass(frozen=True)
+class GenerationSettings:
+    dispatch_enabled: bool
+    fallback_policy: tuple[tuple[str, str], ...]
+    updated_at: str | None
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -130,7 +137,7 @@ def _digest(domain: str, value: Any) -> str:
 class GenerationStore:
     """SQLite custody index shared by the web and worker processes."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -152,6 +159,7 @@ class GenerationStore:
                 CREATE TABLE IF NOT EXISTS generation_settings (
                     project_id TEXT PRIMARY KEY,
                     dispatch_enabled INTEGER NOT NULL CHECK(dispatch_enabled IN (0, 1)),
+                    fallback_policy_json TEXT NOT NULL DEFAULT '[]',
                     updated_at TEXT NOT NULL
                 );
 
@@ -217,6 +225,14 @@ class GenerationStore:
                 );
                 """
             )
+            settings_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(generation_settings)")
+            }
+            if "fallback_policy_json" not in settings_columns:
+                connection.execute(
+                    """ALTER TABLE generation_settings ADD COLUMN fallback_policy_json
+                       TEXT NOT NULL DEFAULT '[]'"""
+                )
             connection.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
     @staticmethod
@@ -243,6 +259,44 @@ class GenerationStore:
                 (project_id, int(enabled), now),
             )
             connection.commit()
+
+    def set_settings(
+        self,
+        project_id: str,
+        *,
+        dispatch_enabled: bool,
+        fallback_policy: Iterable[dict[str, str]] = (),
+    ) -> GenerationSettings:
+        fallbacks = self._fallbacks(fallback_policy)
+        now = _now()
+        encoded = _canonical(
+            [{"model": model, "route": route} for model, route in fallbacks]
+        ).decode()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """INSERT INTO generation_settings(
+                       project_id,dispatch_enabled,fallback_policy_json,updated_at
+                   ) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET
+                   dispatch_enabled=excluded.dispatch_enabled,
+                   fallback_policy_json=excluded.fallback_policy_json,
+                   updated_at=excluded.updated_at""",
+                (project_id, int(dispatch_enabled), encoded, now),
+            )
+            connection.commit()
+        return GenerationSettings(dispatch_enabled, fallbacks, now)
+
+    def settings(self, project_id: str) -> GenerationSettings:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT dispatch_enabled,fallback_policy_json,updated_at
+                   FROM generation_settings WHERE project_id=?""",
+                (project_id,),
+            ).fetchone()
+        if row is None:
+            return GenerationSettings(False, (), None)
+        fallbacks = self._fallbacks(json.loads(row["fallback_policy_json"]))
+        return GenerationSettings(bool(row["dispatch_enabled"]), fallbacks, row["updated_at"])
 
     def dispatch_enabled(self, project_id: str) -> bool:
         with self._connect() as connection:
@@ -342,6 +396,21 @@ class GenerationStore:
             raise KeyError(logical_request_id)
         return json.loads(row[0])
 
+    def dispatch_payload(self, dispatch_id: str) -> dict[str, Any]:
+        """Return the frozen provider request with this dispatch's actual selection."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT l.request_json,d.actual_model
+                   FROM dispatch d JOIN logical_request l ON l.id=d.logical_request_id
+                   WHERE d.id=?""",
+                (dispatch_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(dispatch_id)
+        payload = json.loads(row["request_json"])
+        payload["model"] = row["actual_model"]
+        return payload
+
     def reserve_dispatch(
         self,
         logical_request_id: str,
@@ -350,6 +419,20 @@ class GenerationStore:
         route: str | None = None,
     ) -> Dispatch:
         """Reserve one authorized route. Unknown attempts can never enter here."""
+        return self._reserve_dispatch(logical_request_id, model=model, route=route, fallback=False)
+
+    def reserve_fallback(self, logical_request_id: str) -> Dispatch:
+        """Reserve the next frozen fallback only after qualified terminal failure."""
+        return self._reserve_dispatch(logical_request_id, model=None, route=None, fallback=True)
+
+    def _reserve_dispatch(
+        self,
+        logical_request_id: str,
+        *,
+        model: str | None,
+        route: str | None,
+        fallback: bool,
+    ) -> Dispatch:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -362,23 +445,50 @@ class GenerationStore:
             if not self._dispatch_enabled(connection, request.project_id):
                 connection.rollback()
                 raise GenerationDisabled("new dispatches are disabled for this project")
-            if request.status is not LogicalStatus.QUEUED:
+            required_status = LogicalStatus.FAILED if fallback else LogicalStatus.QUEUED
+            if request.status is not required_status:
                 connection.rollback()
                 raise GenerationTransitionError(
-                    f"cannot reserve a dispatch while request is {request.status}"
+                    f"cannot reserve {'a fallback' if fallback else 'a dispatch'} "
+                    f"while request is {request.status}"
                 )
             prior = connection.execute(
                 "SELECT COUNT(*) FROM dispatch WHERE logical_request_id=?",
                 (logical_request_id,),
             ).fetchone()[0]
-            authorized = ((request.original_model, request.original_route),) + request.fallback_policy
-            selected = (model, route) if model is not None and route is not None else authorized[prior]
+            authorized = (
+                (request.original_model, request.original_route),
+            ) + request.fallback_policy
+            if fallback:
+                if prior == 0:
+                    connection.rollback()
+                    raise GenerationTransitionError("fallback requires a prior dispatch")
+                prior_row = connection.execute(
+                    """SELECT status FROM dispatch WHERE logical_request_id=?
+                       ORDER BY ordinal DESC LIMIT 1""",
+                    (logical_request_id,),
+                ).fetchone()
+                if prior_row is None or DispatchStatus(prior_row[0]) is not DispatchStatus.FAILED:
+                    connection.rollback()
+                    raise GenerationTransitionError(
+                        "fallback requires a qualified failed prior dispatch"
+                    )
+            if prior >= len(authorized):
+                connection.rollback()
+                raise GenerationTransitionError("frozen fallback policy is exhausted")
+            selected = (
+                (model, route) if model is not None and route is not None else authorized[prior]
+            )
             if selected not in authorized or (prior == 0 and selected != authorized[0]):
                 connection.rollback()
-                raise GenerationTransitionError("dispatch route is outside the frozen fallback policy")
-            if prior >= len(authorized) or selected != authorized[prior]:
+                raise GenerationTransitionError(
+                    "dispatch route is outside the frozen fallback policy"
+                )
+            if selected != authorized[prior]:
                 connection.rollback()
                 raise GenerationTransitionError("dispatch route is out of authorized order")
+            actual_request = json.loads(row["request_json"])
+            actual_request["model"] = selected[0]
             dispatch_digest = _digest(
                 "marginalia.provider-dispatch/v1",
                 {
@@ -386,7 +496,7 @@ class GenerationStore:
                     "ordinal": prior,
                     "actual_model": selected[0],
                     "actual_route": selected[1],
-                    "request": json.loads(row["request_json"]),
+                    "request": actual_request,
                 },
             )
             dispatch_id = "dsp_" + uuid.uuid4().hex
@@ -415,11 +525,13 @@ class GenerationStore:
             self._event(
                 connection,
                 logical_request_id,
-                "dispatch_reserved",
+                "fallback_reserved" if fallback else "dispatch_reserved",
                 {"dispatch": dispatch_id, "digest": dispatch_digest},
                 dispatch_id=dispatch_id,
             )
-            result = connection.execute("SELECT * FROM dispatch WHERE id=?", (dispatch_id,)).fetchone()
+            result = connection.execute(
+                "SELECT * FROM dispatch WHERE id=?", (dispatch_id,)
+            ).fetchone()
             connection.commit()
         assert result is not None
         return self._dispatch(result)
@@ -528,6 +640,88 @@ class GenerationStore:
             event="dispatch_failed",
             error=reason,
         )
+
+    def accept_candidate(self, candidate_id: str, message_id: str) -> None:
+        """Record application acceptance idempotently after the session append."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM generation_candidate WHERE id=?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(candidate_id)
+            candidate = self._candidate(row)
+            request_row = connection.execute(
+                "SELECT * FROM logical_request WHERE id=?", (candidate.logical_request_id,)
+            ).fetchone()
+            assert request_row is not None
+            request = self._logical(request_row)
+            if candidate.accepted_message_id is not None:
+                connection.commit()
+                if candidate.accepted_message_id != message_id:
+                    raise GenerationTransitionError("candidate is bound to another session message")
+                return
+            if request.accepted_candidate_id not in {None, candidate_id}:
+                connection.rollback()
+                raise GenerationTransitionError("logical request accepted another candidate")
+            now = _now()
+            connection.execute(
+                "UPDATE generation_candidate SET accepted_message_id=? WHERE id=?",
+                (message_id, candidate_id),
+            )
+            connection.execute(
+                """UPDATE logical_request SET status=?,accepted_candidate_id=?,updated_at=?
+                   WHERE id=?""",
+                (LogicalStatus.ACCEPTED, candidate_id, now, candidate.logical_request_id),
+            )
+            self._event(
+                connection,
+                candidate.logical_request_id,
+                "candidate_accepted",
+                {"message_id": message_id},
+                dispatch_id=candidate.dispatch_id,
+                candidate_id=candidate_id,
+            )
+            connection.commit()
+
+    def block_candidate(self, candidate_id: str, reason: str) -> None:
+        """Record a current application refusal without erasing response custody."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM generation_candidate WHERE id=?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(candidate_id)
+            candidate = self._candidate(row)
+            request_row = connection.execute(
+                "SELECT * FROM logical_request WHERE id=?", (candidate.logical_request_id,)
+            ).fetchone()
+            assert request_row is not None
+            request = self._logical(request_row)
+            if request.accepted_candidate_id is not None:
+                connection.rollback()
+                raise GenerationTransitionError("accepted candidate cannot become blocked")
+            now = _now()
+            connection.execute(
+                "UPDATE dispatch SET status=?,updated_at=? WHERE id=?",
+                (DispatchStatus.BLOCKED, now, candidate.dispatch_id),
+            )
+            connection.execute(
+                "UPDATE logical_request SET status=?,last_error=?,updated_at=? WHERE id=?",
+                (LogicalStatus.BLOCKED, reason, now, candidate.logical_request_id),
+            )
+            self._event(
+                connection,
+                candidate.logical_request_id,
+                "candidate_blocked",
+                {"reason": reason},
+                dispatch_id=candidate.dispatch_id,
+                candidate_id=candidate_id,
+            )
+            connection.commit()
 
     def get_request(self, logical_request_id: str) -> LogicalRequest | None:
         with self._connect() as connection:
@@ -693,8 +887,7 @@ class GenerationStore:
             original_model=row["original_model"],
             original_route=row["original_route"],
             fallback_policy=tuple(
-                (item["model"], item["route"])
-                for item in json.loads(row["fallback_policy_json"])
+                (item["model"], item["route"]) for item in json.loads(row["fallback_policy_json"])
             ),
             request_digest=row["request_digest"],
             status=LogicalStatus(row["status"]),

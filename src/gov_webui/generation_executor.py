@@ -92,7 +92,11 @@ class ExecutorPlan:
         ):
             raise ExecutorError("executor store paths must be absolute")
         retention = value["evidence_retention_days"]
-        if not isinstance(retention, int) or isinstance(retention, bool) or not 1 <= retention <= 3650:
+        if (
+            not isinstance(retention, int)
+            or isinstance(retention, bool)
+            or not 1 <= retention <= 3650
+        ):
             raise ExecutorError("evidence_retention_days must be an integer between 1 and 3650")
         for key in ("request_digest", "subject", "scope"):
             _require_digest(value[key], f"executor plan {key}")
@@ -399,7 +403,7 @@ class GenerationExecutor:
             self.generations.mark_executing(durable.id, dispatch.attempt)
         elif durable.status is not DispatchStatus.EXECUTING:
             raise ExecutorError(f"Marginalia dispatch is not executable: {durable.status}")
-        request = self.generations.request_payload(durable.logical_request_id)
+        request = self.generations.dispatch_payload(durable.id)
         try:
             response = self.provider(request)
             evidence = self.evidence_writer(
@@ -491,9 +495,9 @@ def _canonical(value: Any) -> bytes:
 
 
 def _digest(domain: str, value: Any) -> str:
-    return "sha256:" + hashlib.sha256(
-        domain.encode("ascii") + b"\0" + _canonical(value)
-    ).hexdigest()
+    return (
+        "sha256:" + hashlib.sha256(domain.encode("ascii") + b"\0" + _canonical(value)).hexdigest()
+    )
 
 
 def _now() -> str:

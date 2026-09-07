@@ -18,6 +18,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from gov_webui.project_state import project_state_lock
+
 
 class CreativeProjectError(RuntimeError):
     """Base error for creative-project persistence."""
@@ -111,7 +113,9 @@ class CreativeProjectStore:
 
     def get(self) -> CreativeProjectConfig:
         with self._lock:
-            return self._config.model_copy(deep=True)
+            with project_state_lock(self.context_root):
+                self._config = self._load()
+                return self._config.model_copy(deep=True)
 
     def update(
         self,
@@ -122,23 +126,25 @@ class CreativeProjectStore:
         expected_version: int | None = None,
     ) -> CreativeProjectConfig:
         with self._lock:
-            if expected_version is not None and expected_version != self._config.version:
-                raise CreativeProjectVersionConflict(
-                    f"expected project version {expected_version}, "
-                    f"current version is {self._config.version}"
+            with project_state_lock(self.context_root):
+                current = self._load()
+                if expected_version is not None and expected_version != current.version:
+                    raise CreativeProjectVersionConflict(
+                        f"expected project version {expected_version}, "
+                        f"current version is {current.version}"
+                    )
+                updated = current.model_copy(
+                    update={
+                        "version": current.version + 1,
+                        "project_brief": self._normalize(project_brief),
+                        "collaborator_stance": self._normalize(collaborator_stance),
+                        "voice_style_guidance": self._normalize(voice_style_guidance),
+                        "updated_at": self._now(),
+                    }
                 )
-            updated = self._config.model_copy(
-                update={
-                    "version": self._config.version + 1,
-                    "project_brief": self._normalize(project_brief),
-                    "collaborator_stance": self._normalize(collaborator_stance),
-                    "voice_style_guidance": self._normalize(voice_style_guidance),
-                    "updated_at": self._now(),
-                }
-            )
-            self._save(updated)
-            self._config = updated
-            return updated.model_copy(deep=True)
+                self._save(updated)
+                self._config = updated
+                return updated.model_copy(deep=True)
 
     def _save(self, config: CreativeProjectConfig) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)

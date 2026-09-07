@@ -26,9 +26,7 @@ pytestmark = pytest.mark.skipif(
 def _executable(path: Path, body: str) -> Path:
     source = Path(__file__).resolve().parents[1] / "src"
     path.write_text(
-        "#!/usr/bin/env python3\n"
-        f"import sys\nsys.path.insert(0, {str(source)!r})\n"
-        + body,
+        f"#!/usr/bin/env python3\nimport sys\nsys.path.insert(0, {str(source)!r})\n" + body,
         encoding="utf-8",
     )
     path.chmod(0o700)
@@ -119,11 +117,14 @@ def test_exact_companions_dispatch_once_and_reopen_settled_state(
         issuer_key=issuer,
         evidence_keyring=keyring,
     )
-    governed = GovernedGeneration(config, store, request)
+    governed = GovernedGeneration(config, store, request, dispatch)
 
-    governed.prepare(dispatch)
+    governed.prepare()
     assert governed.drive() == "settled_observation_required"
     assert store.get_request(request.id).status is LogicalStatus.CANDIDATE
-    assert GovernedGeneration(config, store, request).drive() == "settled_observation_required"
+    assert (
+        GovernedGeneration(config, store, request, dispatch).drive()
+        == "settled_observation_required"
+    )
     assert len(store.list_dispatches(request.id)) == 1
     assert len(list(governed.logs_dir.glob("*-*.command.json"))) >= 8

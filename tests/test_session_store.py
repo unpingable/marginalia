@@ -6,7 +6,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from gov_webui.session_store import SessionMessage, SessionStore, SessionWriteResult
+from gov_webui.session_store import (
+    CandidateWriteResult,
+    SessionMessage,
+    SessionStore,
+    SessionWriteResult,
+)
 
 
 def test_exact_provider_model_provenance_round_trips(tmp_path: Path) -> None:
@@ -150,6 +155,26 @@ def test_direct_append_invalidates_an_in_flight_generation_revision(tmp_path: Pa
     durable = store.get(session.id)
     assert durable is not None
     assert [message.content for message in durable.messages] == ["Imported turn"]
+
+
+def test_candidate_identity_is_idempotent_before_revision_check(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create("context")
+    message = SessionMessage.create("assistant", "Candidate", generation_candidate_id="candidate-1")
+    first = store.append_candidate_if_revision(
+        session.id, session.revision, "candidate-1", [message]
+    )
+    assert first == (CandidateWriteResult.COMMITTED, message.id)
+
+    second = store.append_candidate_if_revision(
+        session.id,
+        session.revision,
+        "candidate-1",
+        [SessionMessage.create("assistant", "Replacement", generation_candidate_id="candidate-1")],
+    )
+
+    assert second == (CandidateWriteResult.ALREADY_COMMITTED, message.id)
+    assert len(store.get(session.id).messages) == 1
 
 
 def test_move_removes_the_old_commit_target_and_preserves_the_new_state(tmp_path: Path) -> None:

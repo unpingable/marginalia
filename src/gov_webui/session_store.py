@@ -26,6 +26,15 @@ class SessionWriteResult(StrEnum):
     CONFLICT = "conflict"
 
 
+class CandidateWriteResult(StrEnum):
+    """Result of an idempotent candidate-bound session append."""
+
+    COMMITTED = "committed"
+    ALREADY_COMMITTED = "already_committed"
+    NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
+
+
 @dataclass
 class SessionMessage:
     """One persisted conversation message."""
@@ -38,6 +47,7 @@ class SessionMessage:
     usage: dict[str, int] | None = None
     provider_id: str | None = None
     model_id: str | None = None
+    generation_candidate_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -54,6 +64,8 @@ class SessionMessage:
             result["provider_id"] = self.provider_id
         if self.model_id is not None:
             result["model_id"] = self.model_id
+        if self.generation_candidate_id is not None:
+            result["generation_candidate_id"] = self.generation_candidate_id
         return result
 
     @classmethod
@@ -67,6 +79,7 @@ class SessionMessage:
             usage=data.get("usage"),
             provider_id=data.get("provider_id"),
             model_id=data.get("model_id"),
+            generation_candidate_id=data.get("generation_candidate_id"),
         )
 
     @classmethod
@@ -78,6 +91,7 @@ class SessionMessage:
         usage: dict[str, int] | None = None,
         provider_id: str | None = None,
         model_id: str | None = None,
+        generation_candidate_id: str | None = None,
     ) -> SessionMessage:
         return cls(
             id=uuid.uuid4().hex[:12],
@@ -88,6 +102,7 @@ class SessionMessage:
             usage=usage,
             provider_id=provider_id,
             model_id=model_id,
+            generation_candidate_id=generation_candidate_id,
         )
 
 
@@ -188,6 +203,11 @@ class SessionStore:
                 temporary.flush()
                 os.fsync(temporary.fileno())
             os.replace(temporary_name, target)
+            directory = os.open(self.sessions_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         finally:
             try:
                 os.unlink(temporary_name)
@@ -294,6 +314,50 @@ class SessionStore:
                 return SessionWriteResult.CONFLICT
             self._append_to_session(session, messages)
             return SessionWriteResult.COMMITTED
+
+    def candidate_message_id(self, session_id: str, candidate_id: str) -> str | None:
+        """Return a prior insertion under the session's cross-process lock."""
+        with self._session_lock(session_id):
+            session = self._read_session(session_id)
+            if session is None:
+                return None
+            matches = [
+                message.id
+                for message in session.messages
+                if message.generation_candidate_id == candidate_id
+            ]
+            if len(matches) > 1:
+                raise RuntimeError("candidate identity appears more than once in the session")
+            return matches[0] if matches else None
+
+    def append_candidate_if_revision(
+        self,
+        session_id: str,
+        expected_revision: int,
+        candidate_id: str,
+        messages: list[SessionMessage],
+    ) -> tuple[CandidateWriteResult, str | None]:
+        """Append once by candidate identity; prior insertion wins over revision drift."""
+        bound = [message for message in messages if message.generation_candidate_id == candidate_id]
+        if len(bound) != 1:
+            raise ValueError("candidate append requires exactly one candidate-bound message")
+        with self._session_lock(session_id):
+            session = self._read_session(session_id)
+            if session is None:
+                return CandidateWriteResult.NOT_FOUND, None
+            prior = [
+                message.id
+                for message in session.messages
+                if message.generation_candidate_id == candidate_id
+            ]
+            if len(prior) > 1:
+                raise RuntimeError("candidate identity appears more than once in the session")
+            if prior:
+                return CandidateWriteResult.ALREADY_COMMITTED, prior[0]
+            if session.revision != expected_revision:
+                return CandidateWriteResult.CONFLICT, None
+            self._append_to_session(session, messages)
+            return CandidateWriteResult.COMMITTED, bound[0].id
 
     def move_to(
         self,

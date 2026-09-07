@@ -105,9 +105,7 @@ def observation_resolution(value: dict[str, Any]) -> dict[str, Any]:
             "marginalia.generation-currentness/v1",
             {"request": request.request_digest, "at": now},
         ),
-        "normalized_preconditions": ag_digest(
-            "ag.governed-loop.typed-observation-basis/v1", basis
-        ),
+        "normalized_preconditions": ag_digest("ag.governed-loop.typed-observation-basis/v1", basis),
         "basis": basis,
         "resolver_id": OBSERVATION_RESOLVER_ID,
         "subject": value["subject"],
@@ -132,7 +130,9 @@ def standing_resolution(value: dict[str, Any]) -> dict[str, Any]:
     if value["schema"] != "ag.governed-loop.standing-request/v1":
         raise BoundaryRefusal("unsupported standing request schema")
     request = _request_for_observation(value["observation"])
-    if value["subject"] != generation_subject(request) or value["scope"] != generation_scope(request):
+    if value["subject"] != generation_subject(request) or value["scope"] != generation_scope(
+        request
+    ):
         raise BoundaryRefusal("standing subject/scope differs from frozen request")
     now = value["now_unix_ms"]
     identity = {key: value[key] for key in sorted(required - {"schema", "now_unix_ms"})}
@@ -170,7 +170,8 @@ def docket_standing_resolution(value: dict[str, Any]) -> dict[str, Any]:
         "schema": "docket.governed-loop.execution-standing-resolution/v1",
         "resolution": ag_digest("marginalia.docket-standing-resolution/v1", value),
         "currentness": ag_digest(
-            "marginalia.docket-standing-currentness/v1", {"issuance": issuance["issuance"], "at": now}
+            "marginalia.docket-standing-currentness/v1",
+            {"issuance": issuance["issuance"], "at": now},
         ),
         "execution_standing": ag_digest(
             "marginalia.docket-execution-standing/v1", {"issuance": issuance["issuance"]}

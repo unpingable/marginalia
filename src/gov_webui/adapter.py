@@ -33,6 +33,7 @@ import hashlib
 import difflib
 import io
 import importlib.metadata
+import inspect
 import json
 import logging
 import os
@@ -42,6 +43,7 @@ import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, AsyncGenerator, Literal
 from urllib.parse import urlsplit
@@ -108,6 +110,14 @@ from gov_webui.generation_outcome import (
     ModelMismatchGenerationResult,
     classify_daemon_result,
 )
+from gov_webui.evidence_store import EncryptedEvidenceStore
+from gov_webui.generation_acceptance import AcceptanceStatus, accept_candidate
+from gov_webui.generation_store import (
+    GenerationDisabled,
+    GenerationStore,
+    IdempotencyConflict,
+    LogicalStatus,
+)
 from gov_webui.library_store import (
     ConversationLifecycle,
     ConversationLifecycleNotFoundError,
@@ -124,6 +134,11 @@ from gov_webui.model_providers import (
     ProviderConfigurationError,
     ProviderError,
     load_provider_catalog,
+)
+from gov_webui.project_state import (
+    canon_fingerprint,
+    guidance_fingerprint,
+    project_state_lock,
 )
 from gov_webui.reliability import governor_progress
 from gov_webui.markdown import render_writer_markdown
@@ -188,6 +203,12 @@ MARGINALIA_ENABLE_DONOR_ROUTES = os.environ.get("MARGINALIA_ENABLE_DONOR_ROUTES"
     "yes",
 )
 MARGINALIA_BACKUP_ROOT = os.environ.get("MARGINALIA_BACKUP_ROOT", "/backups")
+MARGINALIA_DURABLE_GENERATION_AVAILABLE = os.environ.get(
+    "MARGINALIA_DURABLE_GENERATION_AVAILABLE", ""
+).lower() in ("true", "1", "yes")
+MARGINALIA_EVIDENCE_KEY_FILE = os.environ.get(
+    "MARGINALIA_EVIDENCE_KEY_FILE", "/run/secrets/marginalia-evidence-keys.json"
+)
 MARGINALIA_BACKUP_REQUIRE_REMOTE = os.environ.get(
     "MARGINALIA_BACKUP_REQUIRE_REMOTE", "false"
 ).lower() in {"true", "1", "yes"}
@@ -350,6 +371,8 @@ _PRODUCT_EXACT_PATHS = {
     "/v1/internal/synthetic-governor",
     "/v1/governed-chat/pending",
     "/v1/governed-chat/resolve",
+    "/v1/generation/settings",
+    "/v1/generations",
     "/v1/project",
     "/v1/project/export",
     "/v1/project/export.zip",
@@ -367,6 +390,7 @@ _PRODUCT_PATH_PREFIXES = (
     "/v1/project/",
     "/v1/manuscript/",
     "/v1/conversations/",
+    "/v1/generations/",
     "/sessions/",
     "/governor/fiction/",
     "/governor/artifacts",
@@ -424,6 +448,7 @@ class ChatCompletionRequest(BaseModel):
     user: str | None = None
     project_id: str | None = None
     session_id: str | None = None
+    client_request_id: str | None = Field(default=None, min_length=1, max_length=160)
 
 
 class ChatCompletionChoice(BaseModel):
@@ -525,6 +550,12 @@ class CreativeProjectUpdateRequest(BaseModel):
     project_id: str | None = None
 
 
+class GenerationSettingsUpdateRequest(BaseModel):
+    enabled: bool
+    fallback_model: str | None = None
+    project_id: str | None = None
+
+
 class ProjectCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     workspace_id: str | None = None
@@ -607,6 +638,7 @@ _context_maintenance_tasks: dict[ContextMaintenanceKey, asyncio.Task[None]] = {}
 _context_maintenance_pending: dict[ContextMaintenanceKey, int] = {}
 _artifact_stores: dict[str, Any] = {}
 _canon_review_stores: dict[str, CanonReviewStore] = {}
+_generation_stores: dict[str, GenerationStore] = {}
 _manuscript_stores: dict[str, ManuscriptStore] = {}
 _snapshot_stores: dict[str, ProjectSnapshotStore] = {}
 
@@ -816,6 +848,16 @@ def _get_manuscript_store(project_id: str | None = None) -> ManuscriptStore:
             context.root / "marginalia" / "manuscript.json"
         )
     return _manuscript_stores[project.context_id]
+
+
+def _get_generation_store(project_id: str | None = None) -> GenerationStore:
+    project = _project_record(project_id)
+    if project.context_id not in _generation_stores:
+        context = _get_context_manager().get_or_create(project.context_id, mode="fiction")
+        _generation_stores[project.context_id] = GenerationStore(
+            context.root / "marginalia" / "generation.sqlite"
+        )
+    return _generation_stores[project.context_id]
 
 
 def _get_snapshot_store(project_id: str | None = None) -> ProjectSnapshotStore:
@@ -1517,6 +1559,149 @@ async def update_creative_project(
         raise HTTPException(status_code=409, detail=str(exc))
     except CreativeProjectError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/v1/generation/settings")
+async def get_generation_settings(project_id: str | None = None) -> dict[str, Any]:
+    """Return the prominent project-level durable-generation controls."""
+    project = _project_record(project_id)
+    settings = _get_generation_store(project.id).settings(project.id)
+    fallback = settings.fallback_policy[0][0] if settings.fallback_policy else None
+    return {
+        "available": MARGINALIA_DURABLE_GENERATION_AVAILABLE,
+        "enabled": settings.dispatch_enabled,
+        "fallback_model": fallback,
+        "status": (
+            "ready"
+            if MARGINALIA_DURABLE_GENERATION_AVAILABLE
+            else "This deployment has not enabled the durable generation worker."
+        ),
+    }
+
+
+@app.put("/v1/generation/settings")
+async def update_generation_settings(
+    request: GenerationSettingsUpdateRequest,
+) -> dict[str, Any]:
+    """Toggle new dispatches without disabling inspection or reconciliation."""
+    project = _project_record(request.project_id)
+    if request.enabled and not MARGINALIA_DURABLE_GENERATION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="durable generation worker is unavailable")
+    fallbacks = []
+    if request.fallback_model:
+        selected, identity = _resolve_configured_model(request.fallback_model)
+        fallbacks.append(
+            {"model": selected, "route": identity.provider_id if identity else "governor"}
+        )
+    _get_generation_store(project.id).set_settings(
+        project.id,
+        dispatch_enabled=request.enabled,
+        fallback_policy=fallbacks,
+    )
+    return await get_generation_settings(project.id)
+
+
+def _accepted_generation_messages(
+    store: SessionStore, session_id: str, candidate_id: str
+) -> list[dict[str, Any]]:
+    session = store.get(session_id)
+    if session is None:
+        return []
+    for index, message in enumerate(session.messages):
+        if message.generation_candidate_id == candidate_id:
+            start = index - 1 if index and session.messages[index - 1].role == "user" else index
+            return [item.to_dict() for item in session.messages[start : index + 1]]
+    return []
+
+
+def _generation_status_payload(project_id: str, request_id: str) -> dict[str, Any]:
+    project = _project_record(project_id)
+    store = _get_generation_store(project.id)
+    logical = store.get_request(request_id)
+    if logical is None:
+        raise HTTPException(status_code=404, detail="generation request not found")
+    if logical.project_id != project.id:
+        raise HTTPException(status_code=404, detail="generation request not found")
+    if logical.status is LogicalStatus.CANDIDATE and logical.candidate_id:
+        context = _get_context_manager().get_or_create(project.context_id, mode="fiction")
+        evidence = EncryptedEvidenceStore(
+            context.root / "marginalia" / "generation-evidence",
+            Path(MARGINALIA_EVIDENCE_KEY_FILE),
+        )
+        accepted = accept_candidate(
+            generation_store=store,
+            evidence_store=evidence,
+            session_store=_get_session_store(project.id),
+            context_root=context.root,
+            project_id=project.id,
+            candidate_id=logical.candidate_id,
+        )
+        logical = store.get_request(request_id)
+        assert logical is not None
+        if accepted.status is AcceptanceStatus.BLOCKED:
+            return {
+                "outcome": "blocked",
+                "request_id": request_id,
+                "message": accepted.reason,
+            }
+    if logical.status is LogicalStatus.ACCEPTED and logical.accepted_candidate_id:
+        return {
+            "outcome": "authored",
+            "request_id": request_id,
+            "committed_messages": _accepted_generation_messages(
+                _get_session_store(project.id),
+                logical.session_id,
+                logical.accepted_candidate_id,
+            ),
+        }
+    if logical.status is LogicalStatus.UNKNOWN:
+        return {
+            "outcome": "unknown",
+            "request_id": request_id,
+            "message": (
+                "The provider outcome is still unknown. Marginalia is retaining custody and "
+                "will keep reconciling; starting another generation is not yet safe."
+            ),
+        }
+    if logical.status is LogicalStatus.BLOCKED:
+        return {"outcome": "blocked", "request_id": request_id, "message": logical.last_error}
+    if logical.status is LogicalStatus.FAILED:
+        return {
+            "outcome": "failure",
+            "request_id": request_id,
+            "message": logical.last_error or "The provider returned a confirmed failure.",
+            "retryable": True,
+        }
+    return {
+        "outcome": "pending",
+        "request_id": request_id,
+        "status": logical.status,
+        "message": "Marginalia has custody of this generation.",
+    }
+
+
+@app.get("/v1/generations/{request_id}")
+async def get_generation_status(request_id: str, project_id: str | None = None) -> dict[str, Any]:
+    project = _project_record(project_id)
+    return _generation_status_payload(project.id, request_id)
+
+
+@app.get("/v1/generations")
+async def list_generations(
+    project_id: str | None = None, session_id: str | None = None
+) -> dict[str, Any]:
+    project = _project_record(project_id)
+    requests = [
+        item
+        for item in _get_generation_store(project.id).list_requests()
+        if item.project_id == project.id and (session_id is None or item.session_id == session_id)
+    ]
+    active = [
+        _generation_status_payload(project.id, item.id)
+        for item in requests
+        if item.status not in {LogicalStatus.ACCEPTED, LogicalStatus.BLOCKED, LogicalStatus.FAILED}
+    ]
+    return {"generations": active}
 
 
 async def _build_project_export(project_id: str | None = None) -> dict[str, Any]:
@@ -2770,6 +2955,44 @@ async def chat_completions(
     except StaleSessionRevisionError as exc:
         return _failure_response(_generation_failure(exc))
 
+    durable_store: GenerationStore | None = None
+    durable_snapshot: tuple[str, str] | None = None
+    durable_context = None
+    durable_settings = None
+    if commit_target is not None:
+        project = _project_record(request.project_id)
+        durable_store = _get_generation_store(project.id)
+        durable_settings = durable_store.settings(project.id)
+        if durable_settings.dispatch_enabled:
+            if not MARGINALIA_DURABLE_GENERATION_AVAILABLE:
+                raise HTTPException(
+                    status_code=503, detail="durable generation worker is unavailable"
+                )
+            if request.stream:
+                raise HTTPException(
+                    status_code=422, detail="durable session generation does not support streaming"
+                )
+            if request.client_request_id is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="durable generation requires a stable client_request_id",
+                )
+            durable_context = _get_context_manager().get_or_create(
+                project.context_id, mode="fiction"
+            )
+            with project_state_lock(durable_context.root):
+                current = commit_target[0].get(commit_target[1].id)
+                if current is None or current.revision != commit_target[1].revision:
+                    return _failure_response(
+                        _generation_failure(
+                            StaleSessionRevisionError("session changed before context assembly")
+                        )
+                    )
+                durable_snapshot = (
+                    canon_fingerprint(durable_context.root),
+                    guidance_fingerprint(durable_context.root),
+                )
+
     # These application-owned system blocks are counted before provider launch.
     # Retained donor constraint blocks are relevant only when explicitly
     # running old code/research tests; normal Marginalia is fiction-only.
@@ -2827,6 +3050,74 @@ async def chat_completions(
         raise
     except Exception as exc:
         return _failure_response(_generation_failure(exc))
+
+    if durable_snapshot is not None:
+        assert durable_store is not None
+        assert durable_settings is not None
+        assert durable_context is not None
+        assert commit_target is not None
+        project = _project_record(request.project_id)
+        session = commit_target[1]
+        with project_state_lock(durable_context.root):
+            current = commit_target[0].get(session.id)
+            current_snapshot = (
+                canon_fingerprint(durable_context.root),
+                guidance_fingerprint(durable_context.root),
+            )
+            if current is None or current.revision != session.revision:
+                return _failure_response(
+                    _generation_failure(
+                        StaleSessionRevisionError("session changed during context assembly")
+                    )
+                )
+            if current_snapshot != durable_snapshot:
+                return _failure_response(
+                    _generation_failure(
+                        StaleSessionRevisionError(
+                            "canon or project guidance changed during context assembly"
+                        )
+                    )
+                )
+            fallbacks = [
+                {"model": model, "route": route}
+                for model, route in durable_settings.fallback_policy
+                if model != selected_model
+            ]
+            try:
+                created = durable_store.create_request(
+                    client_request_id=request.client_request_id,
+                    project_id=project.id,
+                    session_id=session.id,
+                    expected_revision=session.revision,
+                    canon_fingerprint=durable_snapshot[0],
+                    guidance_fingerprint=durable_snapshot[1],
+                    original_model=selected_model,
+                    original_route=(model_identity.provider_id if model_identity else "governor"),
+                    fallback_policy=fallbacks,
+                    request={
+                        "context_id": project.context_id,
+                        "messages": messages,
+                        "model": selected_model,
+                    },
+                )
+                logical = created.request
+                if logical.status is LogicalStatus.QUEUED and not durable_store.list_dispatches(
+                    logical.id
+                ):
+                    durable_store.reserve_dispatch(logical.id)
+            except IdempotencyConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except GenerationDisabled as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return JSONResponse(
+            status_code=202,
+            content={
+                "outcome": "pending",
+                "request_id": logical.id,
+                "status": durable_store.get_request(logical.id).status,
+                "message": "Marginalia has custody of this generation.",
+            },
+        )
 
     if request.stream:
         return StreamingResponse(
@@ -3464,6 +3755,26 @@ def _resolve_context(project_id: str | None = None) -> tuple[Any | None, str]:
     project = _project_record(project_id)
     ctx = cm.get(project.context_id)
     return ctx, project.context_id
+
+
+def _project_mutation_locked(endpoint):
+    """Hold the project lock across one supported canon mutation endpoint."""
+    signature = inspect.signature(endpoint)
+
+    @wraps(endpoint)
+    async def locked(*args, **kwargs):
+        bound = signature.bind_partial(*args, **kwargs)
+        request = bound.arguments.get("request")
+        project_id = getattr(request, "project_id", None)
+        if project_id is None:
+            project_id = bound.arguments.get("project_id")
+        ctx, _ = _resolve_context(project_id)
+        if ctx is None:
+            return await endpoint(*args, **kwargs)
+        with project_state_lock(ctx.root):
+            return await endpoint(*args, **kwargs)
+
+    return locked
 
 
 def _build_vm_for_context(ctx: Any) -> GovernorViewModel:
@@ -4115,41 +4426,33 @@ async def add_character(request: CharacterRequest) -> dict[str, Any]:
 
     from governor.continuity import Anchor, AnchorType, Severity, create_registry
 
-    registry = create_registry(ctx.governor_dir)
-
-    char_id = f"char-{request.name.lower().replace(' ', '-')}"
-
-    # Build description
-    desc_parts = []
-    if request.description:
-        desc_parts.append(f"Appearance: {request.description}")
-    if request.voice:
-        desc_parts.append(f"Voice: {request.voice}")
-    description = "; ".join(desc_parts) if desc_parts else f"Character: {request.name}"
-
-    # Create character anchor
-    anchor = Anchor(
-        id=char_id,
-        anchor_type=AnchorType.CANON,
-        description=description,
-        severity=Severity.REJECT,
-    )
-    registry.register(anchor)
-
-    # Create prohibition anchor if wont provided
-    if request.wont:
-        patterns = [p.strip() for p in request.wont.split(",")]
-        wont_anchor = Anchor(
-            id=f"{char_id}-wont",
-            anchor_type=AnchorType.PROHIBITION,
-            description=f"{request.name} wouldn't: {request.wont}",
-            forbidden_patterns=patterns,
+    with project_state_lock(ctx.root):
+        registry = create_registry(ctx.governor_dir)
+        char_id = f"char-{request.name.lower().replace(' ', '-')}"
+        desc_parts = []
+        if request.description:
+            desc_parts.append(f"Appearance: {request.description}")
+        if request.voice:
+            desc_parts.append(f"Voice: {request.voice}")
+        description = "; ".join(desc_parts) if desc_parts else f"Character: {request.name}"
+        anchor = Anchor(
+            id=char_id,
+            anchor_type=AnchorType.CANON,
+            description=description,
             severity=Severity.REJECT,
         )
-        registry.register(wont_anchor)
-
-    # Save
-    registry.save(ctx.governor_dir / "continuity" / "anchors.json")
+        registry.register(anchor)
+        if request.wont:
+            patterns = [p.strip() for p in request.wont.split(",")]
+            wont_anchor = Anchor(
+                id=f"{char_id}-wont",
+                anchor_type=AnchorType.PROHIBITION,
+                description=f"{request.name} wouldn't: {request.wont}",
+                forbidden_patterns=patterns,
+                severity=Severity.REJECT,
+            )
+            registry.register(wont_anchor)
+        registry.save(ctx.governor_dir / "continuity" / "anchors.json")
 
     return {
         "success": True,
@@ -4170,13 +4473,13 @@ async def remove_character(
 
     from governor.continuity import create_registry
 
-    registry = create_registry(ctx.governor_dir)
-    anchor = registry.unregister(char_id)
-    registry.unregister(f"{char_id}-wont")
-
-    if anchor:
-        registry.save(ctx.governor_dir / "continuity" / "anchors.json")
-        return {"success": True, "message": "Character removed."}
+    with project_state_lock(ctx.root):
+        registry = create_registry(ctx.governor_dir)
+        anchor = registry.unregister(char_id)
+        registry.unregister(f"{char_id}-wont")
+        if anchor:
+            registry.save(ctx.governor_dir / "continuity" / "anchors.json")
+            return {"success": True, "message": "Character removed."}
 
     raise HTTPException(status_code=404, detail="Character not found.")
 
@@ -4215,21 +4518,20 @@ async def add_world_rule(request: WorldRuleRequest) -> dict[str, Any]:
 
     from governor.continuity import Anchor, AnchorType, Severity, create_registry
 
-    registry = create_registry(ctx.governor_dir)
-
-    review_store = _get_canon_review_store(request.project_id)
-    rule_id = _next_anchor_id(registry, "world", review_store)
-
-    anchor = Anchor(
-        id=rule_id,
-        anchor_type=AnchorType.DEFINITION,
-        description=request.rule,
-        severity=Severity.REJECT,
-    )
-    registry.register(anchor)
-    registry.save(ctx.governor_dir / "continuity" / "anchors.json")
-    if request.closes_category:
-        review_store.record_explicit_closure(rule_id, request.closes_category)
+    with project_state_lock(ctx.root):
+        registry = create_registry(ctx.governor_dir)
+        review_store = _get_canon_review_store(request.project_id)
+        rule_id = _next_anchor_id(registry, "world", review_store)
+        anchor = Anchor(
+            id=rule_id,
+            anchor_type=AnchorType.DEFINITION,
+            description=request.rule,
+            severity=Severity.REJECT,
+        )
+        registry.register(anchor)
+        registry.save(ctx.governor_dir / "continuity" / "anchors.json")
+        if request.closes_category:
+            review_store.record_explicit_closure(rule_id, request.closes_category)
 
     return {
         "success": True,
@@ -4273,19 +4575,18 @@ async def add_forbidden(request: ForbiddenRequest) -> dict[str, Any]:
 
     from governor.continuity import Anchor, AnchorType, Severity, create_registry
 
-    registry = create_registry(ctx.governor_dir)
-
-    forbid_id = _next_anchor_id(registry, "forbid", _get_canon_review_store(request.project_id))
-
-    anchor = Anchor(
-        id=forbid_id,
-        anchor_type=AnchorType.PROHIBITION,
-        description=request.description,
-        forbidden_patterns=request.patterns,
-        severity=Severity.REJECT,
-    )
-    registry.register(anchor)
-    registry.save(ctx.governor_dir / "continuity" / "anchors.json")
+    with project_state_lock(ctx.root):
+        registry = create_registry(ctx.governor_dir)
+        forbid_id = _next_anchor_id(registry, "forbid", _get_canon_review_store(request.project_id))
+        anchor = Anchor(
+            id=forbid_id,
+            anchor_type=AnchorType.PROHIBITION,
+            description=request.description,
+            forbidden_patterns=request.patterns,
+            severity=Severity.REJECT,
+        )
+        registry.register(anchor)
+        registry.save(ctx.governor_dir / "continuity" / "anchors.json")
 
     return {
         "success": True,
@@ -4370,6 +4671,7 @@ async def list_pending_captures(
 
 
 @app.post("/governor/fiction/capture/{capture_id}/accept")
+@_project_mutation_locked
 async def accept_capture(capture_id: str, request: CaptureAcceptRequest) -> dict[str, Any]:
     """Promote a pending capture to canon (creates character or world rule anchor)."""
     project = _project_record(request.project_id)
@@ -4649,6 +4951,7 @@ async def list_constraints() -> dict[str, Any]:
 
 
 @app.post("/governor/code/constraints")
+@_project_mutation_locked
 async def add_constraint(request: ConstraintRequest) -> dict[str, Any]:
     """Add a constraint for code mode."""
     ctx, _ = _resolve_context()
@@ -6087,6 +6390,7 @@ async def export_governor_state() -> dict[str, Any]:
 
 
 @app.post("/governor/import")
+@_project_mutation_locked
 async def import_governor_state(payload: dict[str, Any]) -> dict[str, Any]:
     """Import governor state from an exported JSON object."""
     ctx, _ = _resolve_context()

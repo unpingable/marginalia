@@ -108,9 +108,12 @@ def test_restore_requires_the_separately_supplied_matching_key(tmp_path: Path) -
             evidence_id, actor="restore-test", now=NOW
         )
 
-    assert EncryptedEvidenceStore(restored, keyring).read(
-        evidence_id, actor="restore-test", now=NOW
-    )["content"] == "restorable"
+    assert (
+        EncryptedEvidenceStore(restored, keyring).read(evidence_id, actor="restore-test", now=NOW)[
+            "content"
+        ]
+        == "restorable"
+    )
 
 
 def test_keyring_permissions_are_enforced(tmp_path: Path) -> None:
