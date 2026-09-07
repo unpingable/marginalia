@@ -149,12 +149,12 @@ The regression is
 3. **Selective old-passage retrieval.** Combine recent authored turns,
    structured canon, the source-linked rolling summary, and retrieved original
    passages for old callbacks. Preserve source IDs and branch provenance.
-4. **Qualification expansion — impatient browser/API layer qualified in the next
-   candidate.** Playwright CI and prominent reliability-toggle coverage shipped
-   in Gate 3. Reload/lost-acknowledgement recovery, rapid double-submit, and
-   cross-tab cleanup now have browser cases; exact post-acceptance replay and
-   two-tab one-winner CAS have application cases. The broader failure-path
-   synthetic writer in `SYNTHETIC_QUALIFICATION.md` remains.
+4. **Qualification expansion — impatient browser/API layer shipped.** Playwright
+   CI and prominent reliability-toggle coverage shipped in Gate 3. The
+   operational-loop release added browser cases for reload/lost-acknowledgement
+   recovery, rapid double-submit, and cross-tab cleanup, plus application cases
+   for exact post-acceptance replay and two-tab one-winner CAS. The broader
+   failure-path synthetic writer in `SYNTHETIC_QUALIFICATION.md` remains.
 5. **Per-model/provider context-budget policy — characterization started; policy
    deferred.** `provider_overhead_tokens` and
    `output_reserve_tokens` are global constants, and the second promotion of this
@@ -393,10 +393,10 @@ The regression is
 
     `research/MARGINALIA-MAINTENANCE-OFF-CRITICAL-PATH-CAMPAIGN.md`.
 
-11. **Cost telemetry — passive per-turn baseline qualified in the next candidate.** Accepted responses
+11. **Cost telemetry — passive per-turn baseline shipped.** Accepted responses
     retain the actual provider/model and normalized reported usage. The writing
-    UI now distinguishes known, configured-estimate, and unavailable provider
-    cost without letting economics affect admission. Aggregation by
+    UI distinguishes known, configured-estimate, and unavailable provider cost
+    without letting economics affect admission. Aggregation by
     session/project/model/provider/day and exact gateway-reported cost remain
     later work. The pinned Agent Governor v1 result currently normalizes usage to
     three token counters, so richer gateway fields require an explicit companion
@@ -418,6 +418,32 @@ The regression is
     observations, different contracts — one is economics, the other a safety
     boundary, and an admission budget that starts optimising for cost is no
     longer a safety boundary. `research/MARGINALIA-COST-TELEMETRY-DESIGN-NOTE.md`.
+
+## Operational follow-ups after the 2026-09-07 release
+
+Wait for Erin's ordinary writing trial before starting another feature campaign.
+Collect content-free outcome, latency, model, normalized usage, and cost-state
+records plus her explicit report about timeout wording, recovery clarity, voice,
+and usefulness. A successful prompt remains only a tested lower bound on a
+provider window.
+
+- **Unknown-attempt admission policy.** Exact replay uses the saved client
+  request ID and is safe. A caller can still submit a *new* client request ID at
+  the same session revision while an earlier dispatch is unknown. That may be
+  legitimate distinct two-tab work, or an unsafe manual retry that causes a
+  second execution/bill before revision CAS chooses one winner. Before adding
+  worker concurrency or automatic retry, define whether an unknown dispatch
+  blocks new same-revision admission, requires an explicit override, or uses a
+  narrowly defined duplicate-intent check. Do not infer intent from prompt text
+  alone, and do not weaken the existing one-winner acceptance CAS.
+- **CI action runtime.** The pinned `actions/setup-node` revision currently emits
+  GitHub's Node.js 20 deprecation warning even though the job installs Node 24.
+  Review and pin a compatible published action revision as an independent CI
+  maintenance change; it is not a Marginalia runtime defect.
+- **Docket temporary-path investigation.** Keep the unproven shared-resource
+  suspicion in `docs/gate3/GATE3A-QUALIFICATION.md` tracked. Reproduce under the
+  original full-suite conditions before changing Docket; an isolated pass is
+  not evidence of a root cause.
 
 Counter identity on stored summaries and per-model context capacity were
 previously listed here; both are now implemented. Summaries and checkpoints
