@@ -11,11 +11,12 @@ import pytest
 
 from gov_webui.generation_boundaries import ag_digest
 from gov_webui.evidence_store import EncryptedEvidenceStore, create_keyring
-from gov_webui.generation_store import GenerationStore
+from gov_webui.generation_store import GenerationStore, LogicalStatus
 from gov_webui.generation_worker import (
     GenerationWorkerError,
     GovernedGeneration,
     WorkerConfig,
+    process_one,
     ring_ed25519_public_key,
     run_once,
 )
@@ -188,6 +189,44 @@ def test_restart_continues_immutable_command_log_sequence(tmp_path: Path) -> Non
     restarted = GovernedGeneration(config, store, request, dispatch)
 
     assert restarted._sequence == 7
+
+
+def test_indeterminate_reconciliation_projects_unknown_without_redispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contexts = tmp_path / "contexts"
+    store = GenerationStore(contexts / "ctx" / "marginalia" / "generation.sqlite")
+    request = store.create_request(
+        client_request_id="unknown",
+        project_id="project",
+        session_id="session",
+        expected_revision=0,
+        canon_fingerprint="canon",
+        guidance_fingerprint="guidance",
+        original_model="model",
+        original_route="route",
+        request={"context_id": "ctx", "messages": [], "model": "model"},
+    ).request
+    store.set_dispatch_enabled("project", True)
+    dispatch = store.reserve_dispatch(request.id)
+    store.mark_executing(dispatch.id, "attempt")
+    config = WorkerConfig(
+        contexts_root=contexts,
+        ag_loopctl=tmp_path / "ag",
+        docket=tmp_path / "docket",
+        observation_resolver=tmp_path / "observation",
+        standing_resolver=tmp_path / "standing",
+        docket_standing_resolver=tmp_path / "docket-standing",
+        executor=tmp_path / "executor",
+        issuer_key=tmp_path / "issuer",
+        evidence_keyring=tmp_path / "keys",
+    )
+    monkeypatch.setattr(GovernedGeneration, "prepare", lambda self: None)
+    monkeypatch.setattr(GovernedGeneration, "drive", lambda self: "reconciliation_required")
+
+    assert process_one(config, store, request) == "reconciliation_required"
+    assert store.get_request(request.id).status is LogicalStatus.UNKNOWN
+    assert len(store.list_dispatches(request.id)) == 1
 
 
 def test_worker_purges_expired_live_evidence(tmp_path: Path) -> None:

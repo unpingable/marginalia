@@ -459,7 +459,18 @@ def process_one(config: WorkerConfig, store: GenerationStore, request: LogicalRe
     governed = GovernedGeneration(config, store, request, dispatch)
     governed.prepare()
     try:
-        return governed.drive()
+        state = governed.drive()
+        if state == "reconciliation_required":
+            durable = store.get_dispatch(dispatch.id)
+            if durable is not None and durable.status in {
+                DispatchStatus.RESERVED,
+                DispatchStatus.EXECUTING,
+            }:
+                store.mark_unknown(
+                    dispatch.id,
+                    "provider execution remains indeterminate after reconciliation",
+                )
+        return state
     except Exception as exc:
         durable = store.get_dispatch(dispatch.id)
         if durable is not None and durable.status in {
