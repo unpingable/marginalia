@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from gov_webui.generation_executor import (
     ExecutorPlan,
     GenerationExecutor,
 )
+from gov_webui.generation_executor_cli import run
 from gov_webui.generation_store import GenerationStore, LogicalStatus
 
 
@@ -42,6 +44,9 @@ def fixture(tmp_path: Path):
     plan = ExecutorPlan(
         attempt_store=tmp_path / "attempts.sqlite",
         generation_store=generation_path,
+        evidence_root=tmp_path / "evidence",
+        evidence_keyring=tmp_path / "keys.json",
+        evidence_retention_days=30,
         marginalia_dispatch_id=reserved.id,
         request_digest=reserved.request_digest,
         subject=digest("subject"),
@@ -154,3 +159,13 @@ def test_substituted_dispatch_is_refused_without_mechanics(tmp_path: Path) -> No
     with pytest.raises(ExecutorError, match="subject or scope"):
         executor.execute(substituted)
     assert calls == 0
+
+
+def test_plan_file_round_trips_and_plan_id_operation_is_exact(tmp_path: Path) -> None:
+    _store, _request, plan, _dispatch = fixture(tmp_path)
+    path = tmp_path / "executor-plan.json"
+    path.write_text(json.dumps(plan.canonical_value()), encoding="utf-8")
+
+    loaded = ExecutorPlan.from_file(path)
+    assert loaded == plan
+    assert run(["plan-id", str(path)]) == plan.identity

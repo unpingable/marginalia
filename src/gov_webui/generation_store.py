@@ -544,10 +544,41 @@ class GenerationStore:
             ).fetchone()
         return self._logical(row) if row is not None else None
 
+    def find_by_request_digest(self, request_digest: str) -> LogicalRequest | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM logical_request WHERE request_digest=?", (request_digest,)
+            ).fetchone()
+        return self._logical(row) if row is not None else None
+
+    def list_requests(self, statuses: Iterable[LogicalStatus] = ()) -> list[LogicalRequest]:
+        selected = tuple(str(status) for status in statuses)
+        with self._connect() as connection:
+            if selected:
+                placeholders = ",".join("?" for _ in selected)
+                rows = connection.execute(
+                    f"SELECT * FROM logical_request WHERE status IN ({placeholders}) "
+                    "ORDER BY created_at,id",
+                    selected,
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM logical_request ORDER BY created_at,id"
+                ).fetchall()
+        return [self._logical(row) for row in rows]
+
     def get_dispatch(self, dispatch_id: str) -> Dispatch | None:
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM dispatch WHERE id=?", (dispatch_id,)).fetchone()
         return self._dispatch(row) if row is not None else None
+
+    def list_dispatches(self, logical_request_id: str) -> list[Dispatch]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM dispatch WHERE logical_request_id=? ORDER BY ordinal",
+                (logical_request_id,),
+            ).fetchall()
+        return [self._dispatch(row) for row in rows]
 
     def get_candidate(self, candidate_id: str) -> Candidate | None:
         with self._connect() as connection:

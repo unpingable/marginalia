@@ -49,6 +49,9 @@ class AttemptState(StrEnum):
 class ExecutorPlan:
     attempt_store: Path
     generation_store: Path
+    evidence_root: Path
+    evidence_keyring: Path
+    evidence_retention_days: int
     marginalia_dispatch_id: str
     request_digest: str
     subject: str
@@ -64,6 +67,9 @@ class ExecutorPlan:
             "schema",
             "attempt_store",
             "generation_store",
+            "evidence_root",
+            "evidence_keyring",
+            "evidence_retention_days",
             "marginalia_dispatch_id",
             "request_digest",
             "subject",
@@ -73,28 +79,42 @@ class ExecutorPlan:
             raise ExecutorError("executor plan does not have the exact v1 shape")
         if value["schema"] != EXECUTOR_PLAN_SCHEMA:
             raise ExecutorError("unsupported executor plan schema")
-        for key in required - {"schema"}:
+        for key in required - {"schema", "evidence_retention_days"}:
             if not isinstance(value[key], str) or not value[key]:
                 raise ExecutorError(f"executor plan {key} must be a non-empty string")
         attempt_store = Path(value["attempt_store"])
         generation_store = Path(value["generation_store"])
-        if not attempt_store.is_absolute() or not generation_store.is_absolute():
+        evidence_root = Path(value["evidence_root"])
+        evidence_keyring = Path(value["evidence_keyring"])
+        if not all(
+            path.is_absolute()
+            for path in (attempt_store, generation_store, evidence_root, evidence_keyring)
+        ):
             raise ExecutorError("executor store paths must be absolute")
+        retention = value["evidence_retention_days"]
+        if not isinstance(retention, int) or isinstance(retention, bool) or not 1 <= retention <= 3650:
+            raise ExecutorError("evidence_retention_days must be an integer between 1 and 3650")
         for key in ("request_digest", "subject", "scope"):
             _require_digest(value[key], f"executor plan {key}")
         return cls(
             attempt_store=attempt_store,
             generation_store=generation_store,
+            evidence_root=evidence_root,
+            evidence_keyring=evidence_keyring,
+            evidence_retention_days=retention,
             marginalia_dispatch_id=value["marginalia_dispatch_id"],
             request_digest=value["request_digest"],
             subject=value["subject"],
             scope=value["scope"],
         )
 
-    def canonical_value(self) -> dict[str, str]:
+    def canonical_value(self) -> dict[str, Any]:
         return {
             "attempt_store": str(self.attempt_store),
             "generation_store": str(self.generation_store),
+            "evidence_root": str(self.evidence_root),
+            "evidence_keyring": str(self.evidence_keyring),
+            "evidence_retention_days": self.evidence_retention_days,
             "marginalia_dispatch_id": self.marginalia_dispatch_id,
             "request_digest": self.request_digest,
             "schema": EXECUTOR_PLAN_SCHEMA,
