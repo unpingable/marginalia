@@ -2,9 +2,10 @@
   "private": true,
   "license": "Apache-2.0",
   "devDependencies": {
-    "@playwright/test": "^1.41.0"
+    "@playwright/test": "1.63.0"
   },
   "scripts": {
+    "test:browser": "playwright test --config=tools/playwright/playwright.config.ts",
     "shots:seed": "bash tools/screenshots/seed.sh",
     "shots:run": "npx playwright test --config=tools/screenshots/playwright.config.ts",
     "screenshots": "npm run shots:seed && npm run shots:run"

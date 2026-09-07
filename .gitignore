@@ -7,6 +7,9 @@ build/
 *.egg
 .pytest_cache/
 .env
+node_modules/
+test-results/
+playwright-report/
 
 # Local provider credentials; never tracked.
 .openrouter
