@@ -14,6 +14,19 @@ RUN npm install --global "@openai/codex@${CODEX_VERSION}" \
     && cp "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/${CODEX_PACKAGE}/vendor/${CODEX_TARGET}/bin/codex" /codex \
     && chmod 0755 /codex
 
+FROM rust:1.94.0-bookworm@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f AS generation-companions
+
+WORKDIR /build
+COPY AG_NG_CONTRACT_COMMIT DOCKET_CONTRACT_COMMIT ./
+COPY ag-ng/ ag-ng/
+COPY docket-runtime/ docket-runtime/
+RUN test "$(cat ag-ng/AG_NG_CONTRACT_COMMIT)" = "$(cat AG_NG_CONTRACT_COMMIT)" \
+    && test "$(cat docket-runtime/DOCKET_CONTRACT_COMMIT)" = "$(cat DOCKET_CONTRACT_COMMIT)" \
+    && cargo build --locked --release --manifest-path ag-ng/Cargo.toml -p ag-app --bin ag-loopctl \
+    && cargo build --locked --release --manifest-path docket-runtime/Cargo.toml -p gwr-local --bin docket \
+    && install -Dm0755 ag-ng/target/release/ag-loopctl /out/ag-loopctl \
+    && install -Dm0755 docket-runtime/target/release/docket /out/docket
+
 FROM python:3.11-slim@sha256:a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1
 
 WORKDIR /app
@@ -26,6 +39,7 @@ RUN pip install --no-cache-dir -r requirements.lock -r requirements-build.lock
 COPY LICENSE NOTICE /licenses/marginalia/
 COPY agent-governor/LICENSE agent-governor/NOTICE /licenses/agent-governor/
 COPY AG_CONTRACT_COMMIT /app/AG_CONTRACT_COMMIT
+COPY AG_NG_CONTRACT_COMMIT DOCKET_CONTRACT_COMMIT /app/
 COPY agent-governor/ /tmp/agent-governor/
 RUN test "$(cat /tmp/agent-governor/AG_CONTRACT_COMMIT)" = "$(cat /app/AG_CONTRACT_COMMIT)" \
     && pip install --no-cache-dir --no-build-isolation --no-deps /tmp/agent-governor/ \
@@ -45,9 +59,13 @@ COPY src/ src/
 RUN pip install --no-cache-dir --no-build-isolation --no-deps .
 
 COPY --from=codex-cli /codex /opt/codex/codex
+COPY --from=generation-companions /out/ag-loopctl /usr/local/bin/ag-loopctl
+COPY --from=generation-companions /out/docket /usr/local/bin/docket
 
 RUN python3 -c "import importlib.metadata as m; import fiction_governor, governor, receipt_kernel, receipt_v1, gov_webui; assert m.version('agent-governor') == '2.8.1'; assert m.version('marginalia') == '0.1.0'" \
-    && /opt/codex/codex --version
+    && /opt/codex/codex --version \
+    && /usr/local/bin/ag-loopctl --help >/dev/null \
+    && /usr/local/bin/docket --help >/dev/null
 
 # Operational identity is applied after dependency/application installation so
 # a new commit label does not invalidate the expensive reproducible build layers.
@@ -61,7 +79,9 @@ LABEL org.opencontainers.image.title="Marginalia" \
       org.opencontainers.image.version="0.1.0" \
       org.opencontainers.image.revision="${MARGINALIA_BUILD_SHA}" \
       org.opencontainers.image.created="${MARGINALIA_BUILD_TIME}" \
-      org.opencontainers.image.ref.name="${MARGINALIA_IMAGE_REF}"
+      org.opencontainers.image.ref.name="${MARGINALIA_IMAGE_REF}" \
+      org.marginalia.ag-ng.commit="cb85d363e2495a75f78c28fb8ce9b46af1f289c0" \
+      org.marginalia.docket.commit="c49ad8d0f26fb2a13b9dbafdde84d7abfe1f867b"
 ENV MARGINALIA_BUILD_SHA="${MARGINALIA_BUILD_SHA}" \
     MARGINALIA_BUILD_TIME="${MARGINALIA_BUILD_TIME}" \
     MARGINALIA_IMAGE_REF="${MARGINALIA_IMAGE_REF}"

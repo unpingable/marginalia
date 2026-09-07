@@ -24,9 +24,38 @@ services:
       - MARGINALIA_GOVERNOR_CHAT_TIMEOUT_SECONDS=${MARGINALIA_GOVERNOR_CHAT_TIMEOUT_SECONDS:-1830}
       - MARGINALIA_GOVERNOR_RPC_TIMEOUT_SECONDS=${MARGINALIA_GOVERNOR_RPC_TIMEOUT_SECONDS:-5}
       - MARGINALIA_GOVERNOR_WEDGE_SECONDS=${MARGINALIA_GOVERNOR_WEDGE_SECONDS:-1820}
+      - GOVERNOR_SOCKET=/run/marginalia/governor.sock
+      - MARGINALIA_DURABLE_GENERATION_AVAILABLE=${MARGINALIA_DURABLE_GENERATION_AVAILABLE:-false}
+      - MARGINALIA_EVIDENCE_KEY_FILE=/run/secrets/marginalia-generation/marginalia-evidence-keys.json
     volumes:
       - marginalia_data:/data
+      - marginalia_runtime:/run/marginalia
+      - ${MARGINALIA_GENERATION_SECRETS_HOST_PATH:-./secrets}:/run/secrets/marginalia-generation:ro
       - ${MARGINALIA_BACKUP_HOST_PATH:-./backups}:/backups
+    restart: unless-stopped
+
+  marginalia-generation:
+    profiles: ["durable-generation"]
+    image: ${MARGINALIA_IMAGE:-ghcr.io/unpingable/marginalia:0.1.0}
+    container_name: marginalia-generation
+    command: ["marginalia-generation-worker"]
+    environment:
+      - GOVERNOR_CONTEXTS_DIR=/data/.governor
+      - GOVERNOR_DAEMON_DIR=/data/.governor
+      - GOVERNOR_SOCKET=/run/marginalia/governor.sock
+      - MARGINALIA_AG_ISSUER_KEY_FILE=/run/secrets/marginalia-generation/marginalia-ag-issuer.pk8
+      - MARGINALIA_EVIDENCE_KEY_FILE=/run/secrets/marginalia-generation/marginalia-evidence-keys.json
+      - MARGINALIA_EVIDENCE_RETENTION_DAYS=${MARGINALIA_EVIDENCE_RETENTION_DAYS:-30}
+      - MARGINALIA_GENERATION_POLL_SECONDS=${MARGINALIA_GENERATION_POLL_SECONDS:-2}
+    volumes:
+      - marginalia_data:/data
+      - marginalia_runtime:/run/marginalia
+      - ${MARGINALIA_GENERATION_SECRETS_HOST_PATH:-./secrets}:/run/secrets/marginalia-generation:ro
+    depends_on:
+      marginalia:
+        condition: service_healthy
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
   marginalia-backup:
@@ -69,3 +98,4 @@ services:
 
 volumes:
   marginalia_data:
+  marginalia_runtime:

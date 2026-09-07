@@ -27,6 +27,7 @@ from gov_webui.generation_boundaries import (
     generation_subject,
 )
 from gov_webui.generation_executor import EXECUTOR_PLAN_SCHEMA, EXECUTOR_WORK_SCHEMA, ExecutorPlan
+from gov_webui.evidence_store import EncryptedEvidenceStore
 from gov_webui.generation_store import (
     Dispatch,
     DispatchStatus,
@@ -501,6 +502,16 @@ def run_once(config: WorkerConfig) -> list[dict[str, str]]:
                 results.append({"request_id": request.id, "state": state})
             except Exception as exc:
                 results.append({"request_id": request.id, "state": "error", "error": str(exc)})
+        evidence = EncryptedEvidenceStore(
+            path.parent / "generation-evidence",
+            config.evidence_keyring,
+            retention_days=config.retention_days,
+        )
+        try:
+            for evidence_id in evidence.purge_expired():
+                results.append({"evidence_id": evidence_id, "state": "evidence_purged"})
+        except Exception as exc:
+            results.append({"state": "evidence_purge_error", "error": str(exc)})
     return results
 
 

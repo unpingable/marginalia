@@ -29,6 +29,22 @@ jobs:
           path: _agent_gov
           fetch-depth: 1
 
+      - name: Checkout the qualified ag-ng contract
+        uses: actions/checkout@v4
+        with:
+          repository: unpingable/ag_ng
+          ref: cb85d363e2495a75f78c28fb8ce9b46af1f289c0
+          path: _ag_ng
+          fetch-depth: 1
+
+      - name: Checkout the qualified Docket contract
+        uses: actions/checkout@v4
+        with:
+          repository: unpingable/docket-campaign
+          ref: c49ad8d0f26fb2a13b9dbafdde84d7abfe1f867b
+          path: _docket
+          fetch-depth: 1
+
       - name: Verify immutable source contracts
         shell: bash
         run: |
@@ -36,6 +52,8 @@ jobs:
           expected="$(tr -d '[:space:]' < AG_CONTRACT_COMMIT)"
           actual="$(git -C _agent_gov rev-parse HEAD)"
           test "$actual" = "$expected"
+          test "$(git -C _ag_ng rev-parse HEAD)" = "$(tr -d '[:space:]' < AG_NG_CONTRACT_COMMIT)"
+          test "$(git -C _docket rev-parse HEAD)" = "$(tr -d '[:space:]' < DOCKET_CONTRACT_COMMIT)"
           test -f _agent_gov/src/fiction_governor/canon_capture.py
           test -d _agent_gov/libs/receipt_kernel/src/receipt_kernel
           test -d _agent_gov/libs/receipt_v1/src/receipt_v1
@@ -62,25 +80,21 @@ jobs:
       - name: Verify Marginalia
         run: |
           python -m ruff check src tests
-          MARGINALIA_AG_SOURCE_DIR="$PWD/_agent_gov" python -m pytest -q
+          MARGINALIA_AG_SOURCE_DIR="$PWD/_agent_gov" \
+          MARGINALIA_AG_NG_SOURCE_DIR="$PWD/_ag_ng" \
+          MARGINALIA_DOCKET_SOURCE_DIR="$PWD/_docket" \
+            python -m pytest -q
           python -m build --no-isolation
 
       - name: Stage the complete qualified AG distribution
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf agent-governor receipt-kernel receipt-v1
-          mkdir -p agent-governor receipt-kernel/src receipt-v1
-          cp _agent_gov/pyproject.toml _agent_gov/README.md agent-governor/
-          cp _agent_gov/LICENSE _agent_gov/NOTICE agent-governor/
-          cp -R _agent_gov/src agent-governor/
-          cp AG_CONTRACT_COMMIT agent-governor/
-          cp _agent_gov/libs/receipt_kernel/pyproject.toml \
-            _agent_gov/libs/receipt_kernel/README.md receipt-kernel/
-          cp -R _agent_gov/libs/receipt_kernel/src/receipt_kernel receipt-kernel/src/
-          cp _agent_gov/libs/receipt_v1/pyproject.toml receipt-v1/
-          cp -R _agent_gov/libs/receipt_v1/src receipt-v1/
-          rm -rf _agent_gov
+          MARGINALIA_AG_SOURCE_DIR="$PWD/_agent_gov" \
+          MARGINALIA_AG_NG_SOURCE_DIR="$PWD/_ag_ng" \
+          MARGINALIA_DOCKET_SOURCE_DIR="$PWD/_docket" \
+            ./sync-deps.sh
+          rm -rf _agent_gov _ag_ng _docket
 
       - name: Build and smoke the local appliance image
         run: |
@@ -88,6 +102,8 @@ jobs:
           docker run --rm --entrypoint python3 marginalia:ci -c \
             'import fiction_governor, governor, gov_webui, receipt_kernel, receipt_v1'
           docker run --rm --entrypoint /opt/codex/codex marginalia:ci --version
+          docker run --rm --entrypoint /usr/local/bin/ag-loopctl marginalia:ci --help
+          docker run --rm --entrypoint /usr/local/bin/docket marginalia:ci --help
 
       - name: Set up emulation for the arm64 appliance
         uses: docker/setup-qemu-action@v3

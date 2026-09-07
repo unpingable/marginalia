@@ -15,6 +15,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 AG_ROOT = Path(
     os.environ.get("MARGINALIA_AG_SOURCE_DIR", REPO_ROOT.parents[1] / "agent_gov")
 ).resolve()
+AG_NG_ROOT = Path(
+    os.environ.get("MARGINALIA_AG_NG_SOURCE_DIR", REPO_ROOT.parents[1] / "ag_ng")
+).resolve()
+DOCKET_ROOT = Path(
+    os.environ.get("MARGINALIA_DOCKET_SOURCE_DIR", REPO_ROOT.parents[1] / "docket")
+).resolve()
 
 
 def test_sync_stages_the_complete_qualified_ag_distribution(tmp_path: Path) -> None:
@@ -22,9 +28,13 @@ def test_sync_stages_the_complete_qualified_ag_distribution(tmp_path: Path) -> N
     probe.mkdir()
     shutil.copy2(REPO_ROOT / "sync-deps.sh", probe / "sync-deps.sh")
     shutil.copy2(REPO_ROOT / "AG_CONTRACT_COMMIT", probe / "AG_CONTRACT_COMMIT")
+    shutil.copy2(REPO_ROOT / "AG_NG_CONTRACT_COMMIT", probe / "AG_NG_CONTRACT_COMMIT")
+    shutil.copy2(REPO_ROOT / "DOCKET_CONTRACT_COMMIT", probe / "DOCKET_CONTRACT_COMMIT")
 
     environment = os.environ.copy()
     environment["MARGINALIA_AG_SOURCE_DIR"] = str(AG_ROOT)
+    environment["MARGINALIA_AG_NG_SOURCE_DIR"] = str(AG_NG_ROOT)
+    environment["MARGINALIA_DOCKET_SOURCE_DIR"] = str(DOCKET_ROOT)
     subprocess.run(
         ["bash", str(probe / "sync-deps.sh")],
         cwd=probe,
@@ -43,6 +53,14 @@ def test_sync_stages_the_complete_qualified_ag_distribution(tmp_path: Path) -> N
     assert (staged / "src" / "fiction_governor" / "canon_capture.py").is_file()
     assert (probe / "receipt-kernel" / "src" / "receipt_kernel" / "__init__.py").is_file()
     assert (probe / "receipt-v1" / "src" / "receipt_v1" / "__init__.py").is_file()
+    assert (probe / "ag-ng" / "AG_NG_CONTRACT_COMMIT").read_text().strip() == (
+        REPO_ROOT / "AG_NG_CONTRACT_COMMIT"
+    ).read_text().strip()
+    assert (probe / "ag-ng" / "crates" / "ag-app" / "Cargo.toml").is_file()
+    assert (probe / "docket-runtime" / "DOCKET_CONTRACT_COMMIT").read_text().strip() == (
+        REPO_ROOT / "DOCKET_CONTRACT_COMMIT"
+    ).read_text().strip()
+    assert (probe / "docket-runtime" / "crates" / "gwr-local" / "Cargo.toml").is_file()
 
 
 def _write_fake_docker(bin_dir: Path) -> Path:
@@ -214,15 +232,28 @@ def test_release_contract_names_and_pins_the_complete_marginalia_appliance() -> 
     assert "ref: marginalia-chat-contract-m0" in workflow
     assert "linux/amd64,linux/arm64" in workflow
     assert "docker/setup-qemu-action@v3" in workflow
-    assert "cp -R _agent_gov/src agent-governor/" in workflow
-    assert "_agent_gov/libs/receipt_kernel/src/receipt_kernel" in workflow
+    assert "repository: unpingable/ag_ng" in workflow
+    assert "ref: cb85d363e2495a75f78c28fb8ce9b46af1f289c0" in workflow
+    assert "repository: unpingable/docket-campaign" in workflow
+    assert "ref: c49ad8d0f26fb2a13b9dbafdde84d7abfe1f867b" in workflow
+    assert "./sync-deps.sh" in workflow
     assert "IMAGE_NAME: ${{ github.repository_owner }}/phosphor" not in workflow
     assert "import fiction_governor" in dockerfile
     assert "import fiction_governor, governor, receipt_kernel, receipt_v1" in dockerfile
     assert "@openai/codex@${CODEX_VERSION}" in dockerfile
     assert "CODEX_BINARY" not in codex_compose
     assert "auth.json:ro" not in codex_compose
-    assert project["scripts"] == {"marginalia-server": "gov_webui.adapter:main"}
+    required_scripts = {
+        "marginalia-server": "gov_webui.adapter:main",
+        "marginalia-generation-executor": "gov_webui.generation_executor_cli:main",
+        "marginalia-generation-worker": "gov_webui.generation_worker:main",
+        "marginalia-generation-secrets": "gov_webui.generation_secrets:main",
+    }
+    assert required_scripts.items() <= project["scripts"].items()
+    assert "AG_NG_CONTRACT_COMMIT" in dockerfile
+    assert "DOCKET_CONTRACT_COMMIT" in dockerfile
+    assert "/usr/local/bin/ag-loopctl" in dockerfile
+    assert "/usr/local/bin/docket" in dockerfile
     assert f'MARGINALIA_VERSION="{project["version"]}"' in (REPO_ROOT / "marginalia").read_text()
     assert (
         'DEFAULT_IMAGE="ghcr.io/unpingable/marginalia:${MARGINALIA_VERSION}"'

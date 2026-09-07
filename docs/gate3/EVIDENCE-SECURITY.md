@@ -6,10 +6,10 @@ not introduce a separate security platform.
 
 ## Ownership and access
 
-- The Marginalia generation worker is the only process that creates provider
+- The `marginalia-generation` process is the only process that creates provider
   response blobs. It writes authenticated AES-256-GCM envelopes below the
   selected project's `<context>/marginalia/generation-evidence/blobs/` directory.
-- The Marginalia application reads a blob only while reconciling or accepting
+- The `marginalia` web process reads a blob only while reconciling or accepting
   its exact candidate. Every read, refused expired read, write, and purge is
   appended to `generation-evidence/access.jsonl` without response content.
 - The backup worker can read the data volume and therefore copies ciphertext,
@@ -34,6 +34,13 @@ restored into an isolated root and its ciphertext is decrypted with that
 separately supplied keyring. Losing the keyring makes retained ciphertext
 unrecoverable; restoring a data volume alone must not be reported as response
 recovery.
+
+Compose mounts the host generation-secret directory read-only into the web and
+generation-worker containers. The backup container receives neither that mount
+nor the keyring. The current appliance runs both readers as the container's root
+identity; host file mode 0600 and local Docker administration are therefore the
+concrete access boundary. Key creation is one-shot and refuses to replace either
+existing file.
 
 ## Retention and backup consequence
 

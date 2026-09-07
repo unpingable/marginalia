@@ -35,6 +35,13 @@ You can:
 - compile or export Markdown and DOCX, plus a portable project archive;
 - back up and restore a workspace without turning provider failures into story.
 
+When the deployment enables durable generation, its project-level switch is
+the first control in **Project direction → Generation reliability**. It keeps
+work in custody across tab disconnects, shows an explicit indeterminate state
+while reconciliation continues, and permits an optional fallback only after a
+confirmed failure. Turning it off stops new dispatches; it does not abandon or
+synchronously reroute work already in custody.
+
 ## Install and start writing
 
 Marginalia currently runs as a local Docker appliance. The supported launcher
@@ -121,6 +128,8 @@ contaminating the story.
 
 See [RELIABILITY.md](docs/RELIABILITY.md) for the exact generation,
 concurrency, timeout, and context-budget contracts.
+Deployment activation, separate key recovery, and rollback checks are in
+[Gate 3 durable generation operations](docs/gate3/DURABLE-GENERATION-OPERATIONS.md).
 
 ## Your data, backups, and exports
 

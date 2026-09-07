@@ -46,6 +46,7 @@ marginalia-observation-resolver = "gov_webui.generation_boundaries:observation_m
 marginalia-standing-resolver = "gov_webui.generation_boundaries:standing_main"
 marginalia-docket-standing-resolver = "gov_webui.generation_boundaries:docket_standing_main"
 marginalia-generation-worker = "gov_webui.generation_worker:main"
+marginalia-generation-secrets = "gov_webui.generation_secrets:main"
 
 [project.urls]
 Homepage = "https://github.com/unpingable/marginalia"

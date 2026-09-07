@@ -12,6 +12,8 @@ build/
 .openrouter
 .openrouter*
 agent-governor/
+ag-ng/
+docket-runtime/
 receipt-v1/
 receipt-kernel/
 

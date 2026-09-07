@@ -15,6 +15,33 @@ fi
 AGENT_GOV_CANDIDATE="${MARGINALIA_AG_SOURCE_DIR:-$SCRIPT_DIR/../../agent_gov}"
 AGENT_GOV_DIR="$(cd "$AGENT_GOV_CANDIDATE" && pwd)"
 EXPECTED_AG_COMMIT="$(tr -d '[:space:]' < "$SCRIPT_DIR/AG_CONTRACT_COMMIT")"
+AG_NG_CANDIDATE="${MARGINALIA_AG_NG_SOURCE_DIR:-$SCRIPT_DIR/../../ag_ng}"
+DOCKET_CANDIDATE="${MARGINALIA_DOCKET_SOURCE_DIR:-$SCRIPT_DIR/../../docket}"
+AG_NG_DIR="$(cd "$AG_NG_CANDIDATE" && pwd)"
+DOCKET_DIR="$(cd "$DOCKET_CANDIDATE" && pwd)"
+EXPECTED_AG_NG_COMMIT="$(tr -d '[:space:]' < "$SCRIPT_DIR/AG_NG_CONTRACT_COMMIT")"
+EXPECTED_DOCKET_COMMIT="$(tr -d '[:space:]' < "$SCRIPT_DIR/DOCKET_CONTRACT_COMMIT")"
+
+export_exact_tree() {
+  local label="$1"
+  local source_dir="$2"
+  local commit="$3"
+  local destination="$4"
+  local marker="$5"
+  local temporary
+
+  if ! git -C "$source_dir" cat-file -e "$commit^{commit}" 2>/dev/null; then
+    echo "Error: $label source at $source_dir does not contain required commit $commit" >&2
+    echo "Fetch that exact commit without changing its working tree, then retry." >&2
+    exit 1
+  fi
+  temporary="$(mktemp -d "$SCRIPT_DIR/.sync-${label}.XXXXXX")"
+  git -C "$source_dir" archive "$commit" | tar -x -C "$temporary"
+  printf '%s\n' "$commit" > "$temporary/$marker"
+  rm -rf "$destination"
+  mv "$temporary" "$destination"
+  echo "Exported exact $label tree $commit from $source_dir"
+}
 
 # ── agent-governor ────────────────────────────────────────────────────────
 if [ ! -d "$AGENT_GOV_DIR/src/governor" ]; then
@@ -68,5 +95,15 @@ else
   echo "Error: receipt_v1 source not found at $RECEIPT_V1_DIR" >&2
   exit 1
 fi
+
+# ── ag-ng + Docket runtime ───────────────────────────────────────────────
+# Export the pinned objects rather than copying either checkout. Their current
+# branches and uncommitted campaign work are deliberately irrelevant.
+export_exact_tree \
+  ag-ng "$AG_NG_DIR" "$EXPECTED_AG_NG_COMMIT" \
+  "$SCRIPT_DIR/ag-ng" AG_NG_CONTRACT_COMMIT
+export_exact_tree \
+  docket "$DOCKET_DIR" "$EXPECTED_DOCKET_COMMIT" \
+  "$SCRIPT_DIR/docket-runtime" DOCKET_CONTRACT_COMMIT
 
 # ── Add new local deps above this line ────────────────────────────────────

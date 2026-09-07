@@ -4,17 +4,20 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from gov_webui.generation_boundaries import ag_digest
+from gov_webui.evidence_store import EncryptedEvidenceStore, create_keyring
 from gov_webui.generation_store import GenerationStore
 from gov_webui.generation_worker import (
     GenerationWorkerError,
     GovernedGeneration,
     WorkerConfig,
     ring_ed25519_public_key,
+    run_once,
 )
 
 
@@ -185,3 +188,36 @@ def test_restart_continues_immutable_command_log_sequence(tmp_path: Path) -> Non
     restarted = GovernedGeneration(config, store, request, dispatch)
 
     assert restarted._sequence == 7
+
+
+def test_worker_purges_expired_live_evidence(tmp_path: Path) -> None:
+    contexts = tmp_path / "contexts"
+    evidence_keyring = tmp_path / "secrets" / "keys.json"
+    create_keyring(evidence_keyring, key_id="active", key=b"k" * 32)
+    store = GenerationStore(contexts / "ctx" / "marginalia" / "generation.sqlite")
+    evidence = EncryptedEvidenceStore(
+        store.path.parent / "generation-evidence", evidence_keyring, retention_days=1
+    )
+    created = evidence.write(
+        {"content": "expired"},
+        logical_request_id="logical",
+        dispatch_id="dispatch",
+        docket_attempt="attempt",
+        now=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+    evidence_id = created.reference.rsplit(":", 1)[1]
+    config = WorkerConfig(
+        contexts_root=contexts,
+        ag_loopctl=tmp_path / "ag",
+        docket=tmp_path / "docket",
+        observation_resolver=tmp_path / "observation",
+        standing_resolver=tmp_path / "standing",
+        docket_standing_resolver=tmp_path / "docket-standing",
+        executor=tmp_path / "executor",
+        issuer_key=tmp_path / "issuer",
+        evidence_keyring=evidence_keyring,
+        retention_days=1,
+    )
+
+    assert run_once(config) == [{"evidence_id": evidence_id, "state": "evidence_purged"}]
+    assert not (evidence.blobs / f"{evidence_id}.json").exists()
