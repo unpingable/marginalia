@@ -253,7 +253,9 @@ time.sleep(60)
             "CODEX_NATIVE_PATH": str(hanging),
             "FIXTURE_PROVIDER_PID": str(pid_file),
             "FIXTURE_DESCENDANT_PID": str(child_file),
-            "MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS": "0.2",
+            # The 60-second fixture hang, not interpreter startup, must exceed
+            # the supervisor deadline on a loaded qualification host.
+            "MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS": "2",
             "MARGINALIA_PROVIDER_CLEANUP_GRACE_SECONDS": "0.2",
         }
     )
@@ -266,8 +268,10 @@ time.sleep(60)
         check=False,
     )
     assert failed.returncode == 1
-    assert time.monotonic() - started < 2
-    assert b"timed out after 0.2 seconds" in failed.stderr
+    assert time.monotonic() - started < 5
+    assert b"timed out after 2 seconds" in failed.stderr
+    assert pid_file.exists(), "timeout elapsed before the fixture provider started"
+    assert child_file.exists(), "fixture provider did not start its child"
 
     pids = [int(pid_file.read_text()), int(child_file.read_text())]
     for _ in range(100):
@@ -287,8 +291,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_toke
     )
     healthy.chmod(0o755)
     env["CODEX_NATIVE_PATH"] = str(healthy)
-    # Keep A's deliberately tiny deadline focused on the hang.  A cold hosted
-    # runner can require more than 200 ms merely to start the recovery fixture.
+    # Keep the same startup-tolerant bound for the recovery fixture.
     env["MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS"] = "2"
     recovered = subprocess.run(
         [sys.executable, "-m", "gov_webui.provider_supervisor", "exec", "-"],
