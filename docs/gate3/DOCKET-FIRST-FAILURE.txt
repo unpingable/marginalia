@@ -1,0 +1,15 @@
+Gate 3A initial host qualification failure
+Run context: cargo test --workspace --all-targets
+Docket source: c49ad8d0f26fb2a13b9dbafdde84d7abfe1f867b
+
+---- custody_boundary_specimen_shows_premise_and_conflicting_evidence stdout ----
+
+thread 'custody_boundary_specimen_shows_premise_and_conflicting_evidence' panicked at crates/gwr-local/tests/dossier.rs:275:5:
+assertion failed: matches!(out, DispatchOutcome::Indeterminate(_))
+
+failures:
+    custody_boundary_specimen_shows_premise_and_conflicting_evidence
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+
+The same test subsequently passed alone. That isolated result is diagnostic only and is not qualification.

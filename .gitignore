@@ -17,3 +17,6 @@ receipt-kernel/
 
 # Claude Code local session data
 .claude/projects/
+
+# Local Gate 3 VM disks, keys, sockets, and unsealed qualification logs.
+.gate3/
