@@ -88,9 +88,10 @@ only and never selects a classic or synchronous bypass.
 ## Backup, keys, and rollback
 
 The definitive post-deployment backup is
-`/backups/erin/marginalia-erin-20260908T103819222255Z.zip`, SHA-256
-`bfdba72a634633eaec829ddcc6c28b133b17bdc048375479c2298f94c719fcf4`.
-Verification and isolated restore loaded the exact census above. The active
+`/backups/erin/marginalia-erin-20260908T104218460695Z.zip`, SHA-256
+`8b4aad79a406078e9447694bf90db66cb04ad9f56ea3054207a472acbda5de04`.
+It was created after maintenance was lifted, so restoring it does not revive the
+cutover banner. Verification and isolated restore loaded the exact census above. The active
 evidence key version is `marginalia-evidence-v1`; the separately recoverable NAS
 copy and decrypt-tested sample are documented in `docs/gate3/NAS-KEY-RECOVERY.md`.
 Live evidence expiry does not erase retained backup ciphertext.
