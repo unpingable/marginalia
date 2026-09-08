@@ -1,5 +1,19 @@
 # Next work
 
+## Full ag-ng migration candidate — 2026-09-08
+
+Agent Governor classic is no longer a Marginalia runtime dependency. Candidate
+`8d672105d0c179120ba516f9df7254f0fa2a2cbd` composes ag-ng authorization,
+Docket attempt custody, credential-isolated `ag-providerd`, and Marginalia's
+revision/canon-checked acceptance boundary. The qualified image and deployment
+preconditions are recorded in `docs/ag-ng-migration/`.
+
+Production is intentionally unchanged. The remaining operational action is the
+separately approved production cutover, beginning with OpenRouter credential
+rotation and file-mounted NAS custody. After cutover, pause broad feature work
+for Erin's real-use feedback and passive telemetry. The priority backlog below
+remains the planning record; it is not an executable campaign.
+
 ## Planner/executor contract campaign — 2026-09-05
 
 A fourth incident on session `78fc7d45675f4a21` produced three `context_maintenance`
