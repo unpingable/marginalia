@@ -1,8 +1,16 @@
-# Full ag-ng migration — production deployment packet
+# Full ag-ng migration — superseded production deployment packet
 
 Candidate: `718ac4549a99b24bd935432ecf44eda45acac9f3`
 Qualified local image ID:
 `sha256:2a958bd3f9c3b64aeb003086f28f6869a69ea1ae1ee27dd683b97645d1888289`
+
+> **Deployment readiness withdrawn 2026-09-08.** Production-shaped provider
+> validation found that this image's generated policy duplicated one physical
+> Claude model and therefore could not reach provider-daemon readiness. The
+> image and the evidence below remain historical qualification records only;
+> they must not be deployed. The replacement campaign pins ag-ng
+> `466dcf2d2dc1ec63ebbde2c7f0b53f2fcf666b95` and will publish a new packet
+> after corrected deployment-parity and live-route qualification.
 
 Production has **not** been changed by this campaign. Do not deploy until the
 owner gives a separate production decision.

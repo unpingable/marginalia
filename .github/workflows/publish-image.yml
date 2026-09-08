@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: unpingable/ag_ng
-          ref: c3210f156208b22bf21e7bd1910a84a85b519538
+          ref: 466dcf2d2dc1ec63ebbde2c7f0b53f2fcf666b95
           path: _ag_ng
           fetch-depth: 1
 

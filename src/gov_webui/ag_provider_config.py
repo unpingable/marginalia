@@ -98,7 +98,7 @@ def render_provider_configs(
         grouped.setdefault(model.provider_id, []).append(model)
 
     daemon = [
-        'schema = "ag.config.providerd.v1"',
+        'schema = "ag.config.providerd.v2"',
         'security_profile = "production"',
         f"authority_domain = {_toml(authority_domain)}",
         f"epoch = {_toml(epoch)}",
@@ -162,43 +162,69 @@ def render_provider_configs(
             parsed = urlsplit(_endpoint_url(sample))
             plaintext = parsed.scheme == "http"
             if plaintext and sample.inference != "local":
-                raise ValueError("plaintext HTTP is admitted only for providers declared local")
+                raise ValueError(
+                    f"provider {provider_id!r}: plaintext HTTP is admitted only for "
+                    "providers declared local"
+                )
             credential = _credential_name(sample.api_key_env) if sample.api_key_env else ""
+            if not plaintext and not credential:
+                raise ValueError(
+                    f"provider {provider_id!r}: remote HTTPS API requires an enrolled credential"
+                )
             header = "x-api-key" if sample.protocol == "anthropic-messages" else "authorization"
             prefix = "" if sample.protocol == "anthropic-messages" else "Bearer "
             daemon.extend(
                 [
-                    f"url = {_toml(_endpoint_url(sample))}",
-                    f"allow_plaintext_http = {str(plaintext).lower()}",
-                    f"credential_name = {_toml(credential)}",
-                    f"credential_header = {_toml(header if credential else '')}",
-                    f"credential_prefix = {_toml(prefix if credential else '')}",
                     'protocol = "opaque_json_v1"',
                     f"methods = [{_toml('messages.create' if sample.protocol == 'anthropic-messages' else 'chat.completions.create')}]",
+                    "[endpoints.transport]",
                 ]
             )
+            if plaintext:
+                origin = f"{parsed.scheme}://{parsed.netloc}"
+                daemon.extend(
+                    [
+                        'kind = "local_http"',
+                        f"url = {_toml(_endpoint_url(sample))}",
+                        f"allowed_origins = [{_toml(origin)}]",
+                        'redirect_policy = "deny"',
+                    ]
+                )
+            else:
+                daemon.extend(
+                    [
+                        'kind = "credentialed_https_api"',
+                        f"url = {_toml(_endpoint_url(sample))}",
+                        f"credential_name = {_toml(credential)}",
+                        f"credential_header = {_toml(header)}",
+                        f"credential_prefix = {_toml(prefix)}",
+                    ]
+                )
             if sample.protocol == "anthropic-messages":
                 daemon.extend(["[endpoints.headers]", 'anthropic-version = "2023-06-01"'])
         else:
             adapter, executable, working_directory, child_environment = _command(sample, env)
             daemon.extend(
                 [
-                    'url = ""',
-                    'credential_name = ""',
-                    'credential_header = ""',
-                    'credential_prefix = ""',
                     'protocol = "opaque_json_v1"',
                     'methods = ["command.complete"]',
-                    "[endpoints.command]",
+                    "[endpoints.transport]",
+                    'kind = "command"',
+                    "[endpoints.transport.command]",
                     f"adapter = {_toml(adapter)}",
                     f"executable = {_toml(executable)}",
                     f"working_directory = {_toml(working_directory)}",
-                    "[endpoints.command.environment]",
+                    "[endpoints.transport.command.environment]",
                 ]
             )
             for name, value in sorted(child_environment.items()):
                 daemon.append(f"{name} = {_toml(value)}")
-        for model in models:
+        # Several Erin-facing selections may intentionally resolve to the same
+        # provider/model pair (for example two Claude presets). ag-ng policy is
+        # keyed by the physical backend model, so emit that policy once while
+        # preserving every selection in providers.json.
+        physical_models = {model.model_id: model for model in models}
+        for model in physical_models.values():
             daemon.extend(
                 [
                     "[[endpoints.models]]",

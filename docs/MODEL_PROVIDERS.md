@@ -77,10 +77,17 @@ Supported protocols are:
 
 | Protocol | Dispatch | Credential location |
 |---|---|---|
-| `openai-compatible` | HTTPS, or HTTP only when `inference` is `local` | optional providerd file |
+| `openai-compatible` | credentialed HTTPS, or allowlisted HTTP only when `inference` is `local` | required for HTTPS; absent for local HTTP |
 | `anthropic-messages` | HTTPS Anthropic Messages | required providerd file |
 | `existing-command` | image-provided Codex command | providerd auth volume |
 | `local-command` | configured Claude Code or Kimi Code executable | providerd auth volume |
+
+Generated ag-ng policy uses the incompatible, explicit
+`ag.config.providerd.v2` transport shape. Remote credentials cannot be
+omitted. Local HTTP records the exact configured origin in an operator-owned
+allowlist and denies redirects. Command routes name a fixed executable,
+working directory, built-in adapter, and closed environment; prompts never
+become shell or caller-selected argv.
 
 `purpose` is `writing` or `context-maintenance`. The catalog default must be a
 writing model. Model IDs are stable application choices; upstream model names
@@ -127,7 +134,10 @@ docker run --rm \
 ```
 
 The deployment qualification also performs a real `providerctl`/`providerd`
-cross-process request; parser success alone is insufficient.
+cross-process request. It must generate the actual production-shaped catalog,
+load it using the exact candidate daemon, preserve every provider selection,
+and exercise credentialed HTTPS, local HTTP, and command-route fixtures.
+Parser success alone is insufficient.
 
 ## Writer-facing selection and status
 
