@@ -187,6 +187,13 @@ def test_transport_failures_remain_liveness_failures() -> None:
     assert _failure_class(httpx.ReadTimeout("x", request=request)) == "read_timeout"
 
 
+def test_each_scheduled_probe_window_has_a_fresh_durable_identity() -> None:
+    from gov_webui.synthetic_worker import _scheduled_marker
+
+    assert _scheduled_marker(1000) == "scheduled-1000"
+    assert _scheduled_marker(1001) != _scheduled_marker(1000)
+
+
 def test_accounting_without_an_estimate_still_records_cost() -> None:
     """An unbudgeted request has no estimate, but still has a bill."""
     accounting = RequestAccounting(

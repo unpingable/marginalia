@@ -110,6 +110,8 @@ async def generate_internal(
         guidance = guidance_fingerprint(context_root)
         existing = generation_store.get_by_client_id(project_id, client_id)
         if existing is None:
+            if not generation_store.dispatch_enabled(project_id):
+                raise InternalGenerationError("new dispatches are disabled for this project")
             try:
                 created = generation_store.create_request(
                     client_request_id=client_id,
@@ -130,7 +132,12 @@ async def generate_internal(
             except (GenerationDisabled, IdempotencyConflict) as exc:
                 raise InternalGenerationError(str(exc)) from exc
             logical = created.request
-            generation_store.reserve_dispatch(logical.id)
+            try:
+                generation_store.reserve_dispatch(logical.id)
+            except GenerationDisabled as exc:
+                if created.created:
+                    generation_store.block_undispatched(logical.id, str(exc))
+                raise InternalGenerationError(str(exc)) from exc
         else:
             logical = existing
 

@@ -3347,6 +3347,7 @@ async def chat_completions(
                 for model, route in durable_settings.fallback_policy
                 if model != selected_model
             ]
+            created = None
             try:
                 created = durable_store.create_request(
                     client_request_id=request.client_request_id,
@@ -3374,6 +3375,8 @@ async def chat_completions(
             except IdempotencyConflict as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             except GenerationDisabled as exc:
+                if created is not None and created.created:
+                    durable_store.block_undispatched(created.request.id, str(exc))
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
         return JSONResponse(
             status_code=202,

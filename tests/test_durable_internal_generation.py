@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from gov_webui.durable_internal_generation import (
+    InternalGenerationError,
     accept_internal_results,
     generate_internal,
 )
@@ -16,6 +17,35 @@ from gov_webui.evidence_store import EncryptedEvidenceStore, create_keyring
 from gov_webui.generation_acceptance import accept_candidate
 from gov_webui.generation_store import GenerationStore, LogicalStatus
 from gov_webui.session_store import SessionStore
+
+
+@pytest.mark.asyncio
+async def test_paused_internal_generation_does_not_leave_queued_custody(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    sessions = SessionStore(context / "sessions")
+    session = sessions.create("ctx", model="summary-model")
+    generations = GenerationStore(context / "marginalia" / "generation.sqlite")
+    keyring = tmp_path / "keys.json"
+    create_keyring(keyring, key_id="test", key=b"k" * 32)
+
+    with pytest.raises(InternalGenerationError, match="dispatches are disabled"):
+        await generate_internal(
+            purpose="synthetic",
+            project_id="project",
+            context_id="ctx",
+            context_root=context,
+            session_id=session.id,
+            session_store=sessions,
+            generation_store=generations,
+            evidence_store=EncryptedEvidenceStore(context / "marginalia" / "evidence", keyring),
+            messages=[{"role": "user", "content": "Probe."}],
+            configured_model="summary-model",
+            provider_id="provider",
+        )
+
+    assert generations.list_requests() == []
 
 
 @pytest.mark.asyncio

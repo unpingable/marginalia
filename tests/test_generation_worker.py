@@ -31,6 +31,46 @@ def test_program_counter_is_read_from_the_single_authoritative_variant() -> None
     )
 
 
+def test_paused_queued_work_is_retained_without_worker_error_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contexts = tmp_path / "contexts"
+    store = GenerationStore(contexts / "ctx" / "marginalia" / "generation.sqlite")
+    request = store.create_request(
+        client_request_id="paused",
+        project_id="project",
+        session_id="session",
+        expected_revision=0,
+        canon_fingerprint="canon",
+        guidance_fingerprint="guidance",
+        original_model="model",
+        original_route="route",
+        request={"context_id": "ctx", "messages": [], "model": "model"},
+    ).request
+    keyring = tmp_path / "keys.json"
+    create_keyring(keyring, key_id="test", key=b"k" * 32)
+    config = WorkerConfig(
+        contexts_root=contexts,
+        ag_loopctl=tmp_path / "ag",
+        docket=tmp_path / "docket",
+        observation_resolver=tmp_path / "observation",
+        standing_resolver=tmp_path / "standing",
+        docket_standing_resolver=tmp_path / "docket-standing",
+        executor=tmp_path / "executor",
+        issuer_key=tmp_path / "issuer",
+        evidence_keyring=keyring,
+    )
+    attempted = []
+    monkeypatch.setattr(
+        "gov_webui.generation_worker.process_one",
+        lambda *_args: attempted.append(True),
+    )
+
+    assert run_once(config) == []
+    assert attempted == []
+    assert store.get_request(request.id).status is LogicalStatus.QUEUED
+
+
 def test_ring_pkcs8_key_requires_matching_embedded_public_key() -> None:
     document = bytes.fromhex(
         "3051020101300506032b657004220420c226c22f628685cd349518c28eff015f"

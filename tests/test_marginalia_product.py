@@ -337,6 +337,7 @@ def test_internal_synthetic_generation_cannot_mutate_writer_sessions(
     monkeypatch.setattr(adapter, "generate_internal", generate)
     monkeypatch.setattr(adapter, "accept_internal_results", accept)
     monkeypatch.setattr(adapter, "EncryptedEvidenceStore", lambda *_args, **_kwargs: evidence)
+    adapter._get_generation_store().set_dispatch_enabled("default", True)
 
     response = client.post(
         "/v1/internal/synthetic-governor",

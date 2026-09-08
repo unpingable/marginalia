@@ -514,6 +514,12 @@ def run_once(config: WorkerConfig) -> list[dict[str, str]]:
                 LogicalStatus.FAILED,
             )
         ):
+            # A paused project may retain queued custody for later recovery, but
+            # it must not become a hot error loop or start a physical dispatch.
+            if request.status is LogicalStatus.QUEUED and not store.dispatch_enabled(
+                request.project_id
+            ):
+                continue
             if request.status is LogicalStatus.FAILED:
                 used = len(store.list_dispatches(request.id))
                 available = 1 + len(request.fallback_policy)

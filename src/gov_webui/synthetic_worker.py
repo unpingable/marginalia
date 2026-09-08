@@ -147,6 +147,11 @@ def _last_attempts(path: Path) -> dict[str, float]:
     return result
 
 
+def _scheduled_marker(now: float) -> str:
+    """Bind a scheduled observation to its own durable logical request."""
+    return f"scheduled-{int(now)}"
+
+
 async def _run_models(models: list[str], *, marker: str, record_path: Path) -> list[dict[str, Any]]:
     base_url = os.environ.get("MARGINALIA_SYNTHETIC_BASE_URL", "http://marginalia:8000")
     auth_token = os.environ.get("GOVERNOR_AUTH_TOKEN", "")
@@ -205,7 +210,15 @@ def main() -> int:
             spec.model for spec in specs if now - last.get(spec.model, 0.0) >= spec.interval_seconds
         ]
         if due:
-            asyncio.run(_run_models(due, marker="scheduled", record_path=record_path))
+            # Each due observation must authorize fresh exact work. Reusing the
+            # literal marker would only reconcile the first durable request.
+            asyncio.run(
+                _run_models(
+                    due,
+                    marker=_scheduled_marker(now),
+                    record_path=record_path,
+                )
+            )
         time.sleep(poll_seconds)
 
 

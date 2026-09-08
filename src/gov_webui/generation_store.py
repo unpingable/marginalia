@@ -450,6 +450,44 @@ class GenerationStore:
             raise KeyError(logical_request_id)
         return json.loads(row[0])
 
+    def block_undispatched(self, logical_request_id: str, reason: str) -> None:
+        """Settle newly-created work that lost the kill-switch race.
+
+        Existing queued work remains recoverable while dispatch is paused.  This
+        transition is only for a caller that created a request and then learned
+        that its first dispatch was not authorized.
+        """
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status FROM logical_request WHERE id=?", (logical_request_id,)
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(logical_request_id)
+            if LogicalStatus(row["status"]) is not LogicalStatus.QUEUED:
+                connection.rollback()
+                raise GenerationTransitionError("only queued work can be blocked before dispatch")
+            dispatch_count = connection.execute(
+                "SELECT COUNT(*) FROM dispatch WHERE logical_request_id=?",
+                (logical_request_id,),
+            ).fetchone()[0]
+            if dispatch_count:
+                connection.rollback()
+                raise GenerationTransitionError("dispatched work cannot use undispatched blocking")
+            now = _now()
+            connection.execute(
+                "UPDATE logical_request SET status=?,last_error=?,updated_at=? WHERE id=?",
+                (LogicalStatus.BLOCKED, reason, now, logical_request_id),
+            )
+            self._event(
+                connection,
+                logical_request_id,
+                "request_blocked_before_dispatch",
+                {"reason": reason},
+            )
+            connection.commit()
+
     def dispatch_payload(self, dispatch_id: str) -> dict[str, Any]:
         """Return the frozen provider request with this dispatch's actual selection."""
         with self._connect() as connection:

@@ -88,6 +88,22 @@ def test_kill_switch_stops_new_dispatch_but_preserves_inspection(tmp_path: Path)
     assert store.events(request.id)[0]["event_type"] == "request_created"
 
 
+def test_new_undispatched_work_can_be_settled_without_inventing_a_dispatch(
+    tmp_path: Path,
+) -> None:
+    store = GenerationStore(tmp_path / "generation.sqlite")
+    request = create(store).request
+
+    store.block_undispatched(request.id, "generation paused before dispatch")
+
+    settled = store.get_request(request.id)
+    assert settled is not None
+    assert settled.status is LogicalStatus.BLOCKED
+    assert settled.last_error == "generation paused before dispatch"
+    assert store.list_dispatches(request.id) == []
+    assert store.events(request.id)[-1]["event_type"] == "request_blocked_before_dispatch"
+
+
 def test_unknown_dispatch_is_not_safe_to_retry(tmp_path: Path) -> None:
     store = GenerationStore(tmp_path / "generation.sqlite")
     request = create(store).request
