@@ -167,6 +167,46 @@ def test_command_environment_is_a_closed_nonsecret_allowlist(tmp_path: Path) -> 
     assert "must-not-appear" not in daemon
 
 
+def test_command_model_selection_distinguishes_explicit_and_provider_default(
+    tmp_path: Path,
+) -> None:
+    secrets = tmp_path / "secrets"
+    _, _, metadata = create_provider_rpc_identities(secrets)
+    models = tmp_path / "providers.json"
+    _write_catalog(
+        models,
+        [
+            {
+                "id": "claude",
+                "protocol": "local-command",
+                "command": {
+                    "adapter": "claude-code",
+                    "executable_env": "CLAUDE_COMMAND_PATH",
+                    "working_directory_env": "CLAUDE_COMMAND_WORKDIR",
+                },
+                "models": [{"id": "claude-writer", "model": "sonnet", "label": "Claude"}],
+            },
+            {
+                "id": "codex",
+                "protocol": "existing-command",
+                "models": [{"id": "codex-default", "label": "Codex"}],
+            },
+        ],
+    )
+
+    daemon, _ = render_provider_configs(
+        models,
+        metadata,
+        environment={
+            "CLAUDE_COMMAND_PATH": "/opt/claude/claude",
+            "CLAUDE_COMMAND_WORKDIR": "/work",
+        },
+    )
+
+    assert daemon.count('model_argument = "required"') == 1
+    assert daemon.count('model_argument = "omit"') == 1
+
+
 def test_duplicate_erinfacing_selections_share_one_physical_model_policy(
     tmp_path: Path,
 ) -> None:

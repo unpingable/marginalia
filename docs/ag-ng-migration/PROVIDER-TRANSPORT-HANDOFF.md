@@ -7,7 +7,7 @@ Cartography model-execution/shared-library lane remained read-only and paused.
 No Cartography files or branches were modified.
 
 - ag-ng repair branch: `campaign/marginalia-provider-transports-v1`
-- exact ag-ng consumer pin: `466dcf2d2dc1ec63ebbde2c7f0b53f2fcf666b95`
+- exact ag-ng consumer pin: `ca1713a277b587929a6138ff6dbd3f07b8fe676d`
 - Docket pin: `181589f910b76030b312d6478bd0ac813a630855`
 
 The Cartography survey's useful finding was preserved: Marginalia is the
@@ -27,6 +27,9 @@ tagged transports:
    only admitted redirect policy, `deny`.
 3. `command`: fixed executable, working directory, closed environment, and
    one built-in structured adapter (`codex`, `claude-code`, or `kimi-code`).
+   Its root-owned `model_argument` is `required` or `omit`; omission is
+   admitted only for an enrolled Codex provider-default route and never means
+   fallback. Claude and Kimi require the exact capability model argument.
 
 The common provider envelope still binds provider, physical model, method,
 protocol digest, root policy digest, exact request custody, budget, caller,

@@ -204,6 +204,7 @@ def render_provider_configs(
                 daemon.extend(["[endpoints.headers]", 'anthropic-version = "2023-06-01"'])
         else:
             adapter, executable, working_directory, child_environment = _command(sample, env)
+            model_argument = "omit" if sample.protocol == "existing-command" else "required"
             daemon.extend(
                 [
                     'protocol = "opaque_json_v1"',
@@ -212,6 +213,7 @@ def render_provider_configs(
                     'kind = "command"',
                     "[endpoints.transport.command]",
                     f"adapter = {_toml(adapter)}",
+                    f"model_argument = {_toml(model_argument)}",
                     f"executable = {_toml(executable)}",
                     f"working_directory = {_toml(working_directory)}",
                     "[endpoints.transport.command.environment]",
