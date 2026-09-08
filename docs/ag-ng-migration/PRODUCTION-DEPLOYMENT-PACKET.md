@@ -1,8 +1,8 @@
 # Full ag-ng migration — production deployment packet
 
-Candidate: `8d672105d0c179120ba516f9df7254f0fa2a2cbd`  
+Candidate: `cf39bf3339ba958675248814d774ea9a2b147f88`
 Qualified local image ID:
-`sha256:42da34573d510ff1e00572aff4026486cbbf2b0a87adc0b82aac2121c7ab26b4`
+`sha256:0753cde148bf02e301cdaa2b7d489d8fb141d912c30347cf3a1abc4563a2641c`
 
 Production has **not** been changed by this campaign. Do not deploy until the
 owner gives a separate production decision.
@@ -38,8 +38,8 @@ Deploy the same qualified digest to `marginalia`, `marginalia-generation`,
 
 - verify `/health/ready` names ag-ng as authoritative, the provider socket is
   ready, Docket custody is enabled, and classic fallback is false;
-- confirm the header **Generation enabled/paused** control opens Generation reliability and
-  accurately changes only new-dispatch admission;
+- confirm the header **Generation enabled/paused** control opens Generation
+  reliability and accurately changes only new-dispatch admission;
 - run one real writer generation and verify exact model/route, reported usage,
   and known/estimated/unavailable cost in the UI;
 - exercise lost acknowledgement and exact replay without another provider
