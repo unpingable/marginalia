@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: unpingable/model-execution
-          ref: 992a0a37c8bad627d466559776855ea10c60272a
+          ref: d19b08f71fbba8383cd6ef9d3a007a40bd998c32
           path: _model_execution
           fetch-depth: 1
           token: ${{ secrets.MODEL_EXECUTION_REPOSITORY_TOKEN }}
