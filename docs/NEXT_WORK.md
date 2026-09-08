@@ -3,12 +3,13 @@
 ## Full ag-ng migration candidate — 2026-09-08
 
 Agent Governor classic is no longer a Marginalia runtime dependency. Candidate
-`cf39bf3339ba958675248814d774ea9a2b147f88` composes ag-ng authorization,
+`718ac4549a99b24bd935432ecf44eda45acac9f3` composes ag-ng authorization,
 Docket attempt custody, credential-isolated `ag-providerd`, and Marginalia's
 revision/canon-checked acceptance boundary. The qualified image and deployment
 preconditions are recorded in `docs/ag-ng-migration/`. The 839-test baseline is
-accounted for in `TEST-COVERAGE-CROSSWALK.md`; the exact-companion witness is a
-mandatory post-image CI step rather than an unexplained release-suite skip.
+semantically crosswalked in `TEST-COVERAGE-CROSSWALK.md`; the exact-companion
+witness is a mandatory post-image CI step rather than an unexplained
+release-suite skip.
 
 Production is intentionally unchanged. The remaining operational action is the
 separately approved production cutover, beginning with OpenRouter credential

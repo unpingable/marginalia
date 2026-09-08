@@ -1,8 +1,8 @@
 # Full ag-ng migration — production deployment packet
 
-Candidate: `cf39bf3339ba958675248814d774ea9a2b147f88`
+Candidate: `718ac4549a99b24bd935432ecf44eda45acac9f3`
 Qualified local image ID:
-`sha256:0753cde148bf02e301cdaa2b7d489d8fb141d912c30347cf3a1abc4563a2641c`
+`sha256:2a958bd3f9c3b64aeb003086f28f6869a69ea1ae1ee27dd683b97645d1888289`
 
 Production has **not** been changed by this campaign. Do not deploy until the
 owner gives a separate production decision.

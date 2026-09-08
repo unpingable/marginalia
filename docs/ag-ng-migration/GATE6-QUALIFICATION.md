@@ -102,7 +102,7 @@ managed separately.
 ## Decision
 
 Gate 6 application qualification passed for the original candidate. Candidate
-`cf39bf3339ba958675248814d774ea9a2b147f88` supersedes it after the bounded
-coverage and writer-facing wording correction recorded in
+`718ac4549a99b24bd935432ecf44eda45acac9f3` supersedes it after the bounded
+coverage, writer-facing wording, and semantic exclusion review recorded in
 `COVERAGE-CORRECTION-QUALIFICATION.md`. Production remains gated by explicit
 approval and the preconditions in `PRODUCTION-DEPLOYMENT-PACKET.md`.
