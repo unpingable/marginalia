@@ -62,6 +62,8 @@ def _failure_class(exc: BaseException) -> str:
         # days after a model cleanup.
         if exc.response.status_code == 422:
             return "configuration_error"
+        if exc.response.status_code == 423:
+            return "generation_paused"
         return f"http_{exc.response.status_code}"
     if isinstance(exc, httpx.HTTPError):
         return "transport_error"
@@ -114,7 +116,13 @@ async def probe_once(
             {
                 # A misconfigured probe says nothing about whether the backend is
                 # alive, so it must not read as a liveness failure.
-                "result": "MISCONFIGURED" if failure_class == "configuration_error" else "FAIL",
+                "result": (
+                    "MISCONFIGURED"
+                    if failure_class == "configuration_error"
+                    else "PAUSED"
+                    if failure_class == "generation_paused"
+                    else "FAIL"
+                ),
                 "failure_class": failure_class,
                 "error": str(exc)[:500],
             }

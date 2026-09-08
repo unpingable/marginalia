@@ -141,8 +141,12 @@ def test_unknown_probe_model_is_configuration_not_liveness() -> None:
     backend_down = httpx.HTTPStatusError(
         "502", request=request, response=httpx.Response(502, request=request)
     )
+    generation_paused = httpx.HTTPStatusError(
+        "423", request=request, response=httpx.Response(423, request=request)
+    )
 
     assert _failure_class(unknown_model) == "configuration_error"
+    assert _failure_class(generation_paused) == "generation_paused"
     assert _failure_class(backend_down) == "http_502"
 
 
@@ -174,6 +178,38 @@ async def test_synthetic_probe_uses_the_declared_read_deadline(monkeypatch) -> N
     )
     assert result["result"] == "PASS"
     assert observed["read"] == 600
+
+
+@pytest.mark.asyncio
+async def test_synthetic_probe_reports_operator_pause_without_backend_failure(
+    monkeypatch,
+) -> None:
+    import httpx
+
+    from gov_webui import synthetic_worker
+
+    class PausedClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            request = httpx.Request("POST", "http://marginalia/probe")
+            return httpx.Response(423, request=request)
+
+    monkeypatch.setattr(synthetic_worker.httpx, "AsyncClient", PausedClient)
+
+    result = await synthetic_worker.probe_once(
+        base_url="http://marginalia", model="orion", timeout_seconds=10
+    )
+
+    assert result["result"] == "PAUSED"
+    assert result["failure_class"] == "generation_paused"
 
 
 def test_transport_failures_remain_liveness_failures() -> None:

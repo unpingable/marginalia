@@ -35,6 +35,10 @@ class InternalGenerationPending(InternalGenerationError):
     """Custody remains active or indeterminate; another execution is not authorized."""
 
 
+class InternalGenerationDisabled(InternalGenerationError):
+    """The operator paused new dispatch before this work obtained custody."""
+
+
 @dataclass(frozen=True)
 class InternalGenerationResult:
     content: str
@@ -111,7 +115,7 @@ async def generate_internal(
         existing = generation_store.get_by_client_id(project_id, client_id)
         if existing is None:
             if not generation_store.dispatch_enabled(project_id):
-                raise InternalGenerationError("new dispatches are disabled for this project")
+                raise InternalGenerationDisabled("new dispatches are disabled for this project")
             try:
                 created = generation_store.create_request(
                     client_request_id=client_id,
@@ -129,7 +133,9 @@ async def generate_internal(
                         "model": configured_model,
                     },
                 )
-            except (GenerationDisabled, IdempotencyConflict) as exc:
+            except GenerationDisabled as exc:
+                raise InternalGenerationDisabled(str(exc)) from exc
+            except IdempotencyConflict as exc:
                 raise InternalGenerationError(str(exc)) from exc
             logical = created.request
             try:
@@ -137,7 +143,7 @@ async def generate_internal(
             except GenerationDisabled as exc:
                 if created.created:
                     generation_store.block_undispatched(logical.id, str(exc))
-                raise InternalGenerationError(str(exc)) from exc
+                raise InternalGenerationDisabled(str(exc)) from exc
         else:
             logical = existing
 

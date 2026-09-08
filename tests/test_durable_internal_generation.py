@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from gov_webui.durable_internal_generation import (
-    InternalGenerationError,
+    InternalGenerationDisabled,
     accept_internal_results,
     generate_internal,
 )
@@ -30,7 +30,7 @@ async def test_paused_internal_generation_does_not_leave_queued_custody(
     keyring = tmp_path / "keys.json"
     create_keyring(keyring, key_id="test", key=b"k" * 32)
 
-    with pytest.raises(InternalGenerationError, match="dispatches are disabled"):
+    with pytest.raises(InternalGenerationDisabled, match="dispatches are disabled"):
         await generate_internal(
             purpose="synthetic",
             project_id="project",

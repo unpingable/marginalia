@@ -112,6 +112,7 @@ from gov_webui.generation_outcome import (
 )
 from gov_webui.evidence_store import EncryptedEvidenceStore
 from gov_webui.durable_internal_generation import (
+    InternalGenerationDisabled,
     accept_internal_results,
     generate_internal,
 )
@@ -3580,6 +3581,12 @@ async def synthetic_governor(request: SyntheticGovernorRequest) -> dict[str, Any
     except asyncio.CancelledError:
         governor_progress.failed(execution, "cancelled")
         raise
+    except InternalGenerationDisabled as exc:
+        governor_progress.failed(execution, "generation_paused")
+        raise HTTPException(
+            status_code=423,
+            detail="Generation is paused; no synthetic dispatch was attempted.",
+        ) from exc
     except Exception as exc:
         governor_progress.failed(execution, type(exc).__name__)
         raise HTTPException(status_code=502, detail=f"Synthetic governor error: {exc}") from exc

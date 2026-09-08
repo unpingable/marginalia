@@ -360,6 +360,29 @@ def test_internal_synthetic_generation_cannot_mutate_writer_sessions(
     )
 
 
+def test_paused_synthetic_is_not_reported_as_a_provider_failure(
+    product_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, adapter = product_client
+    identity = SimpleNamespace(provider_id="test-provider", model_id="synthetic-model")
+    monkeypatch.setattr(
+        adapter,
+        "_resolve_configured_model",
+        lambda *_args, **_kwargs: ("synthetic-model", identity),
+    )
+
+    response = client.post(
+        "/v1/internal/synthetic-governor",
+        json={"model": "synthetic-model", "marker": "paused"},
+    )
+
+    assert response.status_code == 423, response.text
+    assert response.json()["detail"] == (
+        "Generation is paused; no synthetic dispatch was attempted."
+    )
+    assert adapter._get_generation_store().list_requests() == []
+
+
 def test_artifact_api_preserves_validation_not_found_and_stale_conflicts(
     product_client,
 ) -> None:
