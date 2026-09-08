@@ -105,3 +105,8 @@ provider execution or billing did not occur.
 
 Observer: Codex, acting under the owner's explicit provider-repair and production
 cutover authorization.
+
+Post-acceptance validation using credentials explicitly restricted to disposable
+development checks is recorded in
+`VALIDATION-ONLY-PROVIDER-QUALIFICATION.md`. Those checks did not modify this
+release, its production credential set, or Erin's generation state.
