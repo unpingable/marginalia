@@ -1,0 +1,25 @@
+{
+  "schema": "model-execution.classic-exceptions/v1",
+  "exceptions": [
+    {"path": "src/gov_webui/adapter.py", "kind": "python-import", "capability": "legacy research, view-model, interferometry, instrumentation, and demo endpoints", "owner": "Marginalia", "removal_gate": "replace or remove each non-generation endpoint and its classic data contract"},
+    {"path": "src/gov_webui/adapter.py", "kind": "package", "capability": "legacy response labels retained for compatibility", "owner": "Marginalia", "removal_gate": "version and migrate the response labels"},
+    {"path": "src/gov_webui/governed_chat_adapter.py", "kind": "python-import", "capability": "legacy violation prompt formatting", "owner": "Marginalia", "removal_gate": "move formatting behind an owned application contract"},
+    {"path": "src/gov_webui/summaries.py", "kind": "python-import", "capability": "legacy view-model summaries", "owner": "Marginalia", "removal_gate": "replace summary projection"},
+    {"path": "src/gov_webui/writer_capture_base.py", "kind": "python-import", "capability": "legacy canon capture classification", "owner": "Marginalia", "removal_gate": "replace classifier and qualify corpus"},
+    {"path": "demos/**", "kind": "python-import", "capability": "historical classic web UI demos", "owner": "Marginalia", "removal_gate": "archive or replace demos"},
+    {"path": "tests/**", "kind": "python-import", "capability": "tests for explicitly retained non-generation classic compatibility", "owner": "Marginalia", "removal_gate": "remove with corresponding source exception"},
+    {"path": "tests/**", "kind": "package", "capability": "negative distribution assertions and legacy compatibility labels", "owner": "Marginalia", "removal_gate": "remove with corresponding source exception"},
+    {"path": "AG_CONTRACT_COMMIT", "kind": "classic-revision", "capability": "historical compatibility marker", "owner": "Marginalia", "removal_gate": "remove last classic compatibility surface"},
+    {"path": "docs/**", "kind": "classic-revision", "capability": "historical qualification evidence", "owner": "Marginalia", "removal_gate": "never runtime; retain as provenance"},
+    {"path": "docs/**", "kind": "package", "capability": "retirement and negative-install documentation", "owner": "Marginalia", "removal_gate": "never runtime; retain while accurate"},
+    {"path": "research/**", "kind": "package", "capability": "historical reconnaissance", "owner": "Marginalia", "removal_gate": "never runtime; retain as provenance"},
+    {"path": ".github/workflows/**", "kind": "package", "capability": "negative installed-package assertion", "owner": "Marginalia", "removal_gate": "retain retirement guard"},
+    {"path": "Dockerfile", "kind": "package", "capability": "negative installed-package assertion", "owner": "Marginalia", "removal_gate": "retain retirement guard"},
+    {"path": ".gitignore", "kind": "package", "capability": "prevent historical vendored tree from entering builds", "owner": "Marginalia", "removal_gate": "remove after all staging scripts are retired"},
+    {"path": "COMPAT.md", "kind": "package", "capability": "negative compatibility requirement", "owner": "Marginalia", "removal_gate": "retain retirement guard"},
+    {"path": "docker-compose.yml", "kind": "package", "capability": "legacy provider state volume path; no classic package", "owner": "Marginalia", "removal_gate": "migrate state path with restore-qualified volume move"},
+    {"path": "providerd-entrypoint.sh", "kind": "package", "capability": "legacy provider state directory name; no classic package", "owner": "Marginalia", "removal_gate": "migrate state path with restore-qualified volume move"},
+    {"path": "src/gov_webui/ag_provider_config.py", "kind": "package", "capability": "legacy provider state directory name; no classic package", "owner": "Marginalia", "removal_gate": "migrate state path with restore-qualified volume move"},
+    {"path": "src/gov_webui/context_store.py", "kind": "package", "capability": "legacy filesystem display label", "owner": "Marginalia", "removal_gate": "migrate persisted context display contract"}
+  ]
+}

@@ -21,6 +21,11 @@ DOCKET_ROOT = Path(
         REPO_ROOT.parents[1] / "docket-river-clerk-live-docket-executor-prerequisite-v1",
     )
 ).resolve()
+MODEL_EXECUTION_ROOT = Path(
+    os.environ.get(
+        "MARGINALIA_MODEL_EXECUTION_SOURCE_DIR", REPO_ROOT.parents[1] / "model-execution"
+    )
+).resolve()
 
 
 def test_retired_test_inventory_has_an_audited_crosswalk() -> None:
@@ -40,11 +45,16 @@ def test_sync_stages_the_complete_qualified_ag_distribution(tmp_path: Path) -> N
     shutil.copy2(REPO_ROOT / "sync-deps.sh", probe / "sync-deps.sh")
     shutil.copy2(REPO_ROOT / "AG_NG_CONTRACT_COMMIT", probe / "AG_NG_CONTRACT_COMMIT")
     shutil.copy2(REPO_ROOT / "DOCKET_CONTRACT_COMMIT", probe / "DOCKET_CONTRACT_COMMIT")
+    shutil.copy2(
+        REPO_ROOT / "MODEL_EXECUTION_CONTRACT_COMMIT",
+        probe / "MODEL_EXECUTION_CONTRACT_COMMIT",
+    )
     shutil.copytree(REPO_ROOT / "receipt-v1", probe / "receipt-v1")
 
     environment = os.environ.copy()
     environment["MARGINALIA_AG_NG_SOURCE_DIR"] = str(AG_NG_ROOT)
     environment["MARGINALIA_DOCKET_SOURCE_DIR"] = str(DOCKET_ROOT)
+    environment["MARGINALIA_MODEL_EXECUTION_SOURCE_DIR"] = str(MODEL_EXECUTION_ROOT)
     subprocess.run(
         ["bash", str(probe / "sync-deps.sh")],
         cwd=probe,
@@ -65,6 +75,7 @@ def test_sync_stages_the_complete_qualified_ag_distribution(tmp_path: Path) -> N
         REPO_ROOT / "DOCKET_CONTRACT_COMMIT"
     ).read_text().strip()
     assert (probe / "docket-runtime" / "crates" / "gwr-local" / "Cargo.toml").is_file()
+    assert (probe / "model-execution" / "python" / "model_execution" / "__init__.py").is_file()
 
 
 def _write_fake_docker(bin_dir: Path) -> Path:
@@ -223,6 +234,7 @@ def test_release_contract_names_and_pins_the_complete_marginalia_appliance() -> 
     assert required_scripts.items() <= project["scripts"].items()
     assert "AG_NG_CONTRACT_COMMIT" in dockerfile
     assert "DOCKET_CONTRACT_COMMIT" in dockerfile
+    assert "MODEL_EXECUTION_CONTRACT_COMMIT" in dockerfile
     assert "/usr/local/bin/ag-loopctl" in dockerfile
     assert "/usr/local/bin/ag-providerd" in dockerfile
     assert "/usr/local/bin/ag-providerctl" in dockerfile

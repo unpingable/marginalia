@@ -6,10 +6,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
+
+from model_execution import AgNgError, AgNgOutcomeIndeterminate, AgProviderClient
 
 from gov_webui.generation_executor import (
     ExecutorError,
@@ -41,6 +42,9 @@ class AgProviderGateway:
             raise ExecutorError("providerctl timeout must be between 30 and 1860 seconds")
         self.providerctl = providerctl
         self.providerctl_config = providerctl_config
+        self.client = AgProviderClient(
+            providerctl, providerctl_config, execute_timeout_seconds=timeout_seconds
+        )
         self.catalog: ProviderCatalog = load_provider_catalog(model_config)
         self.timeout_seconds = timeout_seconds
 
@@ -74,63 +78,50 @@ class AgProviderGateway:
             "sanitized_headers": {"content-type": "application/json"},
             "request_bytes": base64.b64encode(_canonical(body)).decode("ascii"),
         }
-        value = self._invoke("prepare", request, timeout=30)
-        dispatch = value.get("dispatch") if isinstance(value, dict) else None
-        if not _is_digest(dispatch):
-            raise ExecutorError("ag-providerctl prepare omitted its deterministic dispatch")
-        return value
+        try:
+            return self.client.prepare(request)
+        except AgNgOutcomeIndeterminate as exc:
+            raise ProviderOutcomeUnknown(str(exc)) from exc
+        except AgNgError as exc:
+            raise ExecutorError(str(exc)) from exc
 
     def execute(self, transaction: dict[str, Any], *, selected_model: str) -> dict[str, Any]:
-        dispatch = transaction.get("dispatch")
-        if not _is_digest(dispatch):
-            raise ExecutorError("prepared provider transaction has no dispatch")
-        response = self._invoke("execute", transaction, timeout=self.timeout_seconds)
-        self._require_available(response, dispatch)
+        try:
+            dispatch = self.client.execute(transaction)
+        except AgNgOutcomeIndeterminate as exc:
+            raise ProviderOutcomeUnknown(str(exc)) from exc
+        except AgNgError as exc:
+            raise ExecutorError(str(exc)) from exc
         return self.fetch(dispatch, selected_model=selected_model)
 
     def fetch(self, dispatch: str, *, selected_model: str) -> dict[str, Any]:
-        result = self._invoke(
-            "call", {"method": "fetch_inference", "dispatch": dispatch}, timeout=30
-        )
-        response = self._ok_response(result)
-        if response.get("kind") != "inference" or response.get("dispatch") != dispatch:
-            raise ProviderOutcomeUnknown("provider response is not yet durably fetchable")
-        encoded = response.get("event_stream")
-        exact = response.get("exact_event_stream")
-        if not isinstance(encoded, str) or not _is_digest(exact):
-            raise ProviderOutcomeUnknown("provider custody response is malformed")
         try:
-            event_bytes = base64.b64decode(encoded, validate=True)
-        except (ValueError, TypeError) as exc:
-            raise ProviderOutcomeUnknown("provider custody response has invalid base64") from exc
-        if "sha256:" + hashlib.sha256(event_bytes).hexdigest() != exact:
-            raise ProviderOutcomeUnknown("provider custody response digest mismatch")
+            evidence = self.client.fetch(dispatch)
+        except AgNgOutcomeIndeterminate as exc:
+            raise ProviderOutcomeUnknown(str(exc)) from exc
+        except AgNgError as exc:
+            raise ExecutorError(str(exc)) from exc
         try:
-            event = json.loads(event_bytes)
+            event = json.loads(evidence.event_stream)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ProviderOutcomeUnknown("provider custody event is malformed") from exc
-        normalized = self._normalize(event, dispatch, exact, selected_model)
+        normalized = self._normalize(
+            event, evidence.dispatch, evidence.exact_event_stream, selected_model
+        )
         normalized["provider_evidence"] = {
-            "dispatch": dispatch,
-            "exact_event_stream": exact,
-            "event_stream": encoded,
+            "dispatch": evidence.dispatch,
+            "exact_event_stream": evidence.exact_event_stream,
+            "event_stream": base64.b64encode(evidence.event_stream).decode("ascii"),
         }
         return normalized
 
     def acknowledge(self, dispatch: str, exact_event_stream: str, custody: str) -> None:
-        result = self._invoke(
-            "call",
-            {
-                "method": "acknowledge_inference_custody",
-                "dispatch": dispatch,
-                "exact_event_stream": exact_event_stream,
-                "governor_custody_record": custody,
-            },
-            timeout=30,
-        )
-        response = self._ok_response(result)
-        if response.get("kind") != "inference_custody_acknowledged":
-            raise ProviderOutcomeUnknown("provider custody acknowledgment was not committed")
+        try:
+            self.client.acknowledge(dispatch, exact_event_stream, custody)
+        except AgNgOutcomeIndeterminate as exc:
+            raise ProviderOutcomeUnknown(str(exc)) from exc
+        except AgNgError as exc:
+            raise ExecutorError(str(exc)) from exc
 
     def _request(self, payload: dict[str, Any]) -> tuple[ConfiguredModel, dict[str, Any], str]:
         if not isinstance(payload, dict) or set(payload) != {"context_id", "messages", "model"}:
@@ -293,51 +284,6 @@ class AgProviderGateway:
             raise ProviderOutcomeUnknown("command provider returned no authored text")
         return messages[-1], _usage(prompt_tokens, completion_tokens)
 
-    def _invoke(
-        self, operation: str, document: dict[str, Any], *, timeout: float
-    ) -> dict[str, Any]:
-        try:
-            completed = subprocess.run(
-                [str(self.providerctl), "--config", str(self.providerctl_config), operation],
-                input=_canonical(document),
-                capture_output=True,
-                check=False,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise ProviderOutcomeUnknown(
-                "providerctl wait ended before provider custody resolved"
-            ) from exc
-        except OSError as exc:
-            raise ExecutorError("ag-providerctl could not be started") from exc
-        if completed.returncode != 0:
-            raise ExecutorError("ag-providerctl refused the request")
-        try:
-            value = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise ExecutorError("ag-providerctl returned malformed JSON") from exc
-        if not isinstance(value, dict):
-            raise ExecutorError("ag-providerctl returned a non-object")
-        return value
-
-    @staticmethod
-    def _ok_response(result: dict[str, Any]) -> dict[str, Any]:
-        if result.get("status") != "ok" or not isinstance(result.get("response"), dict):
-            code = result.get("code", "unknown")
-            if code in {"indeterminate", "not_found"}:
-                raise ProviderOutcomeUnknown(f"provider custody is unresolved: {code}")
-            raise ExecutorError(f"ag-providerd refused the request: {code}")
-        return result["response"]
-
-    def _require_available(self, result: dict[str, Any], dispatch: str) -> None:
-        response = self._ok_response(result)
-        kind = response.get("kind")
-        if kind == "inference_available" and response.get("dispatch") == dispatch:
-            return
-        if kind == "inference_custody_acknowledged" and response.get("dispatch") == dispatch:
-            return
-        raise ProviderOutcomeUnknown("provider dispatch did not become durably available")
-
 
 def _canonical(value: Any) -> bytes:
     return json.dumps(
@@ -347,12 +293,6 @@ def _canonical(value: Any) -> bytes:
 
 def _nonce(domain: str, value: str) -> str:
     return hashlib.sha256(domain.encode("ascii") + b"\0" + value.encode("utf-8")).hexdigest()[:32]
-
-
-def _is_digest(value: object) -> bool:
-    if not isinstance(value, str) or len(value) != 71 or not value.startswith("sha256:"):
-        return False
-    return all(character in "0123456789abcdef" for character in value[7:])
 
 
 def _nonnegative_int(value: object) -> int:

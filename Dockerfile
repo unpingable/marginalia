@@ -40,10 +40,13 @@ RUN pip install --no-cache-dir -r requirements.lock -r requirements-build.lock
 
 # Install the independent historical receipt reader (not fetched implicitly).
 COPY LICENSE NOTICE /licenses/marginalia/
-COPY AG_NG_CONTRACT_COMMIT DOCKET_CONTRACT_COMMIT /app/
+COPY AG_NG_CONTRACT_COMMIT DOCKET_CONTRACT_COMMIT MODEL_EXECUTION_CONTRACT_COMMIT /app/
+COPY model-execution/ /tmp/model-execution/
 COPY receipt-v1/ /tmp/receipt-v1/
-RUN pip install --no-cache-dir --no-build-isolation --no-deps /tmp/receipt-v1/ \
-    && rm -rf /tmp/receipt-v1/
+RUN test "$(cat /tmp/model-execution/MODEL_EXECUTION_CONTRACT_COMMIT)" = "$(cat MODEL_EXECUTION_CONTRACT_COMMIT)" \
+    && pip install --no-cache-dir --no-build-isolation --no-deps /tmp/model-execution \
+    && pip install --no-cache-dir --no-build-isolation --no-deps /tmp/receipt-v1/ \
+    && rm -rf /tmp/model-execution /tmp/receipt-v1/
 
 # Install Marginalia without a second dependency resolution.
 COPY pyproject.toml README.md AG_CONTRACT.md ./
@@ -56,7 +59,7 @@ COPY --from=generation-companions /out/ag-providerd /usr/local/bin/ag-providerd
 COPY --from=generation-companions /out/ag-providerctl /usr/local/bin/ag-providerctl
 COPY --from=generation-companions /out/docket /usr/local/bin/docket
 
-RUN python3 -c "import importlib.metadata as m; import receipt_v1, gov_webui; assert m.version('marginalia') == '0.1.0'" \
+RUN python3 -c "import importlib.metadata as m; import model_execution, receipt_v1, gov_webui; assert m.version('marginalia') == '0.1.0'" \
     && python3 -c "import importlib.metadata as m; names={d.metadata['Name'].lower() for d in m.distributions()}; assert 'agent-governor' not in names and 'receipt-kernel' not in names" \
     && /opt/codex/codex --version \
     && /usr/local/bin/ag-loopctl --help >/dev/null \

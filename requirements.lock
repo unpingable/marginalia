@@ -1,7 +1,7 @@
 # Marginalia M0 runtime lock (Python 3.11+)
 #
-# receipt-v1 is an independent local source dependency retained only for
-# historical receipt reading. Container builds install it without resolution.
+# model-execution and receipt-v1 are independent local source dependencies.
+# Container builds install their exact pinned source trees without resolution.
 
 annotated-doc==0.0.4
 annotated-types==0.7.0

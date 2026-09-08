@@ -37,12 +37,22 @@ jobs:
           path: _docket
           fetch-depth: 1
 
+      - name: Checkout the model-execution contract
+        uses: actions/checkout@v4
+        with:
+          repository: unpingable/model-execution
+          ref: 992a0a37c8bad627d466559776855ea10c60272a
+          path: _model_execution
+          fetch-depth: 1
+          token: ${{ secrets.MODEL_EXECUTION_REPOSITORY_TOKEN }}
+
       - name: Verify immutable source contracts
         shell: bash
         run: |
           set -euo pipefail
           test "$(git -C _ag_ng rev-parse HEAD)" = "$(tr -d '[:space:]' < AG_NG_CONTRACT_COMMIT)"
           test "$(git -C _docket rev-parse HEAD)" = "$(tr -d '[:space:]' < DOCKET_CONTRACT_COMMIT)"
+          test "$(git -C _model_execution rev-parse HEAD)" = "$(tr -d '[:space:]' < MODEL_EXECUTION_CONTRACT_COMMIT)"
           test -d receipt-v1/src/receipt_v1
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             package_version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
@@ -60,6 +70,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.lock
           python -m pip install --no-build-isolation --no-deps ./receipt-v1
+          python -m pip install --no-build-isolation --no-deps ./_model_execution
           python -m pip install --no-build-isolation --no-deps -e .
 
       - name: Verify Marginalia
@@ -67,6 +78,7 @@ jobs:
           python -m ruff check src tests
           MARGINALIA_AG_NG_SOURCE_DIR="$PWD/_ag_ng" \
           MARGINALIA_DOCKET_SOURCE_DIR="$PWD/_docket" \
+          MARGINALIA_MODEL_EXECUTION_SOURCE_DIR="$PWD/_model_execution" \
             python -m pytest -q
           python -m build --no-isolation
 
@@ -76,14 +88,15 @@ jobs:
           set -euo pipefail
           MARGINALIA_AG_NG_SOURCE_DIR="$PWD/_ag_ng" \
           MARGINALIA_DOCKET_SOURCE_DIR="$PWD/_docket" \
+          MARGINALIA_MODEL_EXECUTION_SOURCE_DIR="$PWD/_model_execution" \
             ./sync-deps.sh
-          rm -rf _ag_ng _docket
+          rm -rf _ag_ng _docket _model_execution
 
       - name: Build and smoke the local appliance image
         run: |
           docker build --tag marginalia:ci .
           docker run --rm --entrypoint python3 marginalia:ci -c \
-            'import importlib.metadata as m; import gov_webui, receipt_v1; names={d.metadata["Name"].lower() for d in m.distributions()}; assert "agent-governor" not in names and "receipt-kernel" not in names'
+            'import importlib.metadata as m; import gov_webui, model_execution, receipt_v1; names={d.metadata["Name"].lower() for d in m.distributions()}; assert "agent-governor" not in names and "receipt-kernel" not in names'
           docker run --rm --entrypoint /opt/codex/codex marginalia:ci --version
           docker run --rm --entrypoint /usr/local/bin/ag-loopctl marginalia:ci --help
           docker run --rm --entrypoint /usr/local/bin/ag-providerd marginalia:ci --help

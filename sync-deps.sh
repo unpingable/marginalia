@@ -14,10 +14,13 @@ fi
 
 AG_NG_CANDIDATE="${MARGINALIA_AG_NG_SOURCE_DIR:-$SCRIPT_DIR/../../ag_ng}"
 DOCKET_CANDIDATE="${MARGINALIA_DOCKET_SOURCE_DIR:-$SCRIPT_DIR/../../docket}"
+MODEL_EXECUTION_CANDIDATE="${MARGINALIA_MODEL_EXECUTION_SOURCE_DIR:-$SCRIPT_DIR/../../model-execution}"
 AG_NG_DIR="$(cd "$AG_NG_CANDIDATE" && pwd)"
 DOCKET_DIR="$(cd "$DOCKET_CANDIDATE" && pwd)"
+MODEL_EXECUTION_DIR="$(cd "$MODEL_EXECUTION_CANDIDATE" && pwd)"
 EXPECTED_AG_NG_COMMIT="$(tr -d '[:space:]' < "$SCRIPT_DIR/AG_NG_CONTRACT_COMMIT")"
 EXPECTED_DOCKET_COMMIT="$(tr -d '[:space:]' < "$SCRIPT_DIR/DOCKET_CONTRACT_COMMIT")"
+EXPECTED_MODEL_EXECUTION_COMMIT="$(tr -d '[:space:]' < "$SCRIPT_DIR/MODEL_EXECUTION_CONTRACT_COMMIT")"
 
 export_exact_tree() {
   local label="$1"
@@ -53,5 +56,8 @@ export_exact_tree \
 export_exact_tree \
   docket "$DOCKET_DIR" "$EXPECTED_DOCKET_COMMIT" \
   "$SCRIPT_DIR/docket-runtime" DOCKET_CONTRACT_COMMIT
+export_exact_tree \
+  model-execution "$MODEL_EXECUTION_DIR" "$EXPECTED_MODEL_EXECUTION_COMMIT" \
+  "$SCRIPT_DIR/model-execution" MODEL_EXECUTION_CONTRACT_COMMIT
 
 # ── Add new local deps above this line ────────────────────────────────────

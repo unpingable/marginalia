@@ -28,6 +28,7 @@ env:
   PYTHON_VERSION: "3.11"
   AG_NG_CONTRACT_COMMIT: 1bd4225a94fa82df066923612f713a93ba93a7bb
   DOCKET_CONTRACT_COMMIT: 181589f910b76030b312d6478bd0ac813a630855
+  MODEL_EXECUTION_CONTRACT_COMMIT: 992a0a37c8bad627d466559776855ea10c60272a
 
 jobs:
   quality:
@@ -89,12 +90,21 @@ jobs:
           ref: ${{ env.DOCKET_CONTRACT_COMMIT }}
           path: _docket
 
+      - name: Checkout the model-execution contract
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: unpingable/model-execution
+          ref: ${{ env.MODEL_EXECUTION_CONTRACT_COMMIT }}
+          path: _model_execution
+          token: ${{ secrets.MODEL_EXECUTION_REPOSITORY_TOKEN }}
+
       - name: Verify the ag-ng and Docket contracts
         run: |
           test "$(tr -d '[:space:]' < AG_NG_CONTRACT_COMMIT)" = "$AG_NG_CONTRACT_COMMIT"
           test "$(git -C _ag_ng rev-parse HEAD)" = "$AG_NG_CONTRACT_COMMIT"
           test "$(tr -d '[:space:]' < DOCKET_CONTRACT_COMMIT)" = "$DOCKET_CONTRACT_COMMIT"
           test "$(git -C _docket rev-parse HEAD)" = "$DOCKET_CONTRACT_COMMIT"
+          test "$(git -C _model_execution rev-parse HEAD)" = "$MODEL_EXECUTION_CONTRACT_COMMIT"
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -113,7 +123,11 @@ jobs:
             -r requirements-build.lock \
             -r requirements-dev.lock
           python -m pip install --no-build-isolation --no-deps ./receipt-v1
+          python -m pip install --no-build-isolation --no-deps ./_model_execution
           python -m pip install --no-build-isolation --no-deps -e .
+
+      - name: Reject new Agent Governor classic dependencies
+        run: model-execution-classic-scan . --allowlist classic-exceptions.json
 
       - name: Controlled negative qualification fixture
         if: github.event_name == 'workflow_dispatch' && inputs.qualification_fixture != 'normal'
@@ -134,6 +148,7 @@ jobs:
         env:
           MARGINALIA_AG_NG_SOURCE_DIR: ${{ github.workspace }}/_ag_ng
           MARGINALIA_DOCKET_SOURCE_DIR: ${{ github.workspace }}/_docket
+          MARGINALIA_MODEL_EXECUTION_SOURCE_DIR: ${{ github.workspace }}/_model_execution
         run: make test
 
   browser:
@@ -181,15 +196,25 @@ jobs:
           ref: ${{ env.DOCKET_CONTRACT_COMMIT }}
           path: _docket
 
+      - name: Checkout the model-execution contract
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: unpingable/model-execution
+          ref: ${{ env.MODEL_EXECUTION_CONTRACT_COMMIT }}
+          path: _model_execution
+          token: ${{ secrets.MODEL_EXECUTION_REPOSITORY_TOKEN }}
+
       - name: Verify all qualified contracts
         run: |
           test "$(git -C _ag_ng rev-parse HEAD)" = "$AG_NG_CONTRACT_COMMIT"
           test "$(git -C _docket rev-parse HEAD)" = "$DOCKET_CONTRACT_COMMIT"
+          test "$(git -C _model_execution rev-parse HEAD)" = "$MODEL_EXECUTION_CONTRACT_COMMIT"
 
       - name: Stage the exact local dependencies
         env:
           MARGINALIA_AG_NG_SOURCE_DIR: ${{ github.workspace }}/_ag_ng
           MARGINALIA_DOCKET_SOURCE_DIR: ${{ github.workspace }}/_docket
+          MARGINALIA_MODEL_EXECUTION_SOURCE_DIR: ${{ github.workspace }}/_model_execution
         run: ./sync-deps.sh
 
       - name: Build the production image
