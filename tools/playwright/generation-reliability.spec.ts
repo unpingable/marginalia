@@ -2,6 +2,8 @@ import { expect, Page, test } from '@playwright/test';
 
 async function mockWritingRoom(page: Page, available: boolean, enabled = false) {
   const savedSettings: Array<Record<string, unknown>> = [];
+  let currentEnabled = enabled;
+  let currentFallback: unknown = null;
   await page.route('**/*', async (route) => {
     const request = route.request();
     if (request.resourceType() === 'document') return route.continue();
@@ -27,11 +29,16 @@ async function mockWritingRoom(page: Page, available: boolean, enabled = false) 
         has_guidance: false,
       };
     } else if (path === '/v1/generation/settings') {
-      if (request.method() === 'PUT') savedSettings.push(JSON.parse(request.postData() || '{}'));
+      if (request.method() === 'PUT') {
+        const saved = JSON.parse(request.postData() || '{}');
+        savedSettings.push(saved);
+        currentEnabled = Boolean(saved.enabled);
+        currentFallback = saved.fallback_model;
+      }
       body = {
         available,
-        enabled: request.method() === 'PUT' ? savedSettings.at(-1)?.enabled : enabled,
-        fallback_model: request.method() === 'PUT' ? savedSettings.at(-1)?.fallback_model : null,
+        enabled: currentEnabled,
+        fallback_model: currentFallback,
         status: available ? 'ready' : 'The durable generation worker is unavailable.',
       };
     } else if (path === '/v1/models') {
@@ -80,10 +87,10 @@ async function mockWritingRoom(page: Page, available: boolean, enabled = false) 
 test('reliability control is prominent and unavailable state is explicit', async ({ page }) => {
   await mockWritingRoom(page, false);
   await page.goto('/');
-  await expect(page.locator('#generation-switch')).toHaveText('ag-ng · unavailable');
+  await expect(page.locator('#generation-switch')).toHaveText('Generation unavailable');
   await page.locator('#generation-switch').click();
 
-  await expect(page.getByRole('heading', { name: 'ag-ng generation custody' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Generation reliability' })).toBeVisible();
   await expect(page.locator('#durable-generation')).toBeDisabled();
   await expect(page.locator('#generation-reliability-status')).toContainText('unavailable');
   await expect(page.getByText('What does this change?')).toBeVisible();
@@ -92,7 +99,7 @@ test('reliability control is prominent and unavailable state is explicit', async
 test('writer can enable custody and choose confirmed-failure fallback', async ({ page }) => {
   const saved = await mockWritingRoom(page, true);
   await page.goto('/');
-  await expect(page.locator('#generation-switch')).toHaveText('ag-ng · off');
+  await expect(page.locator('#generation-switch')).toHaveText('Generation paused');
   await page.locator('#generation-switch').click();
 
   await page.locator('#durable-generation').check();
@@ -102,6 +109,7 @@ test('writer can enable custody and choose confirmed-failure fallback', async ({
 
   await expect.poll(() => saved.length).toBe(1);
   expect(saved[0]).toMatchObject({ enabled: true, fallback_model: 'fallback' });
+  await expect(page.locator('#generation-switch')).toHaveText('Generation enabled');
 });
 
 async function mockExistingSession(page: Page, messages: Array<Record<string, unknown>> = []) {

@@ -399,7 +399,8 @@ def test_durable_generation_toggle_is_prominent_and_guarded(product_client, monk
     }
 
     page = client.get("/").text
-    assert "ag-ng generation custody" in page
+    assert "Generation reliability" in page
+    assert "Generation status…" in page
     assert 'id="durable-generation"' in page
     assert 'id="generation-switch"' in page
     assert "stops new durable dispatches" in page

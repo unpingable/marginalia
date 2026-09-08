@@ -47,7 +47,10 @@ recoverable keys, and results remain on the NAS.
 ## Results
 
 - Ruff check and format check: pass.
-- Python release suite: **448 passed, 1 skipped**.
+- ordinary Python collection: **449 tests**; **448 passed, 1 skipped** because
+  that host process did not receive the exact companion executable paths. The
+  skipped node and the 839-to-449 inventory are identified in
+  `TEST-COVERAGE-CROSSWALK.md`.
 - package wheel and source distribution: built successfully.
 - all four Compose overlay configurations: valid.
 - Playwright reliability suite: **4 passed**.

@@ -431,7 +431,7 @@
           <button class="text-button" id="open-search" title="Search project (Ctrl/⌘ K)">Search</button>
           <button class="text-button" id="open-branches">Branches</button>
           <button class="text-button" id="focus-mode" aria-pressed="false">Focus</button>
-          <button class="text-button" id="generation-switch" title="Open ag-ng generation controls">ag-ng · checking</button>
+          <button class="text-button" id="generation-switch" title="Open generation controls">Generation status…</button>
           <div class="provider-status" title="Responses pass through the project's active writing rules">
             <span class="provider-dot" id="provider-dot"></span>
             <select id="model-select" aria-label="Model"><option>Connecting…</option></select>
@@ -568,7 +568,7 @@
       <div class="dialog-header"><h2>Project direction</h2><button type="button" class="icon-button" id="close-project" aria-label="Close">Close</button></div>
       <div class="dialog-body">
         <section class="reliability-box" aria-labelledby="generation-reliability-title">
-          <h3 class="reliability-title" id="generation-reliability-title">ag-ng generation custody</h3>
+          <h3 class="reliability-title" id="generation-reliability-title">Generation reliability</h3>
           <p class="reliability-copy">Keep a generation in durable custody if this tab closes or a local model takes longer than the browser wait. Turning this off stops new durable dispatches; recovery and inspection continue.</p>
           <label class="toggle-row" for="durable-generation"><input type="checkbox" id="durable-generation">Allow new model dispatches for this project</label>
           <div class="field"><label for="fallback-model">Automatic fallback after a confirmed failure</label><select id="fallback-model"><option value="">No automatic fallback</option></select></div>
@@ -1154,8 +1154,8 @@
         : settings?.status || "The durable generation worker is unavailable.";
       status.classList.toggle("unavailable", !settings?.available);
       quickSwitch.textContent = settings?.available
-        ? `ag-ng · ${toggle.checked ? "on" : "off"}`
-        : "ag-ng · unavailable";
+        ? (toggle.checked ? "Generation enabled" : "Generation paused")
+        : "Generation unavailable";
       quickSwitch.setAttribute("aria-pressed", String(Boolean(toggle.checked)));
     }
 

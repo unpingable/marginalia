@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import runpy
 import shutil
 import subprocess
 import tomllib
@@ -20,6 +21,17 @@ DOCKET_ROOT = Path(
         REPO_ROOT.parents[1] / "docket-river-clerk-live-docket-executor-prerequisite-v1",
     )
 ).resolve()
+
+
+def test_retired_test_inventory_has_an_audited_crosswalk() -> None:
+    configuration = runpy.run_path(str(REPO_ROOT / "tests" / "conftest.py"))
+    retired = configuration["RETIRED_TEST_MODULES"]
+    crosswalk = (REPO_ROOT / "docs" / "ag-ng-migration" / "TEST-COVERAGE-CROSSWALK.md").read_text()
+
+    assert sum(retired.values()) == 418
+    for module, baseline_cases in retired.items():
+        assert f"`{module}`" in crosswalk
+        assert f"{baseline_cases}" in crosswalk
 
 
 def test_sync_stages_the_complete_qualified_ag_distribution(tmp_path: Path) -> None:

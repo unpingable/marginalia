@@ -36,7 +36,7 @@ You can:
 - back up and restore a workspace without turning provider failures into story.
 
 Durable generation is part of every supported deployment. Its project-level
-switch is visible as **ag-ng · on/off** in the application header and is also
+switch is visible as **Generation enabled/paused** in the application header and is also
 the first control in **Project direction → Generation reliability**. It keeps
 work in custody across tab disconnects, shows an explicit indeterminate state
 while reconciliation continues, and permits an optional fallback only after a

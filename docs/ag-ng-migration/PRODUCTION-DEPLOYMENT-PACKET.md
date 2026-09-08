@@ -38,7 +38,7 @@ Deploy the same qualified digest to `marginalia`, `marginalia-generation`,
 
 - verify `/health/ready` names ag-ng as authoritative, the provider socket is
   ready, Docket custody is enabled, and classic fallback is false;
-- confirm the header **ag-ng · on/off** control opens Generation reliability and
+- confirm the header **Generation enabled/paused** control opens Generation reliability and
   accurately changes only new-dispatch admission;
 - run one real writer generation and verify exact model/route, reported usage,
   and known/estimated/unavailable cost in the UI;

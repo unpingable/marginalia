@@ -1,7 +1,7 @@
 # Durable generation operations
 
 Durable generation is required in the supported Compose topology. The visible
-per-project **ag-ng · on/off** control stops new dispatches only. It never routes
+per-project **Generation enabled/paused** control stops new dispatches only. It never routes
 work through classic, and it leaves inspection, reconciliation, evidence
 recovery, and acceptance of already-dispatched work available.
 

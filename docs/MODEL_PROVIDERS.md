@@ -146,6 +146,6 @@ These labels are observational. They do not change admission or retry policy.
 ## Project dispatch switch
 
 Erin can find the switch in two places: the persistent header button labeled
-**ag-ng · on/off**, and the first control under **Project direction → Generation
+**Generation enabled** or **Generation paused**, and the first control under **Project direction → Generation
 reliability**. Off means stop new dispatches. It does not cancel, abandon, hide,
 or synchronously reroute work already in custody.

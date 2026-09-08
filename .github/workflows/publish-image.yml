@@ -90,6 +90,20 @@ jobs:
           docker run --rm --entrypoint /usr/local/bin/ag-providerctl marginalia:ci --help
           docker run --rm --entrypoint /usr/local/bin/docket marginalia:ci --help
 
+      - name: Run the exact-companion custody witness
+        shell: bash
+        run: |
+          set -euo pipefail
+          cid="$(docker create marginalia:ci)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          mkdir -p .qualified-bin
+          docker cp "$cid:/usr/local/bin/ag-loopctl" .qualified-bin/ag-loopctl
+          docker cp "$cid:/usr/local/bin/docket" .qualified-bin/docket
+          chmod 0755 .qualified-bin/ag-loopctl .qualified-bin/docket
+          MARGINALIA_TEST_AG_LOOPCTL="$PWD/.qualified-bin/ag-loopctl" \
+          MARGINALIA_TEST_DOCKET="$PWD/.qualified-bin/docket" \
+            python -m pytest -q tests/test_generation_companion_processes.py
+
       - name: Set up emulation for the arm64 appliance
         uses: docker/setup-qemu-action@v3
         with:

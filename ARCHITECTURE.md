@@ -64,7 +64,7 @@ evidence remain application state; providerd has a separate state volume.
 
 The supported Compose deployment runs the web application, generation worker,
 ag-providerd, backup worker, and synthetic probe. Durable generation is not an
-optional profile. The visible per-project **ag-ng · on/off** switch controls new
+optional profile. The visible per-project **Generation enabled/paused** switch controls new
 dispatch only; pending inspection, reconciliation, and evidence recovery remain
 available.
 

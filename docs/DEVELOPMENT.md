@@ -42,10 +42,13 @@ node tools/check-browser-startup.js
 npm ci && npm run test:browser
 ```
 
-The active release suite excludes named, frozen classic contract suites through
-`tests/conftest.py`; they remain in Git for archaeology. New product behavior
-must be covered by the ag-ng suite, not by installing classic to satisfy old
-fixtures.
+The active release suite excludes the audited classic and donor-product modules
+listed in `tests/conftest.py`; they remain in Git for archaeology. The exact
+collection arithmetic, disposition of every retired module, and replacement
+coverage for writer workflows and migration invariants are maintained in
+[`ag-ng-migration/TEST-COVERAGE-CROSSWALK.md`](ag-ng-migration/TEST-COVERAGE-CROSSWALK.md).
+New product behavior must be covered by the ag-ng-only suite, not by installing
+classic to satisfy old fixtures.
 
 ## Container development
 
