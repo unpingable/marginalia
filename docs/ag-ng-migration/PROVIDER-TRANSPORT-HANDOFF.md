@@ -38,6 +38,13 @@ protocol digest, root policy digest, exact request custody, budget, caller,
 session, and dispatch identity. Timeout or ambiguous command I/O leaves the
 already-reserved dispatch indeterminate; replay cannot redispatch it.
 
+The application admission switch has a distinct observable state. Pausing stops
+new physical dispatches while retaining inspection and reconciliation. Provider
+health clients should represent this as `PAUSED`, not `FAIL`; they must not
+enqueue synthetic work merely to discover the switch state. Recurring probes
+also require a fresh operator-controlled logical identity for each due
+observation rather than replaying the first durable receipt.
+
 Marginalia's generator maps its typed catalog into that policy. Multiple
 Erin-facing selections may share one physical provider/model policy; the UI
 catalog remains complete while the physical policy is emitted once.

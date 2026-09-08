@@ -12,6 +12,10 @@ Qualified local image ID:
 > `1bd4225a94fa82df066923612f713a93ba93a7bb` and will publish a new packet
 > after corrected deployment-parity and live-route qualification.
 
+The replacement was accepted in production on 2026-09-08. See
+`PROVIDER-TRANSPORT-PRODUCTION-ACCEPTANCE.md`. The remainder of this file is the
+withdrawn candidate's historical procedure, not current deployment authority.
+
 Production has **not** been changed by this campaign. Do not deploy until the
 owner gives a separate production decision.
 
