@@ -9,7 +9,7 @@ Qualified local image ID:
 > Claude model and therefore could not reach provider-daemon readiness. The
 > image and the evidence below remain historical qualification records only;
 > they must not be deployed. The replacement campaign pins ag-ng
-> `ca1713a277b587929a6138ff6dbd3f07b8fe676d` and will publish a new packet
+> `1bd4225a94fa82df066923612f713a93ba93a7bb` and will publish a new packet
 > after corrected deployment-parity and live-route qualification.
 
 Production has **not** been changed by this campaign. Do not deploy until the

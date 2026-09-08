@@ -7,7 +7,7 @@ and installer fail closed.
 ## Image contents
 
 - Marginalia `0.1.0`;
-- ag-ng `ca1713a277b587929a6138ff6dbd3f07b8fe676d`;
+- ag-ng `1bd4225a94fa82df066923612f713a93ba93a7bb`;
 - Docket `181589f910b76030b312d6478bd0ac813a630855`;
 - vendored read-only `receipt-v1` `0.1.0`;
 - Codex CLI `0.146.1`;

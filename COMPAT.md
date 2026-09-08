@@ -5,7 +5,7 @@ Marginalia is commit-qualified, not broadly semver-compatible.
 | Dependency/contract | Required value |
 |---|---|
 | Python | `>=3.11` |
-| ag-ng source | `ca1713a277b587929a6138ff6dbd3f07b8fe676d` |
+| ag-ng source | `1bd4225a94fa82df066923612f713a93ba93a7bb` |
 | Docket source | `181589f910b76030b312d6478bd0ac813a630855` |
 | `receipt-v1` | vendored `0.1.0`, historical read-only use |
 | provider RPC | ag-ng fixed-service provider contract at the pinned commit |

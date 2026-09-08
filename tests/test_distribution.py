@@ -202,7 +202,7 @@ def test_release_contract_names_and_pins_the_complete_marginalia_appliance() -> 
     assert "linux/amd64,linux/arm64" in workflow
     assert "docker/setup-qemu-action@v3" in workflow
     assert "repository: unpingable/ag_ng" in workflow
-    assert "ref: ca1713a277b587929a6138ff6dbd3f07b8fe676d" in workflow
+    assert "ref: 1bd4225a94fa82df066923612f713a93ba93a7bb" in workflow
     assert "repository: unpingable/docket" in workflow
     assert "ref: 181589f910b76030b312d6478bd0ac813a630855" in workflow
     assert "./sync-deps.sh" in workflow
