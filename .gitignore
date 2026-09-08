@@ -10,6 +10,7 @@ build/
 node_modules/
 test-results/
 playwright-report/
+/.worktrees/
 
 # Local provider credentials; never tracked.
 .openrouter
@@ -17,8 +18,9 @@ playwright-report/
 agent-governor/
 ag-ng/
 docket-runtime/
-receipt-v1/
 receipt-kernel/
+/secrets/
+/ag-ng-config/
 
 # Claude Code local session data
 .claude/projects/

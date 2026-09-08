@@ -48,6 +48,11 @@ def product_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import gov_webui.adapter as adapter
 
     monkeypatch.setattr(adapter, "MARGINALIA_ENABLE_DONOR_ROUTES", False)
+    # Historical request-shape cases use an in-process provider fake.
+    # Migration cases explicitly turn on the production ag-ng-only boundary.
+    monkeypatch.setattr(adapter, "MARGINALIA_AG_NG_ONLY", False)
+    monkeypatch.setattr(adapter, "MARGINALIA_DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setattr(adapter, "MARGINALIA_CONTEXTS_DIR", str(tmp_path / "contexts"))
     monkeypatch.setattr(adapter, "GOVERNOR_CONTEXTS_DIR", str(tmp_path / "contexts"))
     monkeypatch.setattr(adapter, "GOVERNOR_CONTEXT_ID", "erin-novel")
     monkeypatch.setattr(adapter, "GOVERNOR_MODE", "fiction")
@@ -252,7 +257,7 @@ def test_codex_provider_wrapper_refuses_invalid_timeout(tmp_path: Path, value: s
         "/governor/status",
         "/governor/code/project",
         "/governor/research/state",
-        "/governor/receipts/export",
+        "/v1/historical-receipts/export",
         "/governor/config/effective",
         "/v2/runs",
         "/v2/intent/templates",
@@ -271,8 +276,8 @@ def test_product_api_info_lists_only_writing_surfaces(product_client) -> None:
 
     assert endpoints["project"] == "/v1/project"
     assert endpoints["markdown"] == "/v1/markdown"
-    assert endpoints["fiction_characters"] == "/governor/fiction/characters"
-    assert endpoints["artifacts"] == "/governor/artifacts"
+    assert endpoints["fiction_characters"] == "/v1/story/characters"
+    assert endpoints["artifacts"] == "/v1/artifacts"
     assert not any(key.startswith("v2_") for key in endpoints)
     assert "code_decisions" not in endpoints
     assert "research_state" not in endpoints
@@ -319,33 +324,6 @@ def test_runtime_entrypoint_refuses_nonfiction_mode(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "fiction-only" in result.stderr
     assert not (tmp_path / "data").exists()
-
-
-def test_runtime_entrypoint_rejects_relative_provider_workdir(tmp_path: Path) -> None:
-    environment = os.environ.copy()
-    environment.pop("MARGINALIA_ENABLE_DONOR_ROUTES", None)
-    environment.update(
-        {
-            "GOVERNOR_MODE": "fiction",
-            "MARGINALIA_DATA_ROOT": str(tmp_path / "data"),
-            "BACKEND_TYPE": "codex",
-            "CODEX_PATH": "/app/codex-provider.sh",
-            "CLAUDE_COMMAND_WORKDIR": "relative/provider-work",
-        }
-    )
-
-    result = subprocess.run(
-        [str(REPO_ROOT / "entrypoint.sh")],
-        cwd=REPO_ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-
-    assert result.returncode == 1
-    assert "CLAUDE_COMMAND_WORKDIR must be an absolute path" in result.stderr
 
 
 def test_project_settings_persist_and_reach_every_governed_fiction_request(
@@ -415,13 +393,50 @@ def test_durable_generation_toggle_is_prominent_and_guarded(product_client, monk
         "available": True,
         "enabled": True,
         "fallback_model": "fallback-model",
-        "status": "ready",
+        "status": "ag-ng custody ready",
+        "platform": "ag-ng",
+        "classic_fallback": False,
     }
 
     page = client.get("/").text
-    assert "Generation reliability" in page
+    assert "ag-ng generation custody" in page
     assert 'id="durable-generation"' in page
+    assert 'id="generation-switch"' in page
     assert "stops new durable dispatches" in page
+
+
+def test_ag_ng_only_mode_never_falls_back_to_synchronous_generation(
+    product_client, monkeypatch
+) -> None:
+    client, adapter = product_client
+    monkeypatch.setattr(adapter, "MARGINALIA_AG_NG_ONLY", True)
+    monkeypatch.setattr(adapter, "MARGINALIA_DURABLE_GENERATION_AVAILABLE", True)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Do not dispatch this."}]},
+    )
+
+    assert response.status_code == 422
+    assert "stable client_request_id" in response.json()["detail"]
+
+
+def test_ag_ng_health_names_the_real_execution_owners(
+    product_client, monkeypatch, tmp_path: Path
+) -> None:
+    client, adapter = product_client
+    socket = tmp_path / "provider.sock"
+    monkeypatch.setattr(adapter, "MARGINALIA_AG_NG_ONLY", True)
+    monkeypatch.setattr(adapter, "MARGINALIA_DURABLE_GENERATION_AVAILABLE", True)
+    monkeypatch.setattr(adapter, "MARGINALIA_PROVIDER_SOCKET", str(socket))
+    monkeypatch.setattr(adapter, "_configured_provider_catalog", lambda: object())
+
+    degraded = client.get("/health").json()
+
+    assert degraded["backend"]["authoritative"] == "ag-ng"
+    assert degraded["generation"]["docket_custody"] is True
+    assert degraded["generation"]["classic_fallback"] is False
+    assert "governor" not in degraded
 
 
 def test_durable_chat_is_idempotent_and_does_not_dispatch_synchronously(
@@ -628,7 +643,7 @@ def test_writer_export_contains_project_bible_conversations_and_drafts(
         },
     )
     client.post(
-        "/governor/fiction/characters",
+        "/v1/story/characters",
         json={"name": "Inez", "description": "A conservator", "voice": "Dry"},
     )
     session = client.post("/sessions/", json={"title": "Opening"}).json()
@@ -637,7 +652,7 @@ def test_writer_export_contains_project_bible_conversations_and_drafts(
         json={"role": "user", "content": "Begin at dusk."},
     )
     client.post(
-        "/governor/artifacts",
+        "/v1/artifacts",
         json={"title": "Opening", "content": "The bell stopped.", "kind": "markdown"},
     )
 
@@ -1093,7 +1108,7 @@ async def test_below_watermark_requirement_still_reaches_maintenance(
 class _MaintenanceOnlyCatalog:
     """Minimal catalog exposing one context-maintenance model."""
 
-    def require_available(self, model_id):
+    def resolve(self, model_id):
         from gov_webui.model_providers import ConfiguredModel
 
         return ConfiguredModel(
@@ -1637,7 +1652,7 @@ def _accept(client, adapter, *, kind: str, subject: str, statement: str):
         kind=kind, subject=subject, statement=statement
     )
     return client.post(
-        f"/governor/fiction/capture/{item.id}/accept",
+        f"/v1/story/capture/{item.id}/accept",
         json={"project_id": project},
     )
 
@@ -1667,7 +1682,7 @@ def test_accepting_two_facts_about_one_character_preserves_both(product_client) 
         == 200
     )
 
-    characters = client.get("/governor/fiction/characters").json()["characters"]
+    characters = client.get("/v1/story/characters").json()["characters"]
     halo = next(c for c in characters if c["id"] == "char-halo")
     assert "ghost-interpreter" in halo["description"]
     assert "they/them" in halo["description"]
@@ -1686,13 +1701,11 @@ def test_repeated_acceptance_of_the_same_statement_does_not_duplicate(product_cl
         kind="character", subject="Margie", statement="a salvager in Doverton ", message_id="m2"
     )
     for candidate in (first, second):
-        client.post(
-            f"/governor/fiction/capture/{candidate.id}/accept", json={"project_id": project}
-        )
+        client.post(f"/v1/story/capture/{candidate.id}/accept", json={"project_id": project})
 
     margie = next(
         c
-        for c in client.get("/governor/fiction/characters").json()["characters"]
+        for c in client.get("/v1/story/characters").json()["characters"]
         if c["id"] == "char-margie"
     )
     assert margie["description"].count("a salvager in Doverton") == 1
@@ -1711,7 +1724,7 @@ def test_promoted_constraint_keeps_its_subject(product_client) -> None:
     )
     assert response.status_code == 200
 
-    forbidden = client.get("/governor/fiction/forbidden").json()["forbidden"]
+    forbidden = client.get("/v1/story/forbidden").json()["forbidden"]
     assert any(item["description"].startswith("Halo:") for item in forbidden)
 
 
@@ -1728,7 +1741,7 @@ def test_canon_statement_without_a_referent_is_refused(product_client) -> None:
     )
     assert response.status_code == 422
     assert "readable as canon" in response.json()["detail"]
-    assert client.get("/governor/fiction/characters").json()["characters"] == []
+    assert client.get("/v1/story/characters").json()["characters"] == []
 
 
 def test_self_contained_demonstrative_canon_is_accepted(product_client) -> None:
@@ -1741,7 +1754,7 @@ def test_self_contained_demonstrative_canon_is_accepted(product_client) -> None:
     )
 
     response = client.post(
-        f"/governor/fiction/capture/{candidate.id}/accept",
+        f"/v1/story/capture/{candidate.id}/accept",
         json={"project_id": project},
     )
 
@@ -1756,12 +1769,12 @@ def test_accepted_character_facts_are_never_truncated(product_client) -> None:
     for statement in statements:
         candidate = store.add(kind="character", subject="Halo", statement=statement)
         response = client.post(
-            f"/governor/fiction/capture/{candidate.id}/accept",
+            f"/v1/story/capture/{candidate.id}/accept",
             json={"project_id": project},
         )
         assert response.status_code == 200
 
-    [halo] = client.get(f"/governor/fiction/characters?project_id={project}").json()["characters"]
+    [halo] = client.get(f"/v1/story/characters?project_id={project}").json()["characters"]
     assert all(statement in halo["description"] for statement in statements)
     assert len(halo["description"]) > 4000
 
@@ -1775,13 +1788,13 @@ def test_anchor_ids_are_not_reused_after_deletion(product_client) -> None:
     adapter._get_canon_review_store(project)
 
     for rule in ("first rule", "second rule"):
-        client.post("/governor/fiction/world-rules", json={"project_id": project, "rule": rule})
-    rules = client.get("/governor/fiction/world-rules").json()["rules"]
+        client.post("/v1/story/world-rules", json={"project_id": project, "rule": rule})
+    rules = client.get("/v1/story/world-rules").json()["rules"]
     assert [r["id"] for r in rules] == ["world-1", "world-2"]
 
     # Remove world-1 out of band, as old deployments allowed. The durable
     # allocator must not reclaim the historical identity after a restart.
-    from governor.continuity import create_registry
+    from gov_webui.writer_continuity import create_registry
 
     ctx, _ = adapter._resolve_context(project)
     registry = create_registry(ctx.governor_dir)
@@ -1789,8 +1802,8 @@ def test_anchor_ids_are_not_reused_after_deletion(product_client) -> None:
     registry.save(ctx.governor_dir / "continuity" / "anchors.json")
     adapter._canon_review_stores.clear()
 
-    client.post("/governor/fiction/world-rules", json={"project_id": project, "rule": "third"})
-    assert [r["id"] for r in client.get("/governor/fiction/world-rules").json()["rules"]] == [
+    client.post("/v1/story/world-rules", json={"project_id": project, "rule": "third"})
+    assert [r["id"] for r in client.get("/v1/story/world-rules").json()["rules"]] == [
         "world-2",
         "world-3",
     ]
@@ -1803,11 +1816,11 @@ def test_canon_block_separates_world_facts_from_things_not_to_write(product_clie
     adapter._get_canon_review_store(project)
 
     client.post(
-        "/governor/fiction/world-rules",
+        "/v1/story/world-rules",
         json={"project_id": project, "rule": "Magic requires training."},
     )
     client.post(
-        "/governor/fiction/forbidden",
+        "/v1/story/forbidden",
         json={"project_id": project, "description": "Time travel", "patterns": []},
     )
 
@@ -1855,15 +1868,13 @@ def test_promotion_refuses_a_candidate_that_rests_on_an_interpretation(
         target_anchor_id="forbid-1",
     )
 
-    response = client.post(
-        f"/governor/fiction/capture/{candidate.id}/accept", json={"project_id": project}
-    )
+    response = client.post(f"/v1/story/capture/{candidate.id}/accept", json={"project_id": project})
 
     assert response.status_code == 422
     assert "interpretation" in response.json()["detail"]
-    assert client.get("/governor/fiction/world-rules").json()["rules"] == []
+    assert client.get("/v1/story/world-rules").json()["rules"] == []
     # It stays visible rather than being thrown away.
-    pending = client.get(f"/governor/fiction/captures?project_id={project}").json()
+    pending = client.get(f"/v1/story/captures?project_id={project}").json()
     assert any(c["id"] == candidate.id for c in pending["captures"])
 
 
@@ -1882,9 +1893,7 @@ def test_promotion_refuses_a_candidate_leaning_on_uncanonical_propositions(
         relied_on=["world-99-having-been-human-is-sufficient"],
     )
 
-    response = client.post(
-        f"/governor/fiction/capture/{candidate.id}/accept", json={"project_id": project}
-    )
+    response = client.post(f"/v1/story/capture/{candidate.id}/accept", json={"project_id": project})
 
     assert response.status_code == 422
     assert "not established canon" in response.json()["detail"]
@@ -1896,7 +1905,7 @@ def test_a_mechanically_provable_repair_still_promotes(product_client) -> None:
     project = adapter._project_record(None).id
     adapter._get_canon_review_store(project)
     client.post(
-        "/governor/fiction/world-rules",
+        "/v1/story/world-rules",
         json={"project_id": project, "rule": "Magic requires training."},
     )
 
@@ -1908,12 +1917,10 @@ def test_a_mechanically_provable_repair_still_promotes(product_client) -> None:
         target_anchor_id="world-1",
         relied_on=["world-1"],
     )
-    response = client.post(
-        f"/governor/fiction/capture/{candidate.id}/accept", json={"project_id": project}
-    )
+    response = client.post(f"/v1/story/capture/{candidate.id}/accept", json={"project_id": project})
 
     assert response.status_code == 200
-    forbidden = client.get("/governor/fiction/forbidden").json()["forbidden"]
+    forbidden = client.get("/v1/story/forbidden").json()["forbidden"]
     assert any(item["description"].startswith("Halo:") for item in forbidden)
 
 
@@ -1935,11 +1942,11 @@ def test_scope_narrowing_from_the_observed_cast_cannot_authorize_a_repair(
     project = adapter._project_record(None).id
     adapter._get_canon_review_store(project)
     client.post(
-        "/governor/fiction/world-rules",
+        "/v1/story/world-rules",
         json={"project_id": project, "rule": "Robots cannot perceive ghosts."},
     )
     client.post(
-        "/governor/fiction/world-rules",
+        "/v1/story/world-rules",
         json={
             "project_id": project,
             "rule": "These are the only robots in Doverton.",
@@ -1954,13 +1961,11 @@ def test_scope_narrowing_from_the_observed_cast_cannot_authorize_a_repair(
         target_anchor_id="world-1",
         category="robots",
     )
-    response = client.post(
-        f"/governor/fiction/capture/{candidate.id}/accept", json={"project_id": project}
-    )
+    response = client.post(f"/v1/story/capture/{candidate.id}/accept", json={"project_id": project})
 
     assert response.status_code == 422
     assert "not state that category is complete" in response.json()["detail"]
-    rules = client.get("/governor/fiction/world-rules").json()["rules"]
+    rules = client.get("/v1/story/world-rules").json()["rules"]
     assert rules[0]["rule"] == "Robots cannot perceive ghosts."
 
 
@@ -1970,11 +1975,11 @@ def test_authoritative_enumeration_permits_closed_world_reasoning(product_client
     project = adapter._project_record(None).id
     adapter._get_canon_review_store(project)
     client.post(
-        "/governor/fiction/world-rules",
+        "/v1/story/world-rules",
         json={"project_id": project, "rule": "Robots cannot perceive ghosts."},
     )
     client.post(
-        "/governor/fiction/world-rules",
+        "/v1/story/world-rules",
         json={
             "project_id": project,
             "rule": "These are the only robots in Doverton: Jacqueline, Hope, and Misty.",
@@ -1990,9 +1995,7 @@ def test_authoritative_enumeration_permits_closed_world_reasoning(product_client
         target_anchor_id="world-1",
         category="robots",
     )
-    response = client.post(
-        f"/governor/fiction/capture/{candidate.id}/accept", json={"project_id": project}
-    )
+    response = client.post(f"/v1/story/capture/{candidate.id}/accept", json={"project_id": project})
 
     assert response.status_code == 200
 
@@ -2006,7 +2009,7 @@ def test_a_later_subtype_does_not_make_the_earlier_rule_repairable(product_clien
         "Robots cannot perceive ghosts.",
         "Synthetic beings include robots, uploaded humans, and constructs.",
     ):
-        client.post("/governor/fiction/world-rules", json={"project_id": project, "rule": rule})
+        client.post("/v1/story/world-rules", json={"project_id": project, "rule": rule})
 
     candidate = adapter._get_canon_review_store(project).add(
         kind="world_rule",
@@ -2016,12 +2019,10 @@ def test_a_later_subtype_does_not_make_the_earlier_rule_repairable(product_clien
         target_anchor_id="world-1",
         category="synthetic beings",
     )
-    response = client.post(
-        f"/governor/fiction/capture/{candidate.id}/accept", json={"project_id": project}
-    )
+    response = client.post(f"/v1/story/capture/{candidate.id}/accept", json={"project_id": project})
 
     assert response.status_code == 422
-    assert len(client.get("/governor/fiction/world-rules").json()["rules"]) == 2
+    assert len(client.get("/v1/story/world-rules").json()["rules"]) == 2
 
 
 def test_a_candidate_making_no_extent_claim_is_unaffected(product_client) -> None:
@@ -2036,12 +2037,10 @@ def test_a_candidate_making_no_extent_claim_is_unaffected(product_client) -> Non
         statement="serve again, because Army policy bars former specialists",
         warrant="dropped_subject",
     )
-    response = client.post(
-        f"/governor/fiction/capture/{candidate.id}/accept", json={"project_id": project}
-    )
+    response = client.post(f"/v1/story/capture/{candidate.id}/accept", json={"project_id": project})
 
     assert response.status_code == 200
-    forbidden = client.get("/governor/fiction/forbidden").json()["forbidden"]
+    forbidden = client.get("/v1/story/forbidden").json()["forbidden"]
     assert any(item["description"].startswith("Halo:") for item in forbidden)
 
 

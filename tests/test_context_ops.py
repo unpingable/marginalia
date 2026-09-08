@@ -24,6 +24,7 @@ from gov_webui.context_summary import (
 from gov_webui.library_store import LibraryStore
 from gov_webui.ops import migration_preflight
 from gov_webui.session_store import SessionMessage, SessionStore
+from gov_webui.state_layout import migrate_state_layout
 
 
 def _seed_session(tmp_path: Path):
@@ -45,6 +46,7 @@ def _seed_session(tmp_path: Path):
 
 
 def _operations(data_root: Path) -> ContextOperations:
+    migrate_state_layout(data_root)
     return ContextOperations(
         data_root=data_root,
         default_context_id="erin-writing",

@@ -25,6 +25,7 @@ from gov_webui.creative_project import CreativeProjectConfig
 from gov_webui.library_store import LibraryStore
 from gov_webui.manuscript_store import ManuscriptState
 from gov_webui.snapshot_store import SnapshotIndex
+from gov_webui.state_layout import discovered_contexts_root, discovered_shared_root
 
 
 def application_version() -> str:
@@ -66,7 +67,8 @@ def migration_preflight(
 ) -> dict[str, Any]:
     """Validate known durable records and optionally apply additive migrations."""
     root = data_root.resolve()
-    library_path = root / "marginalia" / "library.json"
+    shared = discovered_shared_root(root)
+    library_path = shared / "library.json"
     migration_required = False
     source_schema: int | None = None
     if library_path.exists():
@@ -115,7 +117,7 @@ def migration_preflight(
             "schemas": schema_versions(),
         }
 
-    context_base = root / ".governor"
+    context_base = discovered_contexts_root(root)
     for project in state.projects.values():
         context_root = context_base / project.context_id
         sessions_dir = context_root / "sessions"
@@ -146,7 +148,7 @@ def migration_preflight(
             "manuscript": (context_root / "marginalia" / "manuscript.json", ManuscriptState),
             "canon review": (context_root / "marginalia" / "canon-review.json", CanonReviewState),
             "snapshot index": (
-                root / "marginalia" / "snapshots" / project.id / "index.json",
+                shared / "snapshots" / project.id / "index.json",
                 SnapshotIndex,
             ),
         }

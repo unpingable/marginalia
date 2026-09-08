@@ -1,8 +1,7 @@
 # Marginalia M0 runtime lock (Python 3.11+)
 #
-# Agent Governor and receipt-v1 are local source dependencies qualified by
-# AG_CONTRACT_COMMIT. Install them with --no-deps after this lock, as shown in
-# README.md. Container builds do the same.
+# receipt-v1 is an independent local source dependency retained only for
+# historical receipt reading. Container builds install it without resolution.
 
 annotated-doc==0.0.4
 annotated-types==0.7.0

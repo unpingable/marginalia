@@ -85,15 +85,15 @@ cannot be imported through that role without the explicit authored assertion.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/governor/fiction/characters` | GET / POST | List or add Characters |
-| `/governor/fiction/characters/{id}` | DELETE | Remove a Character |
-| `/governor/fiction/world-rules` | GET / POST | List or add World Rules |
-| `/governor/fiction/forbidden` | GET / POST | List or add negative constraints |
-| `/governor/fiction/capture/scan` | POST | Find canon candidates in a response |
-| `/governor/fiction/captures` | GET | List pending canon candidates |
-| `/governor/fiction/capture/{id}` | PATCH | Correct a pending suggestion without accepting it |
-| `/governor/fiction/capture/{id}/accept` | POST | Accept a candidate into canon |
-| `/governor/fiction/capture/{id}/reject` | POST | Dismiss a candidate |
+| `/v1/story/characters` | GET / POST | List or add Characters |
+| `/v1/story/characters/{id}` | DELETE | Remove a Character |
+| `/v1/story/world-rules` | GET / POST | List or add World Rules |
+| `/v1/story/forbidden` | GET / POST | List or add negative constraints |
+| `/v1/story/capture/scan` | POST | Find canon candidates in a response |
+| `/v1/story/captures` | GET | List pending canon candidates |
+| `/v1/story/capture/{id}` | PATCH | Correct a pending suggestion without accepting it |
+| `/v1/story/capture/{id}/accept` | POST | Accept a candidate into canon |
+| `/v1/story/capture/{id}/reject` | POST | Dismiss a candidate |
 
 The historical `/governor` naming is an internal package/API migration seam;
 the served product language is Canon. Model output is only a pending candidate
@@ -103,16 +103,16 @@ until the writer explicitly accepts it.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/governor/artifacts` | GET / POST | Filter/search or create typed artifacts |
-| `/governor/artifacts/{id}` | GET / PUT / PATCH / DELETE | Read, revise, organize, trash, or remove an artifact |
-| `/governor/artifacts/{id}/working-copy` | PUT / DELETE | Autosave or discard mutable text without creating a revision |
-| `/governor/artifacts/{id}/version/{version}` | GET | Read a historical revision |
-| `/governor/artifacts/{id}/compare` | GET | Compare two committed revisions |
-| `/governor/artifacts/{id}/canon-comparison` | GET | Deterministically check draft/working-copy text against accepted canon |
-| `/governor/artifacts/{id}/canon-proposal` | POST | Create a provenance-linked pending canon review item |
-| `/governor/artifacts/{id}/version/{version}/restore` | POST | Restore old text as a new revision |
+| `/v1/artifacts` | GET / POST | Filter/search or create typed artifacts |
+| `/v1/artifacts/{id}` | GET / PUT / PATCH / DELETE | Read, revise, organize, trash, or remove an artifact |
+| `/v1/artifacts/{id}/working-copy` | PUT / DELETE | Autosave or discard mutable text without creating a revision |
+| `/v1/artifacts/{id}/version/{version}` | GET | Read a historical revision |
+| `/v1/artifacts/{id}/compare` | GET | Compare two committed revisions |
+| `/v1/artifacts/{id}/canon-comparison` | GET | Deterministically check draft/working-copy text against accepted canon |
+| `/v1/artifacts/{id}/canon-proposal` | POST | Create a provenance-linked pending canon review item |
+| `/v1/artifacts/{id}/version/{version}/restore` | POST | Restore old text as a new revision |
 
-`GET /governor/artifacts` supports `view=active|trash|all`, `q`, `status`, and
+`GET /v1/artifacts` supports `view=active|trash|all`, `q`, `status`, and
 `tag`. Status values are `idea`, `drafting`, `revised`, and `final`. Trash is
 reversible; hard deletion remains an explicit API operation.
 
@@ -150,7 +150,8 @@ Old code-builder, research, dashboard, intent-compiler, raw-receipt, and generic
 administration routes remain in source only to keep their historical tests
 available during staged deletion. They return `404` in a normal Marginalia
 runtime and are omitted from `/api/info`. The test-only
-`MARGINALIA_ENABLE_DONOR_ROUTES=1` switch is not a supported product mode.
+Classic donor routes are frozen source history and cannot be enabled by runtime
+configuration.
 
 ## Long-session generation outcomes
 

@@ -1,11 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared test fixtures for Marginalia tests.
+"""Shared test configuration for the ag-ng-only Marginalia product.
 
-The retained donor suites explicitly opt into quarantined historical routes.
-Product-surface regressions turn this switch off and assert the normal M1
-boundary.
+The ignored modules are frozen tests for removed classic-daemon and non-fiction
+donor surfaces. Their history remains in Git; they are not a release dependency.
 """
 
-import os
-
-os.environ.setdefault("MARGINALIA_ENABLE_DONOR_ROUTES", "1")
+collect_ignore = [
+    "test_adapter.py",
+    "test_code_builder_smoke.py",
+    "test_dashboard_v2_api.py",
+    "test_governed_chat_adapter.py",
+    "test_intent_api.py",
+    "test_live_governed_chat_contract.py",
+    "test_parity.py",
+    "test_reliability.py",
+    "test_research_builder_smoke.py",
+    "test_summaries.py",
+]

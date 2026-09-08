@@ -61,6 +61,7 @@ class LogicalRequest:
     client_request_id: str
     project_id: str
     session_id: str
+    purpose: str
     expected_revision: int
     canon_fingerprint: str
     guidance_fingerprint: str
@@ -154,7 +155,7 @@ def delivery_digest(
 class GenerationStore:
     """SQLite custody index shared by the web and worker processes."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -185,6 +186,8 @@ class GenerationStore:
                     client_request_id TEXT NOT NULL,
                     project_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
+                    purpose TEXT NOT NULL DEFAULT 'conversation' CHECK(purpose IN
+                        ('conversation','context-maintenance','synthetic')),
                     expected_revision INTEGER NOT NULL CHECK(expected_revision >= 0),
                     canon_fingerprint TEXT NOT NULL,
                     guidance_fingerprint TEXT NOT NULL,
@@ -260,6 +263,11 @@ class GenerationStore:
             if "estimated_prompt_tokens" not in request_columns:
                 connection.execute(
                     "ALTER TABLE logical_request ADD COLUMN estimated_prompt_tokens INTEGER"
+                )
+            if "purpose" not in request_columns:
+                connection.execute(
+                    "ALTER TABLE logical_request ADD COLUMN purpose TEXT NOT NULL "
+                    "DEFAULT 'conversation'"
                 )
             connection.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
@@ -340,6 +348,7 @@ class GenerationStore:
         client_request_id: str,
         project_id: str,
         session_id: str,
+        purpose: str = "conversation",
         expected_revision: int,
         canon_fingerprint: str,
         guidance_fingerprint: str,
@@ -353,6 +362,8 @@ class GenerationStore:
         client_request_id = client_request_id.strip()
         if not client_request_id:
             raise ValueError("client_request_id must not be empty")
+        if purpose not in {"conversation", "context-maintenance", "synthetic"}:
+            raise ValueError("unsupported generation purpose")
         if estimated_prompt_tokens is not None and (
             isinstance(estimated_prompt_tokens, bool)
             or not isinstance(estimated_prompt_tokens, int)
@@ -365,6 +376,7 @@ class GenerationStore:
             "client_request_id": client_request_id,
             "project_id": project_id,
             "session_id": session_id,
+            "purpose": purpose,
             "expected_revision": expected_revision,
             "canon_fingerprint": canon_fingerprint,
             "guidance_fingerprint": guidance_fingerprint,
@@ -395,16 +407,17 @@ class GenerationStore:
                 return CreateResult(self._logical(existing), False)
             connection.execute(
                 """INSERT INTO logical_request(
-                       id,client_request_id,project_id,session_id,expected_revision,
+                       id,client_request_id,project_id,session_id,purpose,expected_revision,
                        canon_fingerprint,guidance_fingerprint,original_model,original_route,
                        fallback_policy_json,delivery_digest,estimated_prompt_tokens,request_digest,
                        request_json,status,created_at,updated_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     logical_id,
                     client_request_id,
                     project_id,
                     session_id,
+                    purpose,
                     expected_revision,
                     canon_fingerprint,
                     guidance_fingerprint,
@@ -711,6 +724,14 @@ class GenerationStore:
                 "UPDATE generation_candidate SET accepted_message_id=? WHERE id=?",
                 (message_id, candidate_id),
             )
+            # A candidate may have been application-blocked and then explicitly
+            # fixed or overridden by the author. Acceptance restores the
+            # dispatch's evidence-bearing terminal state; BLOCKED describes an
+            # unresolved application decision, not provider execution.
+            connection.execute(
+                "UPDATE dispatch SET status=?,updated_at=? WHERE id=?",
+                (DispatchStatus.CANDIDATE, now, candidate.dispatch_id),
+            )
             connection.execute(
                 """UPDATE logical_request SET status=?,accepted_candidate_id=?,updated_at=?
                    WHERE id=?""",
@@ -726,7 +747,13 @@ class GenerationStore:
             )
             connection.commit()
 
-    def block_candidate(self, candidate_id: str, reason: str) -> None:
+    def block_candidate(
+        self,
+        candidate_id: str,
+        reason: str,
+        *,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
         """Record a current application refusal without erasing response custody."""
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -758,7 +785,34 @@ class GenerationStore:
                 connection,
                 candidate.logical_request_id,
                 "candidate_blocked",
-                {"reason": reason},
+                {"reason": reason, **(detail or {})},
+                dispatch_id=candidate.dispatch_id,
+                candidate_id=candidate_id,
+            )
+            connection.commit()
+
+    def record_candidate_resolution(
+        self,
+        candidate_id: str,
+        action: str,
+        *,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        """Append a body-free audit event for an explicit writer decision."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM generation_candidate WHERE id=?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(candidate_id)
+            candidate = self._candidate(row)
+            self._event(
+                connection,
+                candidate.logical_request_id,
+                "candidate_resolution",
+                {"action": action, **(detail or {})},
                 dispatch_id=candidate.dispatch_id,
                 candidate_id=candidate_id,
             )
@@ -922,6 +976,7 @@ class GenerationStore:
             client_request_id=row["client_request_id"],
             project_id=row["project_id"],
             session_id=row["session_id"],
+            purpose=row["purpose"],
             expected_revision=row["expected_revision"],
             canon_fingerprint=row["canon_fingerprint"],
             guidance_fingerprint=row["guidance_fingerprint"],

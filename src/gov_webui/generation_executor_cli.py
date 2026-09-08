@@ -3,14 +3,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
-
-from gov_webui.daemon_client import DaemonChatClient, default_socket_path
+from gov_webui.ag_provider_gateway import AgProviderGateway
 from gov_webui.evidence_store import EncryptedEvidenceStore
 from gov_webui.generation_executor import (
     ExecutorError,
@@ -18,7 +15,6 @@ from gov_webui.generation_executor import (
     GenerationExecutor,
     parse_docket_dispatch,
 )
-from gov_webui.governed_chat_adapter import GovernedChatAdapter
 
 
 def _read_dispatch() -> bytes:
@@ -28,38 +24,22 @@ def _read_dispatch() -> bytes:
     return content
 
 
-async def _provider_request(payload: dict[str, Any]) -> dict[str, Any]:
-    required = {"context_id", "messages", "model"}
-    if not isinstance(payload, dict) or set(payload) != required:
-        raise ExecutorError("frozen provider request does not have the exact v1 shape")
-    if not isinstance(payload["context_id"], str) or not payload["context_id"]:
-        raise ExecutorError("frozen provider request has no context identity")
-    if not isinstance(payload["model"], str) or not isinstance(payload["messages"], list):
-        raise ExecutorError("frozen provider request model/messages are invalid")
-    governor_dir = Path(os.environ.get("GOVERNOR_DAEMON_DIR", "/data/.governor"))
-    socket = os.environ.get("GOVERNOR_SOCKET") or str(default_socket_path(governor_dir))
-    adapter = GovernedChatAdapter(
-        DaemonChatClient(socket),
-        context_id=payload["context_id"],
-        expected_governor_dir=governor_dir,
-    )
-    try:
-        return await adapter.chat_send(messages=payload["messages"], model=payload["model"])
-    finally:
-        await adapter.close()
-
-
-def _provider(payload: dict[str, Any]) -> dict[str, Any]:
-    return asyncio.run(_provider_request(payload))
-
-
 def _executor(plan: ExecutorPlan) -> GenerationExecutor:
+    if None in (plan.providerctl, plan.providerctl_config, plan.model_config):
+        raise ExecutorError("classic v1 executor plans are historical and cannot dispatch")
+    timeout = float(os.environ.get("MARGINALIA_PROVIDER_RPC_TIMEOUT_SECONDS", "1830"))
+    provider = AgProviderGateway(
+        plan.providerctl,
+        plan.providerctl_config,
+        plan.model_config,
+        timeout_seconds=timeout,
+    )
     evidence = EncryptedEvidenceStore(
         plan.evidence_root,
         plan.evidence_keyring,
         retention_days=plan.evidence_retention_days,
     )
-    return GenerationExecutor(plan, provider=_provider, evidence_writer=evidence.write)
+    return GenerationExecutor(plan, provider=provider, evidence_writer=evidence.write)
 
 
 def run(arguments: list[str]) -> dict[str, str] | str:

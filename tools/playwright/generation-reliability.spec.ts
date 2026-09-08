@@ -52,17 +52,17 @@ async function mockWritingRoom(page: Page, available: boolean, enabled = false) 
       body = { node_count: 0, word_count: 0, missing_artifact_ids: [] };
     } else if (path === '/v1/manuscript') {
       body = { nodes: [] };
-    } else if (path.includes('/fiction/characters')) {
+    } else if (path.includes('/v1/story/characters')) {
       body = { characters: [] };
-    } else if (path.includes('/fiction/world-rules')) {
+    } else if (path.includes('/v1/story/world-rules')) {
       body = { rules: [] };
-    } else if (path.includes('/fiction/forbidden')) {
+    } else if (path.includes('/v1/story/forbidden')) {
       body = { forbidden: [] };
     } else if (path === '/v1/entities') {
       body = { entities: [] };
-    } else if (path.includes('/fiction/captures')) {
+    } else if (path.includes('/v1/story/captures')) {
       body = { captures: [] };
-    } else if (path === '/governor/artifacts') {
+    } else if (path === '/v1/artifacts') {
       body = { artifacts: [] };
     } else if (path === '/v1/project/snapshots') {
       body = { snapshots: [] };
@@ -80,9 +80,10 @@ async function mockWritingRoom(page: Page, available: boolean, enabled = false) 
 test('reliability control is prominent and unavailable state is explicit', async ({ page }) => {
   await mockWritingRoom(page, false);
   await page.goto('/');
-  await page.locator('#edit-project').click();
+  await expect(page.locator('#generation-switch')).toHaveText('ag-ng · unavailable');
+  await page.locator('#generation-switch').click();
 
-  await expect(page.getByRole('heading', { name: 'Generation reliability' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'ag-ng generation custody' })).toBeVisible();
   await expect(page.locator('#durable-generation')).toBeDisabled();
   await expect(page.locator('#generation-reliability-status')).toContainText('unavailable');
   await expect(page.getByText('What does this change?')).toBeVisible();
@@ -91,7 +92,8 @@ test('reliability control is prominent and unavailable state is explicit', async
 test('writer can enable custody and choose confirmed-failure fallback', async ({ page }) => {
   const saved = await mockWritingRoom(page, true);
   await page.goto('/');
-  await page.locator('#edit-project').click();
+  await expect(page.locator('#generation-switch')).toHaveText('ag-ng · off');
+  await page.locator('#generation-switch').click();
 
   await page.locator('#durable-generation').check();
   await expect(page.locator('#fallback-model')).toBeEnabled();

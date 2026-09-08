@@ -7,55 +7,77 @@ services:
     ports:
       - "${MARGINALIA_BIND_HOST:-127.0.0.1}:${MARGINALIA_PORT:-8000}:8000"
     environment:
-      - BACKEND_TYPE=codex
-      - CODEX_PATH=/app/codex-provider.sh
-      - CODEX_NATIVE_PATH=/opt/codex/codex
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GOVERNOR_CONTEXT_ID=${GOVERNOR_CONTEXT_ID:-erin-writing}
       - GOVERNOR_MODE=fiction
       - MARGINALIA_DATA_ROOT=/data
+      - MARGINALIA_CONTEXTS_DIR=/data/.marginalia/contexts
       - MARGINALIA_BACKUP_ROOT=/backups
       - MARGINALIA_BACKUP_REQUIRE_REMOTE=${MARGINALIA_BACKUP_REQUIRE_REMOTE:-false}
       - MARGINALIA_DEPLOYMENT_ID=${MARGINALIA_DEPLOYMENT_ID:-compose}
       - MARGINALIA_ALLOWED_ORIGINS=${MARGINALIA_ALLOWED_ORIGINS:-}
-      - MARGINALIA_MODEL_CONFIG=${MARGINALIA_MODEL_CONFIG:-}
       - MARGINALIA_CONTEXT_MAINTENANCE_MODEL=${MARGINALIA_CONTEXT_MAINTENANCE_MODEL:-claude-context-summary}
-      - MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS=${MARGINALIA_GOVERNOR_INVOCATION_TIMEOUT_SECONDS:-1810}
-      - MARGINALIA_GOVERNOR_CHAT_TIMEOUT_SECONDS=${MARGINALIA_GOVERNOR_CHAT_TIMEOUT_SECONDS:-1830}
-      - MARGINALIA_GOVERNOR_RPC_TIMEOUT_SECONDS=${MARGINALIA_GOVERNOR_RPC_TIMEOUT_SECONDS:-5}
-      - MARGINALIA_GOVERNOR_WEDGE_SECONDS=${MARGINALIA_GOVERNOR_WEDGE_SECONDS:-1820}
-      - GOVERNOR_SOCKET=/run/marginalia/governor.sock
-      - MARGINALIA_DURABLE_GENERATION_AVAILABLE=${MARGINALIA_DURABLE_GENERATION_AVAILABLE:-false}
-      - MARGINALIA_EVIDENCE_KEY_FILE=/run/secrets/marginalia-generation/marginalia-evidence-keys.json
+      - MARGINALIA_DURABLE_GENERATION_AVAILABLE=true
+      - MARGINALIA_MODEL_CONFIG=/etc/marginalia/providers.json
+      - MARGINALIA_EVIDENCE_KEY_FILE=/run/secrets/marginalia-evidence-keys.json
     volumes:
       - marginalia_data:/data
       - marginalia_runtime:/run/marginalia
-      - ${MARGINALIA_GENERATION_SECRETS_HOST_PATH:-./secrets}:/run/secrets/marginalia-generation:ro
+      - ${MARGINALIA_AG_NG_CONFIG_HOST_PATH:-./ag-ng-config}:/run/marginalia-input/config:ro
+      - ${MARGINALIA_GENERATION_SECRETS_HOST_PATH:-./secrets}/marginalia-evidence-keys.json:/run/marginalia-input/web-secrets/marginalia-evidence-keys.json:ro
       - ${MARGINALIA_BACKUP_HOST_PATH:-./backups}:/backups
+    depends_on:
+      marginalia-providerd:
+        condition: service_healthy
+      marginalia-generation:
+        condition: service_started
     restart: unless-stopped
 
   marginalia-generation:
-    profiles: ["durable-generation"]
     image: ${MARGINALIA_IMAGE:-ghcr.io/unpingable/marginalia:0.1.0}
     container_name: marginalia-generation
-    command: ["marginalia-generation-worker"]
+    command: ["/app/generation-worker-entrypoint.sh"]
     environment:
-      - GOVERNOR_CONTEXTS_DIR=/data/.governor
-      - GOVERNOR_DAEMON_DIR=/data/.governor
-      - GOVERNOR_SOCKET=/run/marginalia/governor.sock
+      - MARGINALIA_DATA_ROOT=/data
+      - MARGINALIA_CONTEXTS_DIR=/data/.marginalia/contexts
       - MARGINALIA_AG_ISSUER_KEY_FILE=/run/secrets/marginalia-generation/marginalia-ag-issuer.pk8
       - MARGINALIA_EVIDENCE_KEY_FILE=/run/secrets/marginalia-generation/marginalia-evidence-keys.json
       - MARGINALIA_EVIDENCE_RETENTION_DAYS=${MARGINALIA_EVIDENCE_RETENTION_DAYS:-30}
       - MARGINALIA_GENERATION_POLL_SECONDS=${MARGINALIA_GENERATION_POLL_SECONDS:-2}
+      - MARGINALIA_AG_PROVIDERCTL=/usr/local/bin/ag-providerctl
+      - MARGINALIA_AG_PROVIDERCTL_CONFIG=/etc/marginalia/providerctl.toml
+      - MARGINALIA_MODEL_CONFIG=/etc/marginalia/providers.json
     volumes:
       - marginalia_data:/data
       - marginalia_runtime:/run/marginalia
-      - ${MARGINALIA_GENERATION_SECRETS_HOST_PATH:-./secrets}:/run/secrets/marginalia-generation:ro
+      - ${MARGINALIA_AG_NG_CONFIG_HOST_PATH:-./ag-ng-config}:/run/marginalia-input/config:ro
+      - ${MARGINALIA_GENERATION_SECRETS_HOST_PATH:-./secrets}/marginalia-ag-issuer.pk8:/run/marginalia-input/worker-secrets/marginalia-ag-issuer.pk8:ro
+      - ${MARGINALIA_GENERATION_SECRETS_HOST_PATH:-./secrets}/marginalia-evidence-keys.json:/run/marginalia-input/worker-secrets/marginalia-evidence-keys.json:ro
+      - ${MARGINALIA_GENERATION_SECRETS_HOST_PATH:-./secrets}/providerctl/rpc.pk8:/run/marginalia-input/worker-secrets/rpc.pk8:ro
     depends_on:
-      marginalia:
-        condition: service_healthy
+      marginalia-providerd:
+        condition: service_started
     healthcheck:
       disable: true
+    restart: unless-stopped
+
+  marginalia-providerd:
+    image: ${MARGINALIA_IMAGE:-ghcr.io/unpingable/marginalia:0.1.0}
+    container_name: marginalia-providerd
+    command: ["/app/providerd-entrypoint.sh"]
+    environment:
+      - CREDENTIALS_DIRECTORY=/run/credentials/marginalia-providerd
+    volumes:
+      - marginalia_providerd_data:/var/lib/agent-governor/providerd
+      - marginalia_runtime:/run/marginalia
+      - ${MARGINALIA_AG_NG_CONFIG_HOST_PATH:-./ag-ng-config}:/run/marginalia-input/config:ro
+      - ${MARGINALIA_GENERATION_SECRETS_HOST_PATH:-./secrets}/providerd:/run/marginalia-input/providerd-secrets:ro
+      - ${MARGINALIA_PROVIDER_WORK_HOST_PATH:-./provider-work}:/var/lib/marginalia/provider-work
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/marginalia/providerd/provider.sock"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 5s
     restart: unless-stopped
 
   marginalia-backup:
@@ -99,3 +121,4 @@ services:
 volumes:
   marginalia_data:
   marginalia_runtime:
+  marginalia_providerd_data:

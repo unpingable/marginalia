@@ -1,59 +1,59 @@
 # Generation evidence deployment specification
 
-This specification applies only to the durable-generation feature. It uses the
-existing Marginalia process, volume, backup, and operator mechanisms; it does
-not introduce a separate security platform.
+This uses existing Marginalia, Compose, NAS, and operator mechanisms. It does
+not create a separate security platform.
 
-## Ownership and access
+## Process ownership and readers
 
-- The `marginalia-generation` process is the only process that creates provider
-  response blobs. It writes authenticated AES-256-GCM envelopes below the
-  selected project's `<context>/marginalia/generation-evidence/blobs/` directory.
-- The `marginalia` web process reads a blob only while reconciling or accepting
-  its exact candidate. Every read, refused expired read, write, and purge is
-  appended to `generation-evidence/access.jsonl` without response content.
-- The backup worker can read the data volume and therefore copies ciphertext,
-  but it is not given the keyring and cannot decrypt response bodies.
-- Application API authentication and loopback binding remain the read-access
-  boundary. No endpoint returns raw evidence; candidate inspection returns
-  lifecycle facts, digests, and the accepted result only through the existing
-  authenticated writing-room response.
+- `marginalia-generation` is the only process that writes provider response
+  evidence. It receives the authorization issuer, providerctl identity, and
+  evidence keyring, but no provider API credential.
+- `marginalia-providerd` receives its RPC identity, provider API credential
+  files, and optional command-provider auth volume. It cannot read Marginalia's
+  evidence keyring or writing state.
+- `marginalia` receives the model catalog and evidence keyring so it can
+  reconcile and accept an exact candidate. It receives no issuer, RPC private
+  key, provider API credential, or provider login state.
+- `marginalia-backup` can copy encrypted evidence from its read-only data mount
+  but receives no keyring.
 
-## Keys
+No API returns raw evidence. Candidate inspection exposes lifecycle facts and
+digests; story content appears only through application acceptance.
 
-The application and generation worker receive one read-only keyring file at
-the configured `MARGINALIA_EVIDENCE_KEY_FILE`. Its closed v1 document records
-an active key ID and one or more 32-byte keys. Key IDs are stored with every
-blob, so rotation is additive: retain old key versions until every corresponding
-live body and retained backup has expired.
+## Store and audit
 
-The keyring is never stored below `MARGINALIA_DATA_ROOT`, never included in a
-workspace archive, and must be mode 0600 or stricter. Deployment owns a separate
-recoverable copy. A backup is not declared restorable until the archive is
-restored into an isolated root and its ciphertext is decrypted with that
-separately supplied keyring. Losing the keyring makes retained ciphertext
-unrecoverable; restoring a data volume alone must not be reported as response
-recovery.
+Encrypted AES-256-GCM envelopes live below each project's
+`marginalia/generation-evidence/blobs/` directory. The associated access log
+records body-free write, read, refused-expired-read, and purge events. Provider
+request and response capture excludes process environments, credential files,
+authorization headers, and provider login state. The captured body begins after
+ag-providerd has applied credentials and contains only the request/result
+material needed for custody and reconciliation.
 
-Compose mounts the host generation-secret directory read-only into the web and
-generation-worker containers. The backup container receives neither that mount
-nor the keyring. The current appliance runs both readers as the container's root
-identity; host file mode 0600 and local Docker administration are therefore the
-concrete access boundary. Key creation is one-shot and refuses to replace either
-existing file.
+## Keys and recovery
 
-## Retention and backup consequence
+The closed v1 keyring records an active key ID and versioned keys. Blob metadata
+records the key ID. Rotation is additive: retain old versions until every
+matching live body and retained backup has expired.
 
-Live response bodies expire after the configured retention interval (30 days
-by default). Purging deletes the live encrypted envelope and records the purge;
-the candidate identity, response digest, attempt identity, and lifecycle facts
-remain. Live expiry does not delete ciphertext already captured in retained
-workspace archives. Those copies remain decryptable for the archive's full
-retention period, so key retention must cover the longer of evidence retention
-and backup retention.
+Keys are never below `MARGINALIA_DATA_ROOT`, in Git, in project exports, or in a
+workspace archive. On this installation they live under the owner-only NAS
+recovery hierarchy. Entrypoints copy a bind-mounted source into a root-owned
+`0600` file inside each authorized container.
 
-Workspace backup uses SQLite's online backup API for each live database and
-does not copy WAL/SHM files independently. It copies encrypted evidence blobs
-and access records, but never key material. Archive integrity and application
-restore checks are necessary but not sufficient for evidence recovery; the
-separately keyed decryption rehearsal is the final evidence-specific check.
+A backup is not evidence-recoverable merely because checksums pass. Restore a
+ciphertext sample into an isolated root, separately supply the matching NAS
+keyring, and prove decryption. Record the key ID used without recording key
+bytes. Losing that key makes retained ciphertext unrecoverable.
+
+## Expiry and backups
+
+Live bodies expire after `MARGINALIA_EVIDENCE_RETENTION_DAYS` (30 by default).
+Purge removes the live encrypted envelope and retains non-secret candidate,
+digest, attempt, and audit facts. It cannot remove ciphertext already copied
+into a retained backup. Key-version retention therefore covers the longer of
+live evidence retention and backup retention.
+
+Workspace backup uses SQLite's online backup API and copies encrypted blobs and
+audit records, never key material. Restore exercises both the application
+archive and separately keyed evidence decryption.

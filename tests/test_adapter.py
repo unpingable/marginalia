@@ -31,6 +31,8 @@ def mock_env(tmp_contexts_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GOVERNOR_CONTEXT_ID", "test-context")
     monkeypatch.setenv("GOVERNOR_MODE", "general")
     monkeypatch.setenv("GOVERNOR_CONTEXTS_DIR", str(tmp_contexts_dir))
+    monkeypatch.setenv("MARGINALIA_CONTEXTS_DIR", str(tmp_contexts_dir))
+    monkeypatch.setenv("MARGINALIA_AG_NG_ONLY", "false")
 
 
 @pytest.fixture
@@ -99,6 +101,9 @@ def app(mock_env, reset_adapter_globals):
     import gov_webui.adapter as adapter_mod
 
     importlib.reload(adapter_mod)
+    # Frozen classic-path contract tests only. Production cannot select this
+    # path and its release image does not contain classic Agent Governor.
+    adapter_mod.MARGINALIA_AG_NG_ONLY = False
     return adapter_mod.app
 
 
@@ -220,34 +225,6 @@ class TestHealthEndpoint:
 
         assert response.status_code == 200
         assert response.json()["context_preparation"] == preparing
-
-
-def test_synthetic_governor_uses_isolated_context_and_preserves_sessions(
-    client, tmp_contexts_dir
-) -> None:
-    import gov_webui.adapter as adapter_mod
-    from governor.session_store import SessionStore
-
-    adapter_mod._session_store = SessionStore(tmp_contexts_dir / "test-context" / "sessions")
-    created = client.post("/sessions/", json={"title": "User conversation"}).json()
-    client.post(
-        f"/sessions/{created['id']}/messages",
-        json={"role": "user", "content": "User-owned message"},
-    )
-    before = client.get(f"/sessions/{created['id']}").json()
-    synthetic = fake_governed_chat(content="synthetic reply", model="test-model")
-    adapter_mod._synthetic_governed_chat_adapter = synthetic
-
-    response = client.post(
-        "/v1/internal/synthetic-governor",
-        json={"model": "test-model", "marker": "qualification"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "PASS"
-    assert response.json()["context_id"] == adapter_mod.MARGINALIA_SYNTHETIC_CONTEXT_ID
-    assert client.get(f"/sessions/{created['id']}").json() == before
-    synthetic.chat_send.assert_awaited_once()
 
 
 # ============================================================================

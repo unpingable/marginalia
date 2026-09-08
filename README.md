@@ -35,7 +35,8 @@ You can:
 - compile or export Markdown and DOCX, plus a portable project archive;
 - back up and restore a workspace without turning provider failures into story.
 
-When the deployment enables durable generation, its project-level switch is
+Durable generation is part of every supported deployment. Its project-level
+switch is visible as **ag-ng · on/off** in the application header and is also
 the first control in **Project direction → Generation reliability**. It keeps
 work in custody across tab disconnects, shows an explicit indeterminate state
 while reconciliation continues, and permits an optional fallback only after a
@@ -44,35 +45,31 @@ synchronously reroute work already in custody.
 
 ## Install and start writing
 
-Marginalia currently runs as a local Docker appliance. The supported launcher
-keeps container details out of the normal writing workflow and stores writing
-separately from model login state.
-
-The public `v0.1.0` appliance is not yet published. After it is published,
-installation will be:
+Marginalia runs as a local, multi-service Docker Compose appliance. Check out a
+versioned release, copy `.env.example` to the ignored `.env`, and configure the
+NAS-backed ag-ng inputs described in
+[Provider configuration](docs/MODEL_PROVIDERS.md). Then start the exact image:
 
 ```bash
-curl -fsSL https://github.com/unpingable/marginalia/releases/download/v0.1.0/install-marginalia.sh | sh
+docker compose up -d
 ```
 
-Prerequisites will be Docker, a browser, and credentials or a local runtime for
-the model route you choose. First run guides the writer through Codex device
-authentication, creates durable local volumes, waits for the writing service,
-and opens the browser.
+For a source build, `./start.sh` exports the exact pinned ag-ng and Docket Git
+objects and builds all services. `./start-codex.sh` additionally performs Codex
+device login inside ag-providerd's isolated auth volume.
 
-Everyday lifecycle commands are:
+Everyday lifecycle commands are standard Compose operations:
 
 ```bash
-marginalia start
-marginalia status
-marginalia stop
-marginalia doctor
+docker compose up -d
+docker compose ps
+docker compose logs --tail=100
+docker compose down
 ```
 
-Stopping or updating the appliance does not delete writing. Contributors and
-pre-release evaluators should use the source workflow in
-[Developing Marginalia](docs/DEVELOPMENT.md); release and clean-machine details
-are in [DISTRIBUTION.md](docs/DISTRIBUTION.md).
+Stopping or replacing containers does not delete named-volume writing. The
+classic single-container launcher and installer fail closed because they cannot
+provide ag-ng authorization plus Docket custody.
 
 ## What the writing room keeps track of
 
@@ -104,11 +101,11 @@ generate with a hosted provider, Marginalia sends the context needed for that
 generation to the selected provider. Local storage does not imply local
 inference.
 
-Agent Governor is the governed execution boundary between Marginalia and model
-providers. It supplies context-scoped checks and authority receipts; it is not
-a promise that model output is true or good. Marginalia keeps model output
-provisional until the application has a validated authored result and can
-commit it against the exact conversation revision from which it was generated.
+ag-ng authorizes each exact provider dispatch, Docket owns attempt custody, and
+ag-providerd isolates provider credentials. That authorization is not a promise
+that model output is true or good. Marginalia keeps each response provisional
+until application acceptance atomically validates the exact conversation
+revision, canon, and project guidance from which it was generated.
 
 Provider and model setup is documented in
 [MODEL_PROVIDERS.md](docs/MODEL_PROVIDERS.md).
@@ -159,7 +156,7 @@ Further technical references:
 
 - [Architecture](ARCHITECTURE.md)
 - [API contract](docs/API.md)
-- [Agent Governor contract](AG_CONTRACT.md)
+- [ag-ng execution contract](AG_CONTRACT.md)
 - [Distribution and release](docs/DISTRIBUTION.md)
 - [Provider configuration](docs/MODEL_PROVIDERS.md)
 - [Reliability](docs/RELIABILITY.md)

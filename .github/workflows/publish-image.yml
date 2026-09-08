@@ -21,27 +21,19 @@ jobs:
       - name: Checkout Marginalia
         uses: actions/checkout@v4
 
-      - name: Checkout the qualified Agent Governor contract
-        uses: actions/checkout@v4
-        with:
-          repository: unpingable/agent_governor
-          ref: marginalia-chat-contract-m0
-          path: _agent_gov
-          fetch-depth: 1
-
       - name: Checkout the qualified ag-ng contract
         uses: actions/checkout@v4
         with:
           repository: unpingable/ag_ng
-          ref: cb85d363e2495a75f78c28fb8ce9b46af1f289c0
+          ref: c3210f156208b22bf21e7bd1910a84a85b519538
           path: _ag_ng
           fetch-depth: 1
 
       - name: Checkout the qualified Docket contract
         uses: actions/checkout@v4
         with:
-          repository: unpingable/docket-campaign
-          ref: c49ad8d0f26fb2a13b9dbafdde84d7abfe1f867b
+          repository: unpingable/docket
+          ref: 181589f910b76030b312d6478bd0ac813a630855
           path: _docket
           fetch-depth: 1
 
@@ -49,14 +41,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          expected="$(tr -d '[:space:]' < AG_CONTRACT_COMMIT)"
-          actual="$(git -C _agent_gov rev-parse HEAD)"
-          test "$actual" = "$expected"
           test "$(git -C _ag_ng rev-parse HEAD)" = "$(tr -d '[:space:]' < AG_NG_CONTRACT_COMMIT)"
           test "$(git -C _docket rev-parse HEAD)" = "$(tr -d '[:space:]' < DOCKET_CONTRACT_COMMIT)"
-          test -f _agent_gov/src/fiction_governor/canon_capture.py
-          test -d _agent_gov/libs/receipt_kernel/src/receipt_kernel
-          test -d _agent_gov/libs/receipt_v1/src/receipt_v1
+          test -d receipt-v1/src/receipt_v1
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             package_version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
             test "${GITHUB_REF_NAME#v}" = "$package_version"
@@ -72,15 +59,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.lock
-          python -m pip install --no-build-isolation --no-deps ./_agent_gov
-          python -m pip install --no-build-isolation --no-deps ./_agent_gov/libs/receipt_kernel
-          python -m pip install --no-build-isolation --no-deps ./_agent_gov/libs/receipt_v1
+          python -m pip install --no-build-isolation --no-deps ./receipt-v1
           python -m pip install --no-build-isolation --no-deps -e .
 
       - name: Verify Marginalia
         run: |
           python -m ruff check src tests
-          MARGINALIA_AG_SOURCE_DIR="$PWD/_agent_gov" \
           MARGINALIA_AG_NG_SOURCE_DIR="$PWD/_ag_ng" \
           MARGINALIA_DOCKET_SOURCE_DIR="$PWD/_docket" \
             python -m pytest -q
@@ -90,19 +74,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          MARGINALIA_AG_SOURCE_DIR="$PWD/_agent_gov" \
           MARGINALIA_AG_NG_SOURCE_DIR="$PWD/_ag_ng" \
           MARGINALIA_DOCKET_SOURCE_DIR="$PWD/_docket" \
             ./sync-deps.sh
-          rm -rf _agent_gov _ag_ng _docket
+          rm -rf _ag_ng _docket
 
       - name: Build and smoke the local appliance image
         run: |
           docker build --tag marginalia:ci .
           docker run --rm --entrypoint python3 marginalia:ci -c \
-            'import fiction_governor, governor, gov_webui, receipt_kernel, receipt_v1'
+            'import importlib.metadata as m; import gov_webui, receipt_v1; names={d.metadata["Name"].lower() for d in m.distributions()}; assert "agent-governor" not in names and "receipt-kernel" not in names'
           docker run --rm --entrypoint /opt/codex/codex marginalia:ci --version
           docker run --rm --entrypoint /usr/local/bin/ag-loopctl marginalia:ci --help
+          docker run --rm --entrypoint /usr/local/bin/ag-providerd marginalia:ci --help
+          docker run --rm --entrypoint /usr/local/bin/ag-providerctl marginalia:ci --help
           docker run --rm --entrypoint /usr/local/bin/docket marginalia:ci --help
 
       - name: Set up emulation for the arm64 appliance
@@ -142,15 +127,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Publish the thin launcher
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          immutable_image="${REGISTRY}/${IMAGE_NAME}@${{ steps.build.outputs.digest }}"
-          sed -i "s|^DEFAULT_IMAGE=.*|DEFAULT_IMAGE=\"${immutable_image}\"|" marginalia
-          sha256sum marginalia > marginalia.sha256
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "Marginalia $GITHUB_REF_NAME" --generate-notes
-          gh release upload "$GITHUB_REF_NAME" marginalia marginalia.sha256 install-marginalia.sh

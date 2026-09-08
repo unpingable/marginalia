@@ -1,32 +1,20 @@
 # Compatibility
 
-Marginalia M1 is deliberately commit-qualified rather than broadly compatible.
+Marginalia is commit-qualified, not broadly semver-compatible.
 
 | Dependency/contract | Required value |
 |---|---|
 | Python | `>=3.11` |
-| `agent-governor` package | `2.8.1` |
-| AG source | `e279a94326a0a13dbe43473846b53e4c3a9b31f2` |
-| AG published ref | `marginalia-chat-contract-m0` |
-| `receipt-v1` | `0.1.0`, from the qualified AG source |
-| JSON-RPC protocol | `1.0` |
-| governed-chat contract | `1` |
+| ag-ng source | `c3210f156208b22bf21e7bd1910a84a85b519538` |
+| Docket source | `181589f910b76030b312d6478bd0ac813a630855` |
+| `receipt-v1` | vendored `0.1.0`, historical read-only use |
+| provider RPC | ag-ng fixed-service provider contract at the pinned commit |
+| custody | Docket executor-host contract at the pinned commit |
 
-Runtime negotiation additionally requires:
+The OCI image must contain `ag-providerd`, `ag-providerctl`, `ag-loopctl`, and
+`docket`, and must not contain the `agent-governor` or `receipt-kernel` Python
+distributions. Configuration parsers fail closed, and each process receives
+only its own copied, root-owned configuration and credentials.
 
-```json
-{
-  "context_scoped_pending": true,
-  "authoritative_receipts": true
-}
-```
-
-Marginalia also compares the daemon's reported `governor_dir` with its own
-configured root. A version/capability/root mismatch fails the governed-chat
-boundary rather than silently running with split state.
-
-The normal M1 runtime is fiction-only. Remaining donor non-chat endpoints are
-disabled unless `MARGINALIA_ENABLE_DONOR_ROUTES=1`; that switch exists for the
-historical compatibility suite, not as a supported product profile. Those
-quarantined endpoints still share the exact AG package pin and are not covered
-by a general semver compatibility promise.
+The legacy single-container launcher and installer fail closed. The supported
+runtime is the versioned multi-service Docker Compose topology.

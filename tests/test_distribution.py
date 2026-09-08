@@ -7,19 +7,18 @@ import os
 import shutil
 import subprocess
 import tomllib
-from hashlib import sha256
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-AG_ROOT = Path(
-    os.environ.get("MARGINALIA_AG_SOURCE_DIR", REPO_ROOT.parents[1] / "agent_gov")
-).resolve()
 AG_NG_ROOT = Path(
     os.environ.get("MARGINALIA_AG_NG_SOURCE_DIR", REPO_ROOT.parents[1] / "ag_ng")
 ).resolve()
 DOCKET_ROOT = Path(
-    os.environ.get("MARGINALIA_DOCKET_SOURCE_DIR", REPO_ROOT.parents[1] / "docket")
+    os.environ.get(
+        "MARGINALIA_DOCKET_SOURCE_DIR",
+        REPO_ROOT.parents[1] / "docket-river-clerk-live-docket-executor-prerequisite-v1",
+    )
 ).resolve()
 
 
@@ -27,12 +26,11 @@ def test_sync_stages_the_complete_qualified_ag_distribution(tmp_path: Path) -> N
     probe = tmp_path / "marginalia-source"
     probe.mkdir()
     shutil.copy2(REPO_ROOT / "sync-deps.sh", probe / "sync-deps.sh")
-    shutil.copy2(REPO_ROOT / "AG_CONTRACT_COMMIT", probe / "AG_CONTRACT_COMMIT")
     shutil.copy2(REPO_ROOT / "AG_NG_CONTRACT_COMMIT", probe / "AG_NG_CONTRACT_COMMIT")
     shutil.copy2(REPO_ROOT / "DOCKET_CONTRACT_COMMIT", probe / "DOCKET_CONTRACT_COMMIT")
+    shutil.copytree(REPO_ROOT / "receipt-v1", probe / "receipt-v1")
 
     environment = os.environ.copy()
-    environment["MARGINALIA_AG_SOURCE_DIR"] = str(AG_ROOT)
     environment["MARGINALIA_AG_NG_SOURCE_DIR"] = str(AG_NG_ROOT)
     environment["MARGINALIA_DOCKET_SOURCE_DIR"] = str(DOCKET_ROOT)
     subprocess.run(
@@ -44,14 +42,8 @@ def test_sync_stages_the_complete_qualified_ag_distribution(tmp_path: Path) -> N
         text=True,
     )
 
-    staged = probe / "agent-governor"
-    assert (staged / "AG_CONTRACT_COMMIT").read_text().strip() == (
-        REPO_ROOT / "AG_CONTRACT_COMMIT"
-    ).read_text().strip()
-    for package in ("governor", "fiction_governor", "nonfiction_governor", "ops_governor"):
-        assert (staged / "src" / package / "__init__.py").is_file()
-    assert (staged / "src" / "fiction_governor" / "canon_capture.py").is_file()
-    assert (probe / "receipt-kernel" / "src" / "receipt_kernel" / "__init__.py").is_file()
+    assert not (probe / "agent-governor").exists()
+    assert not (probe / "receipt-kernel").exists()
     assert (probe / "receipt-v1" / "src" / "receipt_v1" / "__init__.py").is_file()
     assert (probe / "ag-ng" / "AG_NG_CONTRACT_COMMIT").read_text().strip() == (
         REPO_ROOT / "AG_NG_CONTRACT_COMMIT"
@@ -104,7 +96,7 @@ exit 2
     return docker
 
 
-def test_launcher_starts_one_loopback_bound_codex_appliance(tmp_path: Path) -> None:
+def test_legacy_launcher_fails_closed_instead_of_bypassing_ag_ng(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _write_fake_docker(bin_dir)
@@ -130,24 +122,17 @@ def test_launcher_starts_one_loopback_bound_codex_appliance(tmp_path: Path) -> N
         [str(REPO_ROOT / "marginalia"), "start"],
         cwd=tmp_path,
         env=environment,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
 
-    calls = log.read_text(encoding="utf-8")
-    assert "Marginalia: http://127.0.0.1:8123" in result.stdout
-    assert "image inspect marginalia:test" in calls
-    assert "--publish 127.0.0.1:8123:8000" in calls
-    assert "--env BACKEND_TYPE=codex" in calls
-    assert "--env GOVERNOR_CONTEXT_ID=installer-acceptance" in calls
-    assert "--volume marginalia-test-data:/data" in calls
-    assert "--volume marginalia-test-codex:/root/.codex" in calls
-    assert "--label io.marginalia.managed=true" in calls
-    assert "/home/" not in calls
+    assert result.returncode == 1
+    assert "single-container start is retired" in result.stderr
+    assert not log.exists()
 
 
-def test_launcher_update_can_reuse_a_verified_local_image(tmp_path: Path) -> None:
+def test_legacy_launcher_update_fails_closed(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _write_fake_docker(bin_dir)
@@ -169,57 +154,29 @@ def test_launcher_update_can_reuse_a_verified_local_image(tmp_path: Path) -> Non
         }
     )
 
-    subprocess.run(
+    result = subprocess.run(
         [str(REPO_ROOT / "marginalia"), "update", "--no-pull", "--no-open"],
         cwd=tmp_path,
         env=environment,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
 
-    calls = log.read_text(encoding="utf-8")
-    assert "image inspect marginalia:test" in calls
-    assert "pull marginalia:test" not in calls
-    assert "stop marginalia-acceptance" in calls
-    assert "rm marginalia-acceptance" in calls
+    assert result.returncode == 1
+    assert "single-container update is retired" in result.stderr
+    assert not log.exists()
 
 
-def test_installer_can_install_the_release_launcher_without_source_checkout(
-    tmp_path: Path,
-) -> None:
-    install_dir = tmp_path / "local-bin"
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HOME": str(tmp_path / "home"),
-            "MARGINALIA_INSTALL_DIR": str(install_dir),
-            "MARGINALIA_INSTALL_SOURCE": str(REPO_ROOT / "marginalia"),
-            "MARGINALIA_INSTALL_SHA256": sha256(
-                (REPO_ROOT / "marginalia").read_bytes()
-            ).hexdigest(),
-            "MARGINALIA_INSTALL_ONLY": "1",
-        }
-    )
-
-    subprocess.run(
+def test_classic_single_container_installer_fails_closed() -> None:
+    result = subprocess.run(
         ["sh", str(REPO_ROOT / "install-marginalia.sh")],
-        env=environment,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
-
-    installed = install_dir / "marginalia"
-    assert installed.is_file()
-    assert installed.stat().st_mode & 0o111
-    version = subprocess.run(
-        [str(installed), "version"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert version.stdout.strip() == "Marginalia 0.1.0"
+    assert result.returncode == 1
+    assert "single-container installer is retired" in result.stderr
 
 
 def test_release_contract_names_and_pins_the_complete_marginalia_appliance() -> None:
@@ -229,17 +186,18 @@ def test_release_contract_names_and_pins_the_complete_marginalia_appliance() -> 
     project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]
 
     assert "github.repository_owner }}/marginalia" in workflow
-    assert "ref: marginalia-chat-contract-m0" in workflow
+    assert "repository: unpingable/agent_governor" not in workflow
     assert "linux/amd64,linux/arm64" in workflow
     assert "docker/setup-qemu-action@v3" in workflow
     assert "repository: unpingable/ag_ng" in workflow
-    assert "ref: cb85d363e2495a75f78c28fb8ce9b46af1f289c0" in workflow
-    assert "repository: unpingable/docket-campaign" in workflow
-    assert "ref: c49ad8d0f26fb2a13b9dbafdde84d7abfe1f867b" in workflow
+    assert "ref: c3210f156208b22bf21e7bd1910a84a85b519538" in workflow
+    assert "repository: unpingable/docket" in workflow
+    assert "ref: 181589f910b76030b312d6478bd0ac813a630855" in workflow
     assert "./sync-deps.sh" in workflow
     assert "IMAGE_NAME: ${{ github.repository_owner }}/phosphor" not in workflow
-    assert "import fiction_governor" in dockerfile
-    assert "import fiction_governor, governor, receipt_kernel, receipt_v1" in dockerfile
+    assert "agent-governor" not in project["dependencies"]
+    assert "COPY agent-governor" not in dockerfile
+    assert "COPY receipt-kernel" not in dockerfile
     assert "@openai/codex@${CODEX_VERSION}" in dockerfile
     assert "CODEX_BINARY" not in codex_compose
     assert "auth.json:ro" not in codex_compose
@@ -248,19 +206,46 @@ def test_release_contract_names_and_pins_the_complete_marginalia_appliance() -> 
         "marginalia-generation-executor": "gov_webui.generation_executor_cli:main",
         "marginalia-generation-worker": "gov_webui.generation_worker:main",
         "marginalia-generation-secrets": "gov_webui.generation_secrets:main",
+        "marginalia-ag-provider-config": "gov_webui.ag_provider_config:main",
     }
     assert required_scripts.items() <= project["scripts"].items()
     assert "AG_NG_CONTRACT_COMMIT" in dockerfile
     assert "DOCKET_CONTRACT_COMMIT" in dockerfile
     assert "/usr/local/bin/ag-loopctl" in dockerfile
+    assert "/usr/local/bin/ag-providerd" in dockerfile
+    assert "/usr/local/bin/ag-providerctl" in dockerfile
     assert "/usr/local/bin/docket" in dockerfile
     assert f'MARGINALIA_VERSION="{project["version"]}"' in (REPO_ROOT / "marginalia").read_text()
     assert (
         'DEFAULT_IMAGE="ghcr.io/unpingable/marginalia:${MARGINALIA_VERSION}"'
         in (REPO_ROOT / "marginalia").read_text()
     )
-    assert f'VERSION="{project["version"]}"' in (REPO_ROOT / "install-marginalia.sh").read_text()
     assert f"marginalia:{project['version']}" in (REPO_ROOT / "docker-compose.yml").read_text()
+
+
+def test_compose_isolates_ag_ng_credentials_and_uses_one_image() -> None:
+    compose = (REPO_ROOT / "docker-compose.yml").read_text()
+    build = (REPO_ROOT / "docker-compose.build.yml").read_text()
+    web_section, worker_section = compose.split("  marginalia-generation:", 1)
+    worker_section, providerd_section = worker_section.split("  marginalia-providerd:", 1)
+    providerd_section = providerd_section.split("  marginalia-backup:", 1)[0]
+
+    assert "providerd-secrets" not in web_section
+    assert "marginalia-ag-issuer.pk8" not in web_section
+    assert "providerd-secrets" not in worker_section
+    assert "marginalia-ag-issuer.pk8" in worker_section
+    assert "providerctl/rpc.pk8" in worker_section
+    assert "providerd-secrets" in providerd_section
+    assert "marginalia-evidence-keys.json" not in providerd_section
+    assert "generation-worker-entrypoint.sh" in worker_section
+    for service in (
+        "marginalia:",
+        "marginalia-backup:",
+        "marginalia-generation:",
+        "marginalia-providerd:",
+        "marginalia-synthetic:",
+    ):
+        assert service in build
 
 
 def test_start_scripts_enable_the_direct_nfs_backup_override() -> None:

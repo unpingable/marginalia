@@ -37,7 +37,7 @@ def request(tmp_path: Path, monkeypatch):
     ).request
     store.set_dispatch_enabled("project-a", True)
     store.reserve_dispatch(created.id)
-    monkeypatch.setenv("GOVERNOR_CONTEXTS_DIR", str(contexts))
+    monkeypatch.setenv("MARGINALIA_CONTEXTS_DIR", str(contexts))
     return created
 
 

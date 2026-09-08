@@ -20,7 +20,8 @@ from typing import Any, Callable, Protocol
 from gov_webui.generation_store import DispatchStatus, GenerationStore
 
 
-EXECUTOR_PLAN_SCHEMA = "marginalia.generation-executor-plan/v1"
+EXECUTOR_PLAN_SCHEMA_V1 = "marginalia.generation-executor-plan/v1"
+EXECUTOR_PLAN_SCHEMA = "marginalia.generation-executor-plan/v2"
 EXECUTOR_WORK_SCHEMA = "marginalia.generation-dispatch/v1"
 DOCKET_DISPATCH_KEYS = frozenset({"attempt", "marker", "work_schema", "work", "subject", "scope"})
 
@@ -56,6 +57,10 @@ class ExecutorPlan:
     request_digest: str
     subject: str
     scope: str
+    providerctl: Path | None = None
+    providerctl_config: Path | None = None
+    model_config: Path | None = None
+    schema: str = EXECUTOR_PLAN_SCHEMA_V1
 
     @classmethod
     def from_file(cls, path: Path) -> ExecutorPlan:
@@ -63,7 +68,7 @@ class ExecutorPlan:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ExecutorError(f"cannot read executor plan: {exc}") from exc
-        required = {
+        common = {
             "schema",
             "attempt_store",
             "generation_store",
@@ -75,20 +80,32 @@ class ExecutorPlan:
             "subject",
             "scope",
         }
-        if not isinstance(value, dict) or set(value) != required:
-            raise ExecutorError("executor plan does not have the exact v1 shape")
-        if value["schema"] != EXECUTOR_PLAN_SCHEMA:
+        v2 = {"providerctl", "providerctl_config", "model_config"}
+        if not isinstance(value, dict) or value.get("schema") not in {
+            EXECUTOR_PLAN_SCHEMA_V1,
+            EXECUTOR_PLAN_SCHEMA,
+        }:
             raise ExecutorError("unsupported executor plan schema")
-        for key in required - {"schema", "evidence_retention_days"}:
+        expected = common | (v2 if value["schema"] == EXECUTOR_PLAN_SCHEMA else set())
+        if set(value) != expected:
+            raise ExecutorError("executor plan does not have the exact versioned shape")
+        for key in expected - {"schema", "evidence_retention_days"}:
             if not isinstance(value[key], str) or not value[key]:
                 raise ExecutorError(f"executor plan {key} must be a non-empty string")
         attempt_store = Path(value["attempt_store"])
         generation_store = Path(value["generation_store"])
         evidence_root = Path(value["evidence_root"])
         evidence_keyring = Path(value["evidence_keyring"])
+        provider_paths = tuple(Path(value[key]) for key in v2) if v2 <= set(value) else ()
         if not all(
             path.is_absolute()
-            for path in (attempt_store, generation_store, evidence_root, evidence_keyring)
+            for path in (
+                attempt_store,
+                generation_store,
+                evidence_root,
+                evidence_keyring,
+                *provider_paths,
+            )
         ):
             raise ExecutorError("executor store paths must be absolute")
         retention = value["evidence_retention_days"]
@@ -110,10 +127,16 @@ class ExecutorPlan:
             request_digest=value["request_digest"],
             subject=value["subject"],
             scope=value["scope"],
+            providerctl=(Path(value["providerctl"]) if "providerctl" in value else None),
+            providerctl_config=(
+                Path(value["providerctl_config"]) if "providerctl_config" in value else None
+            ),
+            model_config=(Path(value["model_config"]) if "model_config" in value else None),
+            schema=value["schema"],
         )
 
     def canonical_value(self) -> dict[str, Any]:
-        return {
+        value = {
             "attempt_store": str(self.attempt_store),
             "generation_store": str(self.generation_store),
             "evidence_root": str(self.evidence_root),
@@ -121,14 +144,25 @@ class ExecutorPlan:
             "evidence_retention_days": self.evidence_retention_days,
             "marginalia_dispatch_id": self.marginalia_dispatch_id,
             "request_digest": self.request_digest,
-            "schema": EXECUTOR_PLAN_SCHEMA,
+            "schema": self.schema,
             "scope": self.scope,
             "subject": self.subject,
         }
+        if self.schema == EXECUTOR_PLAN_SCHEMA:
+            if None in (self.providerctl, self.providerctl_config, self.model_config):
+                raise ExecutorError("v2 executor plan requires ag-providerd paths")
+            value.update(
+                {
+                    "providerctl": str(self.providerctl),
+                    "providerctl_config": str(self.providerctl_config),
+                    "model_config": str(self.model_config),
+                }
+            )
+        return value
 
     @property
     def identity(self) -> str:
-        return _digest("marginalia.generation-executor-plan/v1", self.canonical_value())
+        return _digest(self.schema, self.canonical_value())
 
 
 @dataclass(frozen=True)
@@ -200,6 +234,25 @@ class EvidenceWriter(Protocol):
 Provider = Callable[[dict[str, Any]], dict[str, Any]]
 
 
+class DurableProvider(Protocol):
+    def prepare(
+        self,
+        payload: dict[str, Any],
+        *,
+        project_id: str,
+        session_id: str,
+        docket_attempt: str,
+        docket_marker: str,
+        actual_route: str,
+    ) -> dict[str, Any]: ...
+
+    def execute(self, transaction: dict[str, Any], *, selected_model: str) -> dict[str, Any]: ...
+
+    def fetch(self, dispatch: str, *, selected_model: str) -> dict[str, Any]: ...
+
+    def acknowledge(self, dispatch: str, exact_event_stream: str, custody: str) -> None: ...
+
+
 class ExecutorAttemptStore:
     """Executor-local idempotency journal; it grants no dispatch authority."""
 
@@ -218,10 +271,23 @@ class ExecutorAttemptStore:
                            ('reserved','executing','success','failure','indeterminate')),
                        outcome_json TEXT,
                        evidence_ref TEXT,
+                       provider_transaction_json TEXT,
+                       provider_dispatch TEXT,
+                       exact_event_stream TEXT,
+                       response_digest TEXT,
                        created_at TEXT NOT NULL,
                        updated_at TEXT NOT NULL
                    )"""
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(executor_attempt)")}
+            for name in (
+                "provider_transaction_json",
+                "provider_dispatch",
+                "exact_event_stream",
+                "response_digest",
+            ):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE executor_attempt ADD COLUMN {name} TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
@@ -254,7 +320,11 @@ class ExecutorAttemptStore:
                 connection.rollback()
                 raise ExecutorError("Docket marker was reused across attempts")
             connection.execute(
-                "INSERT INTO executor_attempt VALUES(?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO executor_attempt(
+                       attempt,marker,dispatch_json,dispatch_digest,state,outcome_json,
+                       evidence_ref,provider_transaction_json,provider_dispatch,
+                       exact_event_stream,response_digest,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     dispatch.attempt,
                     dispatch.marker,
@@ -263,12 +333,110 @@ class ExecutorAttemptStore:
                     AttemptState.RESERVED,
                     None,
                     None,
+                    None,
+                    None,
+                    None,
+                    None,
                     now,
                     now,
                 ),
             )
             connection.commit()
         return None
+
+    def bind_provider_transaction(
+        self, dispatch: DocketDispatch, transaction: dict[str, Any]
+    ) -> dict[str, Any]:
+        provider_dispatch = transaction.get("dispatch")
+        _require_digest(provider_dispatch, "prepared provider dispatch")
+        encoded = _canonical(transaction).decode()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM executor_attempt WHERE attempt=?", (dispatch.attempt,)
+            ).fetchone()
+            if row is None or row["marker"] != dispatch.marker:
+                connection.rollback()
+                raise ExecutorError("provider transaction has no matching reserved attempt")
+            if row["provider_transaction_json"] is not None:
+                if (
+                    row["provider_transaction_json"] != encoded
+                    or row["provider_dispatch"] != provider_dispatch
+                ):
+                    connection.rollback()
+                    raise ExecutorError("prepared provider transaction was substituted")
+                connection.commit()
+                return json.loads(row["provider_transaction_json"])
+            if AttemptState(row["state"]) is not AttemptState.RESERVED:
+                connection.rollback()
+                raise ExecutorError("provider transaction was not bound before execution")
+            connection.execute(
+                """UPDATE executor_attempt
+                   SET provider_transaction_json=?,provider_dispatch=?,updated_at=?
+                   WHERE attempt=?""",
+                (encoded, provider_dispatch, _now(), dispatch.attempt),
+            )
+            connection.commit()
+        return transaction
+
+    def provider_custody(
+        self, dispatch: DocketDispatch
+    ) -> tuple[dict[str, Any] | None, str | None, str | None, str | None]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT marker,provider_transaction_json,provider_dispatch,
+                          exact_event_stream,response_digest
+                   FROM executor_attempt WHERE attempt=?""",
+                (dispatch.attempt,),
+            ).fetchone()
+        if row is None or row["marker"] != dispatch.marker:
+            raise ExecutorError("provider custody has no matching attempt")
+        transaction = (
+            json.loads(row["provider_transaction_json"])
+            if row["provider_transaction_json"] is not None
+            else None
+        )
+        return (
+            transaction,
+            row["provider_dispatch"],
+            row["exact_event_stream"],
+            row["response_digest"],
+        )
+
+    def stage_evidence(
+        self,
+        dispatch: DocketDispatch,
+        *,
+        evidence_ref: str,
+        exact_event_stream: str,
+        response_digest: str,
+    ) -> None:
+        for value, label in (
+            (exact_event_stream, "exact provider event stream"),
+            (response_digest, "response digest"),
+        ):
+            _require_digest(value, label)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM executor_attempt WHERE attempt=?", (dispatch.attempt,)
+            ).fetchone()
+            if row is None or row["marker"] != dispatch.marker:
+                connection.rollback()
+                raise ExecutorError("staged evidence has no matching attempt")
+            existing = (row["evidence_ref"], row["exact_event_stream"], row["response_digest"])
+            proposed = (evidence_ref, exact_event_stream, response_digest)
+            if any(existing):
+                connection.commit()
+                if existing != proposed:
+                    raise ExecutorError("staged provider evidence was substituted")
+                return
+            connection.execute(
+                """UPDATE executor_attempt SET evidence_ref=?,exact_event_stream=?,
+                          response_digest=?,updated_at=? WHERE attempt=?""",
+                (*proposed, _now(), dispatch.attempt),
+            )
+            connection.commit()
 
     def state(self, attempt: str) -> AttemptState | None:
         with self._connect() as connection:
@@ -366,7 +534,7 @@ class GenerationExecutor:
         self,
         plan: ExecutorPlan,
         *,
-        provider: Provider,
+        provider: Provider | DurableProvider,
         evidence_writer: EvidenceWriter,
     ) -> None:
         self.plan = plan
@@ -374,6 +542,14 @@ class GenerationExecutor:
         self.evidence_writer = evidence_writer
         self.attempts = ExecutorAttemptStore(plan.attempt_store)
         self.generations = GenerationStore(plan.generation_store)
+
+    def _durable_provider(self) -> DurableProvider | None:
+        required = ("prepare", "execute", "fetch", "acknowledge")
+        return (
+            self.provider
+            if all(callable(getattr(self.provider, name, None)) for name in required)
+            else None
+        )  # type: ignore[return-value]
 
     def _validate(self, dispatch: DocketDispatch) -> None:
         if dispatch.work != self.plan.identity:
@@ -396,41 +572,53 @@ class GenerationExecutor:
             # A prior process crossed the mechanics boundary. Only reconciliation
             # is legal; execute must not turn restart into another provider call.
             raise ExecutorError("attempt already crossed the provider execution boundary")
-        self.attempts.begin(dispatch)
         durable = self.generations.get_dispatch(self.plan.marginalia_dispatch_id)
         assert durable is not None
+        request = self.generations.get_request(durable.logical_request_id)
+        if request is None:
+            raise ExecutorError("Marginalia logical request is missing")
+        payload = self.generations.dispatch_payload(durable.id)
+        provider = self._durable_provider()
+        transaction: dict[str, Any] | None = None
+        if provider is not None:
+            try:
+                transaction = provider.prepare(
+                    payload,
+                    project_id=request.project_id,
+                    session_id=request.session_id,
+                    docket_attempt=dispatch.attempt,
+                    docket_marker=dispatch.marker,
+                    actual_route=durable.actual_route,
+                )
+                transaction = self.attempts.bind_provider_transaction(dispatch, transaction)
+            except Exception as exc:
+                # Preparation is local and performs no provider dispatch. A
+                # rejected or unavailable preparation is therefore a qualified
+                # pre-dispatch failure, not an indeterminate execution.
+                reason = str(exc) or type(exc).__name__
+                receipt = _digest(
+                    "marginalia.executor-predispatch-failure/v1",
+                    {"attempt": dispatch.attempt, "reason": reason},
+                )
+                self.generations.mark_failed(durable.id, reason)
+                return self.attempts.finish(
+                    dispatch,
+                    ExecutorOutcome(dispatch.attempt, dispatch.marker, receipt, "failure"),
+                    evidence_ref=receipt,
+                )
+        self.attempts.begin(dispatch)
         if durable.status is DispatchStatus.RESERVED:
-            self.generations.mark_executing(durable.id, dispatch.attempt)
+            provider_execution_id = transaction.get("dispatch") if transaction else dispatch.attempt
+            self.generations.mark_executing(durable.id, provider_execution_id)
         elif durable.status is not DispatchStatus.EXECUTING:
             raise ExecutorError(f"Marginalia dispatch is not executable: {durable.status}")
-        request = self.generations.dispatch_payload(durable.id)
         try:
-            response = self.provider(request)
-            evidence = self.evidence_writer(
-                response,
-                logical_request_id=durable.logical_request_id,
-                dispatch_id=durable.id,
-                docket_attempt=dispatch.attempt,
+            response = (
+                provider.execute(transaction, selected_model=durable.actual_model)
+                if provider is not None and transaction is not None
+                else self.provider(payload)  # type: ignore[operator]
             )
-            candidate = self.generations.record_candidate(
-                durable.id,
-                response_digest=evidence.response_digest,
-                evidence_ref=evidence.reference,
-            )
-            receipt = _digest(
-                "marginalia.executor-success/v1",
-                {
-                    "attempt": dispatch.attempt,
-                    "candidate": candidate.id,
-                    "evidence": evidence.reference,
-                    "response": evidence.response_digest,
-                },
-            )
-            return self.attempts.finish(
-                dispatch,
-                ExecutorOutcome(dispatch.attempt, dispatch.marker, receipt, "success"),
-                evidence_ref=evidence.reference,
-            )
+            return self._retain_success(dispatch, durable, response, provider)
         except ProviderDefinitiveFailure as exc:
             receipt = _digest(
                 "marginalia.executor-failure/v1",
@@ -451,16 +639,126 @@ class GenerationExecutor:
                 "marginalia.executor-indeterminate/v1",
                 {"attempt": dispatch.attempt, "reason": reason},
             )
-            self.generations.mark_unknown(durable.id, reason)
-            return self.attempts.finish(
-                dispatch,
-                ExecutorOutcome(dispatch.attempt, dispatch.marker, receipt, "indeterminate"),
-                evidence_ref=receipt,
-            )
+            current_dispatch = self.generations.get_dispatch(durable.id)
+            if current_dispatch is not None and current_dispatch.status in {
+                DispatchStatus.RESERVED,
+                DispatchStatus.EXECUTING,
+            }:
+                self.generations.mark_unknown(durable.id, reason)
+            outcome = ExecutorOutcome(dispatch.attempt, dispatch.marker, receipt, "indeterminate")
+            if provider is None:
+                return self.attempts.finish(dispatch, outcome, evidence_ref=receipt)
+            return outcome
 
     def reconcile(self, dispatch: DocketDispatch) -> ExecutorOutcome:
         self._validate(dispatch)
-        return self.attempts.reconcile(dispatch)
+        provider = self._durable_provider()
+        if provider is None:
+            return self.attempts.reconcile(dispatch)
+        state = self.attempts.state(dispatch.attempt)
+        if state in {AttemptState.SUCCESS, AttemptState.FAILURE, AttemptState.INDETERMINATE}:
+            return self.attempts.reconcile(dispatch)
+        transaction, provider_dispatch, exact_event_stream, response_digest = (
+            self.attempts.provider_custody(dispatch)
+        )
+        if transaction is None or provider_dispatch is None:
+            return self.attempts.reconcile(dispatch)
+        durable = self.generations.get_dispatch(self.plan.marginalia_dispatch_id)
+        assert durable is not None
+        candidate = (
+            self.generations.get_candidate(durable.candidate_id)
+            if durable.candidate_id is not None
+            else None
+        )
+        try:
+            if candidate is not None:
+                if exact_event_stream is None or response_digest is None:
+                    raise ExecutorError("candidate exists without staged provider custody")
+                provider.acknowledge(provider_dispatch, exact_event_stream, response_digest)
+                return self._finish_success(
+                    dispatch, candidate.id, candidate.evidence_ref, response_digest
+                )
+            response = provider.fetch(provider_dispatch, selected_model=durable.actual_model)
+            return self._retain_success(dispatch, durable, response, provider)
+        except ProviderDefinitiveFailure as exc:
+            reason = str(exc)
+            self.generations.mark_failed(durable.id, reason)
+            receipt = _digest(
+                "marginalia.executor-failure/v1",
+                {"attempt": dispatch.attempt, "reason": reason},
+            )
+            return self.attempts.finish(
+                dispatch,
+                ExecutorOutcome(dispatch.attempt, dispatch.marker, receipt, "failure"),
+                evidence_ref=receipt,
+            )
+        except Exception as exc:
+            reason = str(exc) or type(exc).__name__
+            if durable.status in {DispatchStatus.RESERVED, DispatchStatus.EXECUTING}:
+                self.generations.mark_unknown(durable.id, reason)
+            receipt = _digest(
+                "marginalia.executor-indeterminate/v1",
+                {"attempt": dispatch.attempt, "reason": reason},
+            )
+            return ExecutorOutcome(dispatch.attempt, dispatch.marker, receipt, "indeterminate")
+
+    def _retain_success(
+        self,
+        dispatch: DocketDispatch,
+        durable: Any,
+        response: dict[str, Any],
+        provider: DurableProvider | None,
+    ) -> ExecutorOutcome:
+        evidence = self.evidence_writer(
+            response,
+            logical_request_id=durable.logical_request_id,
+            dispatch_id=durable.id,
+            docket_attempt=dispatch.attempt,
+        )
+        provider_evidence = response.get("provider_evidence")
+        exact_event_stream = (
+            provider_evidence.get("exact_event_stream")
+            if isinstance(provider_evidence, dict)
+            else evidence.response_digest
+        )
+        self.attempts.stage_evidence(
+            dispatch,
+            evidence_ref=evidence.reference,
+            exact_event_stream=exact_event_stream,
+            response_digest=evidence.response_digest,
+        )
+        candidate = self.generations.record_candidate(
+            durable.id,
+            response_digest=evidence.response_digest,
+            evidence_ref=evidence.reference,
+        )
+        if provider is not None:
+            provider_dispatch = (
+                provider_evidence.get("dispatch") if isinstance(provider_evidence, dict) else None
+            )
+            _require_digest(provider_dispatch, "retained provider dispatch")
+            provider.acknowledge(provider_dispatch, exact_event_stream, evidence.response_digest)
+        return self._finish_success(
+            dispatch, candidate.id, evidence.reference, evidence.response_digest
+        )
+
+    def _finish_success(
+        self, dispatch: DocketDispatch, candidate_id: str, evidence_ref: str, response_digest: str
+    ) -> ExecutorOutcome:
+        receipt = _digest(
+            "marginalia.executor-success/v1",
+            {
+                "attempt": dispatch.attempt,
+                "candidate": candidate_id,
+                "evidence": evidence_ref,
+                "response": response_digest,
+            },
+        )
+        return self.attempts.finish(
+            dispatch,
+            ExecutorOutcome(dispatch.attempt, dispatch.marker, receipt, "success"),
+            evidence_ref=evidence_ref,
+        )
 
 
 def parse_docket_dispatch(content: bytes) -> DocketDispatch:

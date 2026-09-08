@@ -11,6 +11,7 @@ from gov_webui.artifact_store import ArtifactStore
 from gov_webui.backup_worker import run_once
 from gov_webui.library_store import LibraryStore
 from gov_webui.ops import migration_preflight
+from gov_webui.state_layout import contexts_root, shared_root
 
 
 def _write_v1_library(path: Path) -> None:
@@ -41,7 +42,7 @@ def _write_v1_library(path: Path) -> None:
 
 
 def test_preflight_requires_explicit_supported_migration(tmp_path):
-    library_path = tmp_path / "marginalia" / "library.json"
+    library_path = shared_root(tmp_path) / "library.json"
     _write_v1_library(library_path)
 
     blocked = migration_preflight(
@@ -64,7 +65,7 @@ def test_preflight_requires_explicit_supported_migration(tmp_path):
 
 
 def test_preflight_rejects_a_future_schema_without_rewriting_it(tmp_path):
-    path = tmp_path / "marginalia" / "library.json"
+    path = shared_root(tmp_path) / "library.json"
     path.parent.mkdir(parents=True)
     original = '{"schema_version":99}\n'
     path.write_text(original)
@@ -84,7 +85,7 @@ def test_daily_worker_runs_once_per_utc_day_and_manual_policy_never_runs(tmp_pat
     data_root = tmp_path / "data"
     backup_root = tmp_path / "backups"
     library = LibraryStore(
-        data_root / "marginalia" / "library.json",
+        shared_root(data_root) / "library.json",
         default_context_id="erin-writing",
     )
     library.update_workspace(
@@ -123,10 +124,11 @@ def test_daily_worker_runs_once_per_utc_day_and_manual_policy_never_runs(tmp_pat
 
 def test_preflight_checks_artifact_content_hashes(tmp_path):
     LibraryStore(
-        tmp_path / "marginalia" / "library.json",
+        shared_root(tmp_path) / "library.json",
         default_context_id="erin-writing",
     )
-    artifacts = ArtifactStore(tmp_path / ".governor" / "erin-writing" / ".governor")
+    context = contexts_root(tmp_path) / "erin-writing"
+    artifacts = ArtifactStore(context / ".governor")
     artifact, _, _ = artifacts.create(
         title="Exact draft",
         content="This content is hash-bound.",
@@ -139,15 +141,7 @@ def test_preflight_checks_artifact_content_hashes(tmp_path):
     )
 
     content_path = (
-        tmp_path
-        / ".governor"
-        / "erin-writing"
-        / ".governor"
-        / ".governor"
-        / "artifacts"
-        / "content"
-        / artifact.id
-        / "v1.txt"
+        context / ".governor" / ".governor" / "artifacts" / "content" / artifact.id / "v1.txt"
     )
     content_path.write_text("tampered")
     damaged = migration_preflight(

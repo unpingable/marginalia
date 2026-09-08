@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from gov_webui.generation_store import GenerationStore, LogicalRequest, LogicalStatus
+from gov_webui.state_layout import contexts_root
 
 
 OBSERVATION_RESOLVER_ID = "marginalia.generation-applicability-resolver/v1"
@@ -62,9 +63,14 @@ def generation_scope(request: LogicalRequest) -> str:
 
 
 def _generation_databases() -> list[Path]:
-    root = Path(os.environ.get("GOVERNOR_CONTEXTS_DIR", "/data/.governor"))
+    root = Path(
+        os.environ.get(
+            "MARGINALIA_CONTEXTS_DIR",
+            str(contexts_root(Path(os.environ.get("MARGINALIA_DATA_ROOT", "/data")))),
+        )
+    )
     if not root.is_absolute():
-        raise BoundaryRefusal("GOVERNOR_CONTEXTS_DIR must be absolute")
+        raise BoundaryRefusal("MARGINALIA_CONTEXTS_DIR must be absolute")
     return sorted(root.glob("*/marginalia/generation.sqlite"))
 
 

@@ -431,6 +431,7 @@
           <button class="text-button" id="open-search" title="Search project (Ctrl/⌘ K)">Search</button>
           <button class="text-button" id="open-branches">Branches</button>
           <button class="text-button" id="focus-mode" aria-pressed="false">Focus</button>
+          <button class="text-button" id="generation-switch" title="Open ag-ng generation controls">ag-ng · checking</button>
           <div class="provider-status" title="Responses pass through the project's active writing rules">
             <span class="provider-dot" id="provider-dot"></span>
             <select id="model-select" aria-label="Model"><option>Connecting…</option></select>
@@ -452,7 +453,7 @@
           <div class="pending-copy" id="pending-copy"></div>
           <div class="pending-actions">
             <button class="small-button" data-resolution="fix">Try corrected text</button>
-            <button class="small-button" data-resolution="revise">Update the rule</button>
+            <button class="small-button" data-resolution="revise">Propose a rule change</button>
             <button class="small-button" data-resolution="proceed">Allow this once</button>
           </div>
         </div>
@@ -567,9 +568,9 @@
       <div class="dialog-header"><h2>Project direction</h2><button type="button" class="icon-button" id="close-project" aria-label="Close">Close</button></div>
       <div class="dialog-body">
         <section class="reliability-box" aria-labelledby="generation-reliability-title">
-          <h3 class="reliability-title" id="generation-reliability-title">Generation reliability</h3>
+          <h3 class="reliability-title" id="generation-reliability-title">ag-ng generation custody</h3>
           <p class="reliability-copy">Keep a generation in durable custody if this tab closes or a local model takes longer than the browser wait. Turning this off stops new durable dispatches; recovery and inspection continue.</p>
-          <label class="toggle-row" for="durable-generation"><input type="checkbox" id="durable-generation">Use durable generation for this project</label>
+          <label class="toggle-row" for="durable-generation"><input type="checkbox" id="durable-generation">Allow new model dispatches for this project</label>
           <div class="field"><label for="fallback-model">Automatic fallback after a confirmed failure</label><select id="fallback-model"><option value="">No automatic fallback</option></select></div>
           <div class="reliability-status" id="generation-reliability-status">Checking worker availability…</div>
           <details class="reliability-help">
@@ -685,6 +686,7 @@
       system: null, outlineMessageTargets: new Map(), artifactTargetNodeId: null, pendingOutlineNodeId: null,
       loadedBuild: null, stale: false,
       resumingGeneration: false,
+      pendingGenerationCandidateId: null,
     };
     const $ = (selector) => document.querySelector(selector);
     const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -1136,6 +1138,7 @@
       const toggle = $("#durable-generation");
       const fallback = $("#fallback-model");
       const status = $("#generation-reliability-status");
+      const quickSwitch = $("#generation-switch");
       fallback.replaceChildren(new Option("No automatic fallback", ""));
       state.models.filter((model) => model.available !== false).forEach((model) => {
         fallback.append(new Option(model.label || model.id, model.id));
@@ -1150,6 +1153,10 @@
           : "Ready, but off for this project.")
         : settings?.status || "The durable generation worker is unavailable.";
       status.classList.toggle("unavailable", !settings?.available);
+      quickSwitch.textContent = settings?.available
+        ? `ag-ng · ${toggle.checked ? "on" : "off"}`
+        : "ag-ng · unavailable";
+      quickSwitch.setAttribute("aria-pressed", String(Boolean(toggle.checked)));
     }
 
     $("#durable-generation").addEventListener("change", (event) => {
@@ -1688,8 +1695,7 @@
         const messages = state.activeSession.messages
           .map(({role, content: text}) => ({role, content: text}))
           .concat({role: "user", content});
-        clientRequestId = state.generationSettings?.enabled
-          ? durableClientRequestId(content) : null;
+        clientRequestId = durableClientRequestId(content);
         const response = await api("/v1/chat/completions", {
           method: "POST",
           body: JSON.stringify({
@@ -1784,6 +1790,7 @@
         const {pending} = await api(projectPath("/v1/governed-chat/pending"));
         const card = $("#pending-card");
         card.classList.toggle("visible", Boolean(pending));
+        state.pendingGenerationCandidateId = pending?.candidate_id || null;
         if (pending) {
           const descriptions = (pending.violations || []).map((item) => item.description || item.message || item.anchor_id).filter(Boolean);
           $("#pending-copy").textContent = descriptions.join("\n") || "The proposed response crosses an active project boundary.";
@@ -1792,13 +1799,17 @@
     }
 
     async function resolvePending(action) {
-      const payload = {action, project_id: state.activeProjectId};
+      const payload = {
+        action,
+        project_id: state.activeProjectId,
+        candidate_id: state.pendingGenerationCandidateId,
+      };
       if (action === "fix") {
         const corrected = window.prompt("What corrected text should replace the blocked response?");
         if (corrected === null) return;
         payload.corrected_text = corrected;
       } else if (action === "revise") {
-        const revision = window.prompt("How should the active story rule change?");
+        const revision = window.prompt("What canon revision should be proposed?");
         if (revision === null) return;
         payload.new_anchor_text = revision;
       } else {
@@ -1816,7 +1827,7 @@
 
     async function loadBible() {
       const [characters, rules, forbidden, entities] = await Promise.all([
-        api(projectPath("/governor/fiction/characters")), api(projectPath("/governor/fiction/world-rules")), api(projectPath("/governor/fiction/forbidden")), api(projectPath("/v1/entities")),
+        api(projectPath("/v1/story/characters")), api(projectPath("/v1/story/world-rules")), api(projectPath("/v1/story/forbidden")), api(projectPath("/v1/entities")),
       ]);
       state.entities = entities.entities || [];
       const charNode = $("#characters");
@@ -1855,14 +1866,14 @@
 
     async function scanForCanon(text, messageId) {
       try {
-        const result = await api("/governor/fiction/capture/scan", {method: "POST", body: JSON.stringify({text, conversation_id: state.activeSession?.id || null, message_id: messageId, project_id: state.activeProjectId})});
+        const result = await api("/v1/story/capture/scan", {method: "POST", body: JSON.stringify({text, conversation_id: state.activeSession?.id || null, message_id: messageId, project_id: state.activeProjectId})});
         renderSuggestions(result.captures || []);
       } catch (_) {}
     }
 
     async function loadCanonReviews() {
       try {
-        const result = await api(projectPath("/governor/fiction/captures?status=pending"));
+        const result = await api(projectPath("/v1/story/captures?status=pending"));
         renderSuggestions(result.captures || []);
       } catch (_) {}
     }
@@ -1923,14 +1934,14 @@
     async function decideCapture(capture, accept, card) {
       try {
         if (accept) {
-          await api(`/governor/fiction/capture/${encodeURIComponent(capture.id)}/accept`, {
+          await api(`/v1/story/capture/${encodeURIComponent(capture.id)}/accept`, {
             method: "POST",
             body: JSON.stringify({name: capture.subject || "", description: capture.statement || "", capture_type: capture.kind || "", project_id: state.activeProjectId, closes_category: card.dataset.closesCategory || ""}),
           });
           await loadBible();
           toast("Added to canon");
         } else {
-          await api(projectPath(`/governor/fiction/capture/${encodeURIComponent(capture.id)}/reject`), {method: "POST"});
+          await api(projectPath(`/v1/story/capture/${encodeURIComponent(capture.id)}/reject`), {method: "POST"});
         }
         card.remove();
         const remaining = $("#suggestions").children.length;
@@ -1945,7 +1956,7 @@
       const statement = window.prompt("Canon statement", capture.statement || "");
       if (!statement?.trim()) return;
       try {
-        await api(`/governor/fiction/capture/${encodeURIComponent(capture.id)}`, {
+        await api(`/v1/story/capture/${encodeURIComponent(capture.id)}`, {
           method: "PATCH",
           body: JSON.stringify({subject, statement, project_id: state.activeProjectId}),
         });
@@ -1969,7 +1980,7 @@
     async function loadArtifacts() {
       const params = new URLSearchParams({view: state.artifactView});
       if (state.artifactQuery) params.set("q", state.artifactQuery);
-      const data = await api(projectPath(`/governor/artifacts?${params.toString()}`));
+      const data = await api(projectPath(`/v1/artifacts?${params.toString()}`));
       state.artifacts = data.artifacts || [];
       const container = $("#artifacts");
       container.replaceChildren();
@@ -2079,7 +2090,7 @@
       try {
         let currentDraft = "";
         if (node.artifact_id) {
-          const artifact = await api(projectPath(`/governor/artifacts/${encodeURIComponent(node.artifact_id)}`));
+          const artifact = await api(projectPath(`/v1/artifacts/${encodeURIComponent(node.artifact_id)}`));
           currentDraft = artifact.working_copy ?? artifact.content ?? "";
         }
         await createSession(`Draft: ${node.title}`);
@@ -2204,7 +2215,7 @@
       const title = $("#new-artifact-title").value.trim();
       if (!title) return;
       try {
-        const result = await api("/governor/artifacts", {
+        const result = await api("/v1/artifacts", {
           method: "POST",
           body: JSON.stringify({
             title,
@@ -2243,7 +2254,7 @@
     }
 
     async function openArtifact(id) {
-      const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(id)}`));
+      const result = await api(projectPath(`/v1/artifacts/${encodeURIComponent(id)}`));
       state.activeArtifact = result;
       $("#artifact-title").value = result.artifact.title;
       $("#artifact-content").value = result.working_copy ?? result.content;
@@ -2273,7 +2284,7 @@
       if (!state.activeArtifact) return;
       clearTimeout(saveArtifact.autosaveTimer);
       try {
-        const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}`), {
+        const result = await api(projectPath(`/v1/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}`), {
           method: "PUT",
           body: JSON.stringify({
             title: $("#artifact-title").value,
@@ -2298,7 +2309,7 @@
       saveArtifact.autosaveTimer = setTimeout(async () => {
         if (state.activeArtifact?.artifact?.id !== artifactId) return;
         try {
-          const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(artifactId)}/working-copy`), {
+          const result = await api(projectPath(`/v1/artifacts/${encodeURIComponent(artifactId)}/working-copy`), {
             method: "PUT",
             body: JSON.stringify({content: $("#artifact-content").value, base_version: baseVersion}),
           });
@@ -2313,7 +2324,7 @@
     async function saveArtifactLifecycle() {
       if (!state.activeArtifact) return;
       try {
-        const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}`), {
+        const result = await api(projectPath(`/v1/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}`), {
           method: "PATCH",
           body: JSON.stringify({
             status: $("#artifact-status").value,
@@ -2332,7 +2343,7 @@
       const trashed = !state.activeArtifact.artifact.trashed_at;
       if (trashed && !window.confirm("Move this artifact to trash? Its revisions and manuscript link will be retained.")) return;
       try {
-        await api(projectPath(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}`), {
+        await api(projectPath(`/v1/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}`), {
           method: "PATCH", body: JSON.stringify({trashed}),
         });
         state.activeArtifact = null;
@@ -2372,7 +2383,7 @@
       const artifact = state.activeArtifact?.artifact;
       if (!artifact) return;
       try {
-        await api(`/governor/artifacts/${encodeURIComponent(artifact.id)}/canon-proposal`, {
+        await api(`/v1/artifacts/${encodeURIComponent(artifact.id)}/canon-proposal`, {
           method: "POST",
           body: JSON.stringify({
             project_id: state.activeProjectId,
@@ -2394,14 +2405,14 @@
       if (!artifact) return;
       clearTimeout(saveArtifact.autosaveTimer);
       try {
-        await api(projectPath(`/governor/artifacts/${encodeURIComponent(artifact.id)}/working-copy`), {
+        await api(projectPath(`/v1/artifacts/${encodeURIComponent(artifact.id)}/working-copy`), {
           method: "PUT",
           body: JSON.stringify({
             content: $("#artifact-content").value,
             base_version: artifact.current_version,
           }),
         });
-        const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(artifact.id)}/canon-comparison`));
+        const result = await api(projectPath(`/v1/artifacts/${encodeURIComponent(artifact.id)}/canon-comparison`));
         const container = $("#canon-comparison-results");
         container.replaceChildren();
         const continuity = result.continuity;
@@ -2432,7 +2443,7 @@
       if (!state.activeArtifact) return;
       try {
         const version = $("#revision-select").value;
-        const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}/version/${version}`));
+        const result = await api(projectPath(`/v1/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}/version/${version}`));
         $("#artifact-content").value = result.content;
         toast(`Showing revision ${version}`);
       } catch (error) { toast(error.message); }
@@ -2446,7 +2457,7 @@
       const fromVersion = selected === current && current > 1 ? current - 1 : selected;
       if (fromVersion === current) return toast("There is only one committed revision");
       try {
-        const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}/compare?from_version=${fromVersion}&to_version=${current}`));
+        const result = await api(projectPath(`/v1/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}/compare?from_version=${fromVersion}&to_version=${current}`));
         $("#revision-diff").textContent = result.diff || "No text changes.";
         $("#revision-diff").classList.add("visible");
       } catch (error) { toast(error.message); }
@@ -2460,7 +2471,7 @@
       if (version === current) return toast("That is already the current revision");
       if (!window.confirm(`Restore revision ${version} as a new revision? Existing history will be retained.`)) return;
       try {
-        const result = await api(projectPath(`/governor/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}/version/${version}/restore`), {
+        const result = await api(projectPath(`/v1/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}/version/${version}/restore`), {
           method: "POST", body: JSON.stringify({expected_current_version: current}),
         });
         state.activeArtifact = result;
@@ -2686,6 +2697,7 @@
         event.target.style.height = `${Math.min(event.target.scrollHeight, 180)}px`;
       });
       $("#edit-project").addEventListener("click", () => $("#project-settings").showModal());
+      $("#generation-switch").addEventListener("click", () => $("#project-settings").showModal());
       $("#close-project").addEventListener("click", () => $("#project-settings").close());
       $("#project-form").addEventListener("submit", saveProject);
       $("#export-project").addEventListener("click", exportProject);
@@ -2746,7 +2758,7 @@
       $("#character-form").addEventListener("submit", async (event) => {
         event.preventDefault();
         try {
-          await api("/governor/fiction/characters", {method: "POST", body: JSON.stringify({
+          await api("/v1/story/characters", {method: "POST", body: JSON.stringify({
             name: $("#character-name").value, description: $("#character-description").value,
             voice: $("#character-voice").value, wont: $("#character-wont").value,
             project_id: state.activeProjectId,
@@ -2765,7 +2777,7 @@
         event.preventDefault();
         try {
           const closesCategory = $("#rule-closes-category-toggle").checked ? $("#rule-closes-category").value.trim() : "";
-          await api("/governor/fiction/world-rules", {method: "POST", body: JSON.stringify({rule: $("#rule-text").value, project_id: state.activeProjectId, closes_category: closesCategory})});
+          await api("/v1/story/world-rules", {method: "POST", body: JSON.stringify({rule: $("#rule-text").value, project_id: state.activeProjectId, closes_category: closesCategory})});
           event.target.reset(); $("#rule-closes-category-field").hidden = true; $("#rule-closes-category").disabled = true; event.target.classList.remove("visible"); await loadBible(); toast("World rule added");
         } catch (error) { toast(error.message); }
       });
@@ -2773,7 +2785,7 @@
         event.preventDefault();
         try {
           const patterns = $("#forbidden-patterns").value.split(",").map((value) => value.trim()).filter(Boolean);
-          await api("/governor/fiction/forbidden", {method: "POST", body: JSON.stringify({description: $("#forbidden-description").value, patterns, project_id: state.activeProjectId})});
+          await api("/v1/story/forbidden", {method: "POST", body: JSON.stringify({description: $("#forbidden-description").value, patterns, project_id: state.activeProjectId})});
           event.target.reset(); event.target.classList.remove("visible"); await loadBible(); toast("Boundary added");
         } catch (error) { toast(error.message); }
       });

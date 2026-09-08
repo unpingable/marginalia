@@ -1,12 +1,8 @@
-# Optional Codex CLI provider. AG invokes the mounted provider binary.
+# Optional Codex CLI provider. Only credential-isolated providerd receives auth.
 services:
-  marginalia:
-    environment:
-      - BACKEND_TYPE=codex
-      - CODEX_PATH=/app/codex-provider.sh
-      - CODEX_NATIVE_PATH=/opt/codex/codex
+  marginalia-providerd:
     volumes:
-      - marginalia_codex_home:/root/.codex
+      - marginalia_codex_home:/var/lib/marginalia/provider-home/.codex
 
 volumes:
   marginalia_codex_home:

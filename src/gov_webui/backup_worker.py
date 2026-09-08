@@ -12,6 +12,7 @@ from pathlib import Path
 from gov_webui.backup_store import BackupError, WorkspaceBackupManager
 from gov_webui.library_store import LibraryStore, LibraryStoreError
 from gov_webui.ops import deployment_metadata
+from gov_webui.state_layout import shared_root
 
 
 def run_once(
@@ -23,7 +24,7 @@ def run_once(
 ) -> list[dict]:
     current = now or datetime.now(timezone.utc)
     library = LibraryStore(
-        data_root / "marginalia" / "library.json",
+        shared_root(data_root) / "library.json",
         default_context_id=default_context_id,
     )
     manager = WorkspaceBackupManager(

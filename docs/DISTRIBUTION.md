@@ -1,88 +1,73 @@
-# Marginalia local-appliance distribution
+# Marginalia ag-ng appliance distribution
 
-Marginalia's first supported distribution is an immutable OCI appliance plus
-one thin launcher. It is intentionally not a Python-package installation and
-does not require users to clone Agent Governor.
+The supported distribution is one immutable OCI image used by a versioned
+multi-service Docker Compose deployment. The classic single-container launcher
+and installer fail closed.
 
-## Release contents
-
-The image contains:
+## Image contents
 
 - Marginalia `0.1.0`;
-- Agent Governor `2.8.1` at
-  `e279a94326a0a13dbe43473846b53e4c3a9b31f2` /
-  `marginalia-chat-contract-m0`;
-- the complete AG Python distribution, including `fiction_governor`;
-- receipt-kernel `0.1.0`;
-- receipt-v1 `0.1.0`;
+- ag-ng `c3210f156208b22bf21e7bd1910a84a85b519538`;
+- Docket `181589f910b76030b312d6478bd0ac813a630855`;
+- vendored read-only `receipt-v1` `0.1.0`;
 - Codex CLI `0.146.1`;
-- the aligned AG-daemon/Marginalia entrypoint.
+- `ag-providerd`, `ag-providerctl`, `ag-loopctl`, and `docket`.
 
-The GitHub release contains:
+The image must not contain the `agent-governor` or `receipt-kernel` Python
+distributions. The Dockerfile and CI assert this.
 
-- `marginalia`, the lifecycle launcher;
-- `marginalia.sha256`, its installer-verified checksum;
-- `install-marginalia.sh`, the installer that places the launcher in
-  `~/.local/bin` and starts it.
+## Release order
 
-The release workflow rewrites the launcher's default image from the human
-version tag to the exact multi-architecture manifest digest produced by that
-run. The installed launcher therefore pulls an immutable image even if a
-version tag is later moved. `MARGINALIA_IMAGE` remains an explicit development
-override.
+1. Freeze and commit the candidate.
+2. Build from that exact commit and record its OCI digest and labels.
+3. Validate that digest in an isolated deployment, including provider RPC,
+   Docket recovery, browser reliability cases, backup/key restore, and
+   previous-image read/write compatibility.
+4. Repair only by creating a new committed candidate and rerunning affected
+   validation.
+5. With separate production approval, deploy the already-qualified digest.
+6. Record acceptance in a later documentation-only commit.
 
-The launcher binds the writing room to loopback, stores writing and Codex login
-state in separate named volumes, and never deletes those volumes during
-stop/update operations.
+No production image is built from uncommitted work.
 
-## First publication
+## Deployment inputs
 
-Publication is deliberately external to an ordinary source commit:
-
-1. Push the reviewed `main` history.
-2. Verify that GitHub's default branch and a fresh clone both resolve to `main`.
-3. Tag the reviewed release commit `v0.1.0` and push the tag.
-4. Confirm the `Publish Marginalia appliance` workflow passes and publishes
-   `linux/amd64` and `linux/arm64` manifests.
-5. Make the newly created `ghcr.io/unpingable/marginalia` package public. GHCR
-   package visibility is a repository-owner setting and cannot be proven by a
-   source-only implementation.
-6. From an unauthenticated clean host, verify:
-
-   ```bash
-   docker manifest inspect ghcr.io/unpingable/marginalia:0.1.0
-   curl -fsSL https://github.com/unpingable/marginalia/releases/download/v0.1.0/install-marginalia.sh | sh
-   ```
-
-Do not publish a release from the old default M0 branch or reuse the Phosphor
-image name.
-
-## Clean-machine acceptance
-
-The release gate is:
+The operator provides an ignored `.env` plus two NAS-backed paths:
 
 ```text
-install launcher
-→ pull exact appliance
-→ Codex device login
-→ healthy AG/Marginalia boundary
-→ browser opens
-→ create project and conversation
-→ governed response
-→ stop/start
-→ project and conversation persist
+config/providers.json
+config/providerd.toml
+config/providerctl.toml
+secrets/marginalia-ag-issuer.pk8
+secrets/marginalia-evidence-keys.json
+secrets/provider-identities.json
+secrets/providerctl/rpc.pk8
+secrets/providerd/rpc.pk8
+secrets/providerd/<provider-credential>
 ```
 
-No step may require an AG checkout, Python virtual environment, Compose file,
-provider environment variable, or editing configuration by hand.
+All files are `0600`; directories are `0700`. Provider credentials never enter
+`.env`, Git, the web container, project exports, or data-volume backups. See
+[MODEL_PROVIDERS.md](MODEL_PROVIDERS.md) and
+[EVIDENCE-SECURITY.md](gate3/EVIDENCE-SECURITY.md).
 
-## Provider authority
+## Acceptance boundary
 
-The launcher configures only process prerequisites and starts the appliance.
-AG remains the authoritative provider owner. Marginalia reports the provider
-AG actually uses; it does not resurrect the historical local model switch.
+A clean qualification deployment must prove:
 
-Codex authentication lives in `marginalia_codex_home`. Writing state lives in
-`marginalia_data`. Neither belongs in project export. Additional providers
-must earn their own clean-machine acceptance path before being advertised as
-supported.
+- every service uses the candidate digest;
+- both pinned source identities are embedded and correct;
+- config parsers accept root-owned in-container copies and reject unsafe input;
+- providerd/providerctl completes a real cross-process request;
+- Docket preserves one attempt across worker restart and lost acknowledgement;
+- reload, double-submit, two-tab acceptance, canon/guidance races, kill-switch,
+  context maintenance, synthetic probe, and evidence expiry behave as specified;
+- the previous image can read and write the upgraded state, and the candidate
+  can read the result;
+- a separately restored key decrypts a restored evidence sample;
+- backup retention is documented as retaining old ciphertext even after live
+  evidence-body expiry.
+
+Production deployment is a separate decision. For the current migration it is
+also blocked until the previously exposed OpenRouter credential is revoked and
+replaced by a file mounted only into ag-providerd.

@@ -23,6 +23,7 @@ from gov_webui.creative_project import CreativeProjectStore
 from gov_webui.library_store import LibraryState, LibraryStore
 from gov_webui.manuscript_store import ManuscriptStore
 from gov_webui.snapshot_store import ProjectSnapshotStore
+from gov_webui.state_layout import contexts_root, shared_root
 
 
 class BackupError(RuntimeError):
@@ -55,7 +56,7 @@ class WorkspaceBackupManager:
 
     @property
     def library_path(self) -> Path:
-        return self.data_root / "marginalia" / "library.json"
+        return shared_root(self.data_root) / "library.json"
 
     def _library(self) -> LibraryStore:
         return LibraryStore(
@@ -159,7 +160,7 @@ class WorkspaceBackupManager:
         library_bytes, context_ids = self._workspace_library_bytes(workspace_id)
         entries: dict[str, bytes] = {"payload/library.json": library_bytes}
 
-        context_base = self.data_root / ".governor"
+        context_base = contexts_root(self.data_root)
         for context_id in context_ids:
             root = context_base / context_id
             if not root.exists():
@@ -170,7 +171,7 @@ class WorkspaceBackupManager:
                 if content is not None:
                     entries[f"payload/contexts/{context_id}/{relative}"] = content
 
-        snapshots_root = self.data_root / "marginalia" / "snapshots"
+        snapshots_root = shared_root(self.data_root) / "snapshots"
         state = LibraryState.model_validate_json(library_bytes)
         for project_id in state.projects:
             root = snapshots_root / project_id
@@ -180,7 +181,7 @@ class WorkspaceBackupManager:
                 relative = path.relative_to(root).as_posix()
                 entries[f"payload/snapshots/{project_id}/{relative}"] = self._read_stable(path)
 
-        marginalia_root = self.data_root / "marginalia"
+        marginalia_root = shared_root(self.data_root)
         operational_paths = [
             *marginalia_root.glob("library.migration-*.json"),
             *marginalia_root.glob("library.pre-schema-*.json"),
@@ -382,15 +383,15 @@ class WorkspaceBackupManager:
         if parts[:1] != ("payload",):
             return None
         if parts[1:] == ("library.json",):
-            return target / "marginalia" / "library.json"
+            return shared_root(target) / "library.json"
         if parts[1:2] == ("contexts",) and len(parts) >= 4:
-            return target / ".governor" / Path(*parts[2:])
+            return contexts_root(target) / Path(*parts[2:])
         if parts[1:2] == ("snapshots",) and len(parts) >= 4:
-            return target / "marginalia" / "snapshots" / Path(*parts[2:])
+            return shared_root(target) / "snapshots" / Path(*parts[2:])
         if parts[1:2] == ("operations",) and len(parts) == 3:
-            return target / "marginalia" / parts[2]
+            return shared_root(target) / parts[2]
         if parts[1:2] == ("shared",) and len(parts) >= 4:
-            return target / ".governor" / Path(*parts[2:])
+            return contexts_root(target) / Path(*parts[2:])
         return None
 
     def restore(self, path: Path, *, target_data_root: Path) -> dict[str, Any]:
@@ -426,7 +427,7 @@ class WorkspaceBackupManager:
             target = Path(directory)
             result = self.restore(path, target_data_root=target)
             library = LibraryStore(
-                target / "marginalia" / "library.json",
+                shared_root(target) / "library.json",
                 default_context_id=self.default_context_id,
             )
             state = library.snapshot()
@@ -438,7 +439,7 @@ class WorkspaceBackupManager:
             canon_reviews = 0
             snapshots = 0
             for project in state.projects.values():
-                context_root = target / ".governor" / project.context_id
+                context_root = contexts_root(target) / project.context_id
                 sessions_dir = context_root / "sessions"
                 project_sessions: dict[str, ChatSession] = {}
                 for session_path in sessions_dir.glob("*.json"):

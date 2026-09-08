@@ -35,6 +35,7 @@ from gov_webui.generation_store import (
     LogicalRequest,
     LogicalStatus,
 )
+from gov_webui.state_layout import contexts_root as application_contexts_root
 
 
 class GenerationWorkerError(RuntimeError):
@@ -81,6 +82,9 @@ class WorkerConfig:
     executor: Path
     issuer_key: Path
     evidence_keyring: Path
+    providerctl: Path = Path("/usr/local/bin/ag-providerctl")
+    providerctl_config: Path = Path("/etc/marginalia/providerctl.toml")
+    model_config: Path = Path("/etc/marginalia/providers.json")
     retention_days: int = 30
     poll_seconds: float = 2.0
 
@@ -97,7 +101,12 @@ class WorkerConfig:
         if not 1 <= retention <= 3650 or not 0.1 <= poll <= 300:
             raise GenerationWorkerError("invalid retention or worker poll interval")
         return cls(
-            contexts_root=absolute("GOVERNOR_CONTEXTS_DIR", "/data/.governor"),
+            contexts_root=absolute(
+                "MARGINALIA_CONTEXTS_DIR",
+                str(
+                    application_contexts_root(Path(os.environ.get("MARGINALIA_DATA_ROOT", "/data")))
+                ),
+            ),
             ag_loopctl=absolute("MARGINALIA_AG_LOOPCTL", "/usr/local/bin/ag-loopctl"),
             docket=absolute("MARGINALIA_DOCKET", "/usr/local/bin/docket"),
             observation_resolver=absolute(
@@ -114,6 +123,11 @@ class WorkerConfig:
                 "MARGINALIA_GENERATION_EXECUTOR",
                 "/usr/local/bin/marginalia-generation-executor",
             ),
+            providerctl=absolute("MARGINALIA_AG_PROVIDERCTL", "/usr/local/bin/ag-providerctl"),
+            providerctl_config=absolute(
+                "MARGINALIA_AG_PROVIDERCTL_CONFIG", "/etc/marginalia/providerctl.toml"
+            ),
+            model_config=absolute("MARGINALIA_MODEL_CONFIG", "/etc/marginalia/providers.json"),
             issuer_key=absolute(
                 "MARGINALIA_AG_ISSUER_KEY_FILE", "/run/secrets/marginalia-ag-issuer.pk8"
             ),
@@ -172,6 +186,10 @@ class GovernedGeneration:
             request_digest=self.dispatch.request_digest,
             subject=subject,
             scope=scope,
+            providerctl=self.config.providerctl,
+            providerctl_config=self.config.providerctl_config,
+            model_config=self.config.model_config,
+            schema=EXECUTOR_PLAN_SCHEMA,
         )
         self._write_exact(self.executor_plan_path, plan.canonical_value())
         basis = {
@@ -414,6 +432,9 @@ class GovernedGeneration:
             self.config.standing_resolver,
             self.config.docket_standing_resolver,
             self.config.executor,
+            self.config.providerctl,
+            self.config.providerctl_config,
+            self.config.model_config,
             self.config.issuer_key,
             self.config.evidence_keyring,
         ):

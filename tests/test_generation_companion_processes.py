@@ -38,7 +38,7 @@ def test_exact_companions_dispatch_once_and_reopen_settled_state(
 ) -> None:
     assert AG_LOOPCTL is not None and DOCKET is not None
     contexts = tmp_path / "contexts"
-    monkeypatch.setenv("GOVERNOR_CONTEXTS_DIR", str(contexts))
+    monkeypatch.setenv("MARGINALIA_CONTEXTS_DIR", str(contexts))
     context = contexts / "ctx"
     store = GenerationStore(context / "marginalia" / "generation.sqlite")
     request = store.create_request(
@@ -106,6 +106,11 @@ def test_exact_companions_dispatch_once_and_reopen_settled_state(
         "outcome = runner.execute(dispatch) if op == 'execute' else runner.reconcile(dispatch)\n"
         "print(json.dumps(outcome.to_dict(), sort_keys=True, separators=(',', ':')))\n",
     )
+    providerctl = _executable(programs / "providerctl", "raise SystemExit(0)\n")
+    providerctl_config = programs / "providerctl.toml"
+    providerctl_config.write_text("fixture", encoding="utf-8")
+    model_config = programs / "providers.json"
+    model_config.write_text("{}", encoding="utf-8")
     config = WorkerConfig(
         contexts_root=contexts,
         ag_loopctl=Path(AG_LOOPCTL),
@@ -114,6 +119,9 @@ def test_exact_companions_dispatch_once_and_reopen_settled_state(
         standing_resolver=standing,
         docket_standing_resolver=docket_standing,
         executor=executor,
+        providerctl=providerctl,
+        providerctl_config=providerctl_config,
+        model_config=model_config,
         issuer_key=issuer,
         evidence_keyring=keyring,
     )

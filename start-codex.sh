@@ -16,12 +16,10 @@ COMPOSE_FILES+=(-f docker-compose.build.yml -f docker-compose.codex.yml)
 
 docker compose "${COMPOSE_FILES[@]}" build
 
-MARGINALIA_IMAGE=marginalia:local \
-MARGINALIA_CODEX_VOLUME="${COMPOSE_PROJECT_NAME:-$(basename "$SCRIPT_DIR")}_marginalia_codex_home" \
-MARGINALIA_SKIP_PULL=1 \
-"$SCRIPT_DIR/marginalia" login --no-pull
+docker compose "${COMPOSE_FILES[@]}" run --rm --no-deps \
+  --entrypoint /opt/codex/codex marginalia-providerd login --device-auth
 
 docker compose "${COMPOSE_FILES[@]}" up -d "$@"
 
 echo "Marginalia: http://localhost:${MARGINALIA_PORT:-8000}"
-echo "Provider ownership: Agent Governor daemon (codex CLI)"
+echo "Provider ownership: ag-providerd (Codex CLI); attempt custody: Docket"

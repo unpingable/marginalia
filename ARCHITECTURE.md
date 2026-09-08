@@ -1,159 +1,90 @@
-# Marginalia architecture (M1)
+# Marginalia architecture
 
-## Product boundary
+## Runtime ownership
 
 ```text
-browser
-  │ HTTP / SSE
-  ▼
-Marginalia FastAPI application
-  ├── creative project / sessions / canon / artifacts
-  │ GovernedChatAdapter (one context)
-  │ JSON-RPC 2.0 / Unix socket
-  ▼
-Agent Governor daemon
-  ├── provider/model execution
-  ├── governed context and pending state
-  └── authority receipt store
+browser / API
+      |
+      v
+Marginalia web application
+  | freezes logical request + application revision/canon/guidance
+  v
+GenerationStore ---- inspection/reconciliation remains available when dispatch is off
+      |
+      v
+Docket worker / Marginalia executor
+  | presents exact work authorization
+  v
+ag-providerctl -> ag-providerd -> configured provider/model
+      |
+      v
+encrypted response evidence -> revision-checked Marginalia acceptance
 ```
 
-Constellation is outside this boundary. Marginalia neither imports nor calls
-NQ, Nightshift, Monitor, Maude, Desk, or qualification services.
+- **ag-ng** authorizes exact work and isolates provider credentials.
+- **Docket** owns attempt custody and worker recovery.
+- **Marginalia executor** owns provider dispatch and response evidence.
+- **Marginalia application** owns whether a response enters the story.
 
-## Application-facing AG contract
+A worker replacement can recover custody and captured evidence. It cannot
+necessarily resume a provider HTTP or command execution whose connection was
+lost. Such work remains `unknown` unless exact evidence or provider-supported
+reconciliation resolves it; it is never silently redispatched.
 
-`GovernedChatAdapter` owns these operations:
+## Request and acceptance identity
 
-| Operation | AG RPC |
-|---|---|
-| Validate capability and state root | `governor.hello` |
-| Discover provider/model | `chat.backend`, `chat.models` |
-| Send governed response (including finality-gated SSE) | `chat.send` |
-| Observe context pending state | `commit.pending` + `context_id` |
-| Resolve in the same context | `commit.fix/revise/proceed` + `context_id` |
-| Verify authority evidence | `receipts.detail` |
+One client request ID identifies frozen logical work, including the original
+model/route and authorized fallback policy. Every actual dispatch has a separate
+digest containing its actual model, route, request, and ordinal. Fetching a
+provider response starts candidate reconciliation; it does not authorize retry.
+Confirmed cancellation stops waiting but does not prove no execution or billing
+occurred.
 
-Every successful or blocked governed outcome must return a receipt that AG's
-receipt store confirms has `receipt_role=authority`. A successful resolution
-must link its evidence to both the pending ID and original blocking receipt.
-Marginalia does not consume AG v1 partial deltas: its provider adapters can
-encode execution failures as ordinary chunk content. SSE responses therefore
-use `chat.send` transactionally and emit content only after a typed final
-outcome and authority receipt are validated.
-
-For session-backed generation, the session snapshot includes a persisted
-revision. The prompt and validated authored response are appended with one
-revision compare-and-swap while a per-session file lock is held. Every direct
-session mutation increments that revision. If the conversation changes or
-moves while provider work is in flight, the stale result is returned as an
-operational `stale_context` failure and neither its prompt nor response is
-written. Session replacement is atomic, and the lock is advisory across web
-processes rather than a process-global browser mutex.
+Conversation acceptance locks project state and then the session, checks for a
+prior insertion by candidate identity, and only then checks current revision,
+canon, and guidance before a crash-safe append. Canon and project-guidance
+writers use the same cross-process project lock and lock order.
 
 ## State layout
 
-For `MARGINALIA_DATA_ROOT=/data` and context `erin-writing`:
+For `MARGINALIA_DATA_ROOT=/data`:
 
 ```text
-/data/.governor/                         AG daemon state / context base
-└── erin-writing/
-    ├── _context.json
-    ├── marginalia/project.json          brief / stance / voice, context-bound
-    ├── .governor/
-    │   ├── continuity/anchors.json
-    │   ├── pending_violations.json      present only while pending
-    │   └── exceptions/
-    └── sessions/                        conversation persistence
+/data/.marginalia/contexts/     projects, sessions, canon, artifacts
+/data/.marginalia/shared/       shared appliance state
+/data/.governor/                compatibility symlink into the new layout
+/data/marginalia/               compatibility symlink into the new layout
 ```
 
-The daemon starts with `governor --root /data`, which makes its governor
-directory `/data/.governor`. Marginalia configures `GovernorContextManager`
-with that same directory. The AG handshake reports its resolved directory and
-the adapter rejects a mismatch.
+Startup migrates legacy roots without changing their bytes and preserves
+write-through compatibility symlinks. Durable generation indices and encrypted
+evidence remain application state; providerd has a separate state volume.
 
-## Provider ownership
+## Runtime services
 
-AG is authoritative. `BACKEND_TYPE`, credentials, provider host/path, and AG's
-default model configure the daemon process. Marginalia queries those values;
-it has no local `ChatBridge` and cannot switch the provider independently.
+The supported Compose deployment runs the web application, generation worker,
+ag-providerd, backup worker, and synthetic probe. Durable generation is not an
+optional profile. The visible per-project **ag-ng · on/off** switch controls new
+dispatch only; pending inspection, reconciliation, and evidence recovery remain
+available.
 
-## M1 product prompt path
+The web process receives only the model catalog and evidence keyring. The worker
+receives the authorization issuer, evidence keyring, and providerctl identity.
+Only ag-providerd receives provider API credentials or command-provider login
+state. NAS bind-mounted inputs are copied to process-private, root-owned `0600`
+paths before parsers start.
 
-Marginalia renders the three creative-project fields into one
-`MARGINALIA_PROJECT_CONTEXT_V1` system message. That message is inserted into
-the conversation sent to `GovernedChatAdapter`; AG then performs its ordinary
-fiction augmentation, provider execution, response checks, pending-state
-handling, and authority receipt generation. Project direction does not bypass
-or compete with the governance prompt path.
+## Context and canon
 
-The project file stores its owning context ID. A mismatch is an error, and
-tests exercise both independent A/B stores and a copied-file mismatch. The live
-socket regression makes a deterministic provider respond only when all three
-fields arrive through AG, then separately proves the block/restart/resolve
-contract.
+All authored history remains durable. Provider context is a revision-bound,
+token-counted projection containing required recent turns, accepted canon,
+project direction, pinned passages, and a source-covered derived summary when
+available. If required material cannot fit, generation blocks with an
+actionable explanation; accepted facts are never silently discarded.
 
-## Quarantined donor code
+Context maintenance and synthetic probes use the same ag-ng/Docket custody path
+with non-conversation purposes. Their candidates cannot enter a story and are
+marked consumed only after the derived artifact is crash-safely stored.
 
-The internal package remains `gov_webui`, and `adapter.py` still includes old
-code, research, dashboard, and receipt routes. In M1 they are blocked by
-default at the application boundary and absent from product discovery. Heavy
-viewmodel/dashboard/instrument imports are conditional on the explicit donor
-test switch, so they are not runtime dependencies of the normal product path.
-The retained source and tests can be deleted incrementally; they do not justify
-broadening `GovernedChatAdapter` into a platform SDK.
-
-## Regression boundary
-
-`tests/test_live_governed_chat_contract.py` starts a real AG daemon with a
-deterministic no-network provider and proves:
-
-```text
-project config → governed provider response / authority receipt
-request → block/authority receipt → context pending on disk
-        → daemon restart → pending recovered
-        → wrong-context resolution rejected
-        → correct-context resolution/authority receipt
-        → original receipt linkage → pending cleared
-```
-
-## Bounded fiction-context architecture
-
-Long-running projects retain every authored message. Provider input is a
-revision-bound projection rather than the session file itself:
-
-```text
-project direction + accepted canon
-                 +
-source-hashed summary of messages [0:k)
-                 +
-recent authored messages [k:n)
-                 +
-pending user prompt
-                 |
-          token preflight
-                 |
-       governed provider call
-                 |
-   validated authored terminal result
-                 |
- session revision compare-and-swap
-```
-
-The summary is a rebuildable cache with covered message IDs, exact-prefix hash,
-observed revision, structured evidence citations, prompt-schema/model identity,
-usage, and authority receipts. Any edit, deletion, reorder, foreign citation,
-context mismatch, malformed result, or insufficient current coverage prevents
-use. Chunk work and final summaries live in
-`.governor/CONTEXT/marginalia/context/`, outside all narrative stores.
-
-The initial envelope is 32k application-controlled input tokens plus 16k
-reserved for AG/provider shaping, predicting at most 48k provider input. An
-additional 8k completion reserve is planning headroom. Counts use the selected
-model's configured real tokenizer and safety multiplier. No provider launches
-when mandatory input already exceeds its allocation.
-
-Maintenance uses a separate AG context and configured model. It may update only
-derived summary/work files. The writing provider remains the conversation's
-selected model. A successful result still commits only through the session
-revision CAS; maintenance, provider failure, block, cancellation, and conflict
-cannot mutate authored history.
+Classic donor routes are frozen source history. They are absent from discovery
+and cannot be re-enabled at runtime.

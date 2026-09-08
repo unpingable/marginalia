@@ -24,7 +24,7 @@ def accepted_canon_message(governor_dir: Path | str) -> dict[str, str] | None:
     thing not to write. Both are prohibitions in the registry, and under one
     heading a model has to guess which reading applies to which.
     """
-    from governor.continuity import AnchorType, create_registry
+    from gov_webui.writer_continuity import AnchorType, create_registry
 
     groups: dict[str, list[dict[str, object]]] = {
         "world_facts": [],

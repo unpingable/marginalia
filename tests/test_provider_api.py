@@ -54,6 +54,7 @@ def provider_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
 
     monkeypatch.setattr(adapter, "MARGINALIA_ENABLE_DONOR_ROUTES", False)
+    monkeypatch.setattr(adapter, "MARGINALIA_AG_NG_ONLY", False)
     monkeypatch.setattr(adapter, "GOVERNOR_CONTEXTS_DIR", str(tmp_path / "contexts"))
     monkeypatch.setattr(adapter, "GOVERNOR_CONTEXT_ID", "provider-test")
     monkeypatch.setattr(adapter, "GOVERNOR_MODE", "fiction")
@@ -70,6 +71,7 @@ def provider_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     adapter._creative_project_stores.clear()
     adapter._artifact_stores.clear()
     adapter._canon_review_stores.clear()
+    adapter._generation_stores.clear()
     adapter._manuscript_stores.clear()
     adapter._snapshot_stores.clear()
     adapter._context_summary_stores.clear()
@@ -93,6 +95,7 @@ def provider_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     adapter._creative_project_stores.clear()
     adapter._artifact_stores.clear()
     adapter._canon_review_stores.clear()
+    adapter._generation_stores.clear()
     adapter._manuscript_stores.clear()
     adapter._snapshot_stores.clear()
     adapter._context_summary_stores.clear()
@@ -115,6 +118,108 @@ def test_configured_model_list_is_explicit(provider_client) -> None:
         ("fiction-model", "provider-a", "upstream-a", "Fiction A"),
         ("fiction-model-b", "provider-b", "upstream-b", "Fiction B"),
     ]
+
+
+def test_backend_discovery_is_owned_by_ag_ng_providerd(provider_client) -> None:
+    client, adapter = provider_client
+    adapter._governed_chat_adapter.reset_mock()
+
+    response = client.get("/v1/backends")
+
+    assert response.status_code == 200
+    assert response.json()["authoritative"] == "ag-ng"
+    assert {item["type"] for item in response.json()["backends"]} == {
+        "provider-a",
+        "provider-b",
+    }
+    assert all(item["configured_by"] == "ag-providerd" for item in response.json()["backends"])
+    adapter._governed_chat_adapter.provider.assert_not_awaited()
+    adapter._governed_chat_adapter.models.assert_not_awaited()
+
+
+def test_api_info_names_ag_ng_without_classic_probe(provider_client) -> None:
+    client, adapter = provider_client
+    adapter._governed_chat_adapter.reset_mock()
+
+    response = client.get("/api/info")
+
+    assert response.status_code == 200
+    assert response.json()["backend"] == "ag-ng-providerd"
+    assert response.json()["provider_owner"] == "ag-ng-providerd"
+    adapter._governed_chat_adapter.provider.assert_not_awaited()
+
+
+def test_conflict_resolution_proposes_canon_without_accepting_response(provider_client) -> None:
+    client, adapter = provider_client
+    project = adapter._project_record(None)
+    session = adapter._get_session_store(project.id).create(
+        project.context_id, model="fiction-model"
+    )
+    store = adapter._get_generation_store(project.id)
+    created = store.create_request(
+        client_request_id="conflict-client",
+        project_id=project.id,
+        session_id=session.id,
+        expected_revision=session.revision,
+        canon_fingerprint="sha256:canon",
+        guidance_fingerprint="sha256:guidance",
+        original_model="fiction-model",
+        original_route="provider-a",
+        request={
+            "context_id": project.context_id,
+            "messages": [{"role": "user", "content": "Continue."}],
+            "model": "fiction-model",
+        },
+    ).request
+    store.set_dispatch_enabled(project.id, True)
+    dispatch = store.reserve_dispatch(created.id)
+    store.mark_executing(dispatch.id, "provider-attempt")
+    candidate = store.record_candidate(
+        dispatch.id,
+        response_digest="sha256:response",
+        evidence_ref="evidence://candidate",
+    )
+    store.block_candidate(
+        candidate.id,
+        "response conflicts with accepted story constraints",
+        detail={
+            "conflict": {
+                "violations": [
+                    {
+                        "anchor_id": "forbid-1",
+                        "anchor_type": "prohibition",
+                        "severity": "reject",
+                        "description": "Forbidden event",
+                        "evidence": [],
+                    }
+                ],
+                "recommended_action": "fail_closed",
+                "checked_anchors": 1,
+            }
+        },
+    )
+
+    pending = client.get(f"/v1/governed-chat/pending?project_id={project.id}")
+    assert pending.status_code == 200
+    assert pending.json()["pending"]["candidate_id"] == candidate.id
+
+    resolved = client.post(
+        "/v1/governed-chat/resolve",
+        json={
+            "action": "revise",
+            "candidate_id": candidate.id,
+            "project_id": project.id,
+            "new_anchor_text": "The sigil may appear only in dreams.",
+        },
+    )
+    assert resolved.status_code == 200
+    proposal = adapter._get_canon_review_store(project.id).get(resolved.json()["proposal_id"])
+    assert proposal.warrant == "author_revision"
+    assert proposal.target_anchor_id == "forbid-1"
+    assert store.get_candidate(candidate.id).accepted_message_id is None
+    assert (
+        client.get(f"/v1/governed-chat/pending?project_id={project.id}").json()["pending"] is None
+    )
 
 
 def test_context_maintenance_model_is_not_writer_selectable(provider_client) -> None:
@@ -157,19 +262,21 @@ def test_model_api_and_new_session_use_an_available_default(provider_client) -> 
     response = client.get("/v1/models")
 
     assert response.status_code == 200
-    assert response.json()["default_model"] == "fiction-model-b"
-    assert response.json()["data"][0]["available"] is False
+    assert response.json()["default_model"] == "fiction-model"
+    assert response.json()["data"][0]["available"] is True
     assert response.json()["data"][1]["available"] is True
 
     created = client.post("/sessions/", json={"title": "Available default"})
     assert created.status_code == 200
-    assert created.json()["model"] == "fiction-model-b"
+    # Provider availability is owned by credential-isolated providerd. The web
+    # process retains the configured selection instead of probing secrets.
+    assert created.json()["model"] == "fiction-model"
 
     refused = client.post(
         "/sessions/",
         json={"title": "Explicit unavailable", "model": "fiction-model"},
     )
-    assert refused.status_code == 503
+    assert refused.status_code == 200
 
 
 def test_chat_response_records_exact_configured_identity(provider_client) -> None:

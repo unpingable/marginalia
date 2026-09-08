@@ -49,6 +49,9 @@ MUTATION_ADMISSIBLE_WARRANTS: frozenset[str] = frozenset(
     {
         # The author wrote it; capture only relocates it into canon.
         "author_statement",
+        # The authenticated operator explicitly proposed a revision to an
+        # existing anchor. This remains a proposal until separately accepted.
+        "author_revision",
         # Stored canon has provably lost or altered part of its source.
         "source_omission",
         "source_truncation",

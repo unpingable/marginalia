@@ -1,4 +1,5 @@
-# Optional local Ollama provider. AG remains the provider owner.
+# Optional local Ollama service. Configure its container URL in providers.json;
+# ag-providerd remains the only process allowed to dispatch to it.
 services:
   ollama:
     image: ollama/ollama:latest
@@ -9,10 +10,7 @@ services:
       - ollama_data:/root/.ollama
     restart: unless-stopped
 
-  marginalia:
-    environment:
-      - BACKEND_TYPE=ollama
-      - OLLAMA_HOST=http://ollama:11434
+  marginalia-providerd:
     depends_on:
       - ollama
 

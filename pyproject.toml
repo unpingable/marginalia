@@ -13,7 +13,6 @@ authors = [
     { name = "James Beck"}
 ]
 dependencies = [
-    "agent-governor==2.8.1",
     "receipt-v1==0.1.0",
     "fastapi==0.128.0",
     "uvicorn[standard]==0.40.0",
@@ -47,6 +46,7 @@ marginalia-standing-resolver = "gov_webui.generation_boundaries:standing_main"
 marginalia-docket-standing-resolver = "gov_webui.generation_boundaries:docket_standing_main"
 marginalia-generation-worker = "gov_webui.generation_worker:main"
 marginalia-generation-secrets = "gov_webui.generation_secrets:main"
+marginalia-ag-provider-config = "gov_webui.ag_provider_config:main"
 
 [project.urls]
 Homepage = "https://github.com/unpingable/marginalia"

@@ -1,0 +1,358 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-gov.dev/receipt/v1/receipt.schema.json",
+  "title": "Receipt v1",
+  "description": "Runtime-agnostic audit trail for tool governance decisions.",
+  "type": "object",
+  "required": [
+    "receipt_id",
+    "receipt_version",
+    "receipt_hash",
+    "chain",
+    "timestamp_wall",
+    "actor",
+    "tool",
+    "decision",
+    "provenance"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "receipt_id": {
+      "type": "string",
+      "description": "Unique receipt identifier (UUIDv7 recommended).",
+      "minLength": 1
+    },
+    "receipt_version": {
+      "const": "1.0",
+      "description": "Schema version."
+    },
+    "receipt_hash": {
+      "type": "string",
+      "description": "SHA-256 of canonical form (domain-separated).",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "chain": {
+      "type": "object",
+      "description": "Chain linkage for receipt sequencing.",
+      "required": ["seq"],
+      "additionalProperties": false,
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Sequence number within scope (1-indexed)."
+        },
+        "parent_receipt_id": {
+          "type": "string",
+          "description": "Previous receipt's receipt_id (indexing).",
+          "minLength": 1
+        },
+        "parent_receipt_hash": {
+          "type": "string",
+          "description": "Previous receipt's receipt_hash (integrity).",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "timestamp_wall": {
+      "type": "string",
+      "description": "ISO 8601 UTC timestamp with Z suffix.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "timestamp_mono": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Optional monotonic counter (per instance_id)."
+    },
+    "actor": {
+      "type": "object",
+      "description": "Who initiated the tool call.",
+      "required": ["agent_id", "session_id"],
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Opaque agent identifier (not PII)."
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Session/conversation scope."
+        },
+        "runtime": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Which runtime (e.g. 'claude-code', 'custom')."
+        },
+        "issuer": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Who asserted this identity (multi-tenant)."
+        },
+        "auth_context": {
+          "type": "string",
+          "enum": ["stdio", "oauth", "mtls", "api_key", "none"],
+          "description": "How identity was established."
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "description": "Tool call details.",
+      "required": ["tool_id", "args_hash"],
+      "additionalProperties": false,
+      "properties": {
+        "tool_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Tool name / identifier."
+        },
+        "tool_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Tool version if known."
+        },
+        "call_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Idempotency key for retry dedup."
+        },
+        "args_hash": {
+          "type": "string",
+          "description": "Domain-separated hash of canonical args.",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "args_summary": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Human-readable summary (sanitized)."
+        },
+        "capability_asserted": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Permission/scope the agent claimed."
+        },
+        "origin": {
+          "type": "object",
+          "description": "Where the tool lives (proxied setups).",
+          "required": ["server_id", "transport"],
+          "additionalProperties": false,
+          "properties": {
+            "server_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Config name of upstream server."
+            },
+            "transport": {
+              "type": "string",
+              "enum": ["stdio", "http"],
+              "description": "Transport to upstream."
+            },
+            "instance": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Disambiguate replicas."
+            }
+          }
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "description": "Policy decision.",
+      "required": ["action", "reason_code"],
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["allow", "deny", "transform", "escalate"],
+          "description": "Policy decision action."
+        },
+        "reason_code": {
+          "type": "string",
+          "description": "Machine-readable reason (namespaced).",
+          "pattern": "^[a-z0-9]+\\.[a-z0-9_]+$"
+        },
+        "reason_human": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Human-readable explanation (sanitized)."
+        },
+        "policy_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Which policy rule triggered this decision."
+        },
+        "policy_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Version of policy set applied."
+        },
+        "policy_path": {
+          "type": "array",
+          "description": "Compositional decision trace (ordered).",
+          "items": {
+            "type": "object",
+            "required": ["id", "version", "outcome"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "outcome": {
+                "type": "string",
+                "enum": ["pass", "fail", "transform", "escalate", "skip"]
+              }
+            }
+          }
+        },
+        "transformed_args_hash": {
+          "type": "string",
+          "description": "Hash of modified args (action=transform).",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "budget": {
+          "type": "object",
+          "description": "Budget state after decision.",
+          "additionalProperties": false,
+          "properties": {
+            "rate_remaining": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cost_remaining": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "retries_remaining": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "description": "Execution outcome (present only for allow/transform).",
+      "required": ["status", "attempt"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["success", "failure", "timeout", "skipped"],
+          "description": "Execution outcome status."
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Attempt number (1-indexed)."
+        },
+        "effect_summary": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "What changed (sanitized)."
+        },
+        "side_effects": {
+          "type": "array",
+          "description": "Observed side effects (sorted, unique).",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z]+:[a-z0-9_]+$"
+          }
+        },
+        "effects_confidence": {
+          "type": "string",
+          "enum": ["none", "coarse", "instrumented"],
+          "description": "Confidence level for reported side effects."
+        },
+        "result_hash": {
+          "type": "string",
+          "description": "SHA-256 of redacted/normalized result.",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "result_summary": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Short summary of result (sanitized)."
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How long execution took."
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Error message if status=failure (sanitized)."
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Receipt provenance and integrity metadata.",
+      "required": ["deployment_id", "instance_id", "governor_version", "hash_alg", "hash_encoding"],
+      "additionalProperties": false,
+      "properties": {
+        "deployment_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable across replicas of the same deployment."
+        },
+        "instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unique per process."
+        },
+        "governor_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Governor software version."
+        },
+        "hash_alg": {
+          "const": "sha-256",
+          "description": "Hash algorithm used throughout."
+        },
+        "hash_encoding": {
+          "const": "hex",
+          "description": "Encoding of all hash values."
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Signature over receipt_hash (optional in v1)."
+        },
+        "signature_alg": {
+          "type": "string",
+          "minLength": 1,
+          "description": "e.g. 'ed25519'."
+        },
+        "signature_encoding": {
+          "type": "string",
+          "minLength": 1,
+          "description": "e.g. 'base64url'."
+        },
+        "signing_key_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Key identifier for verification."
+        }
+      }
+    },
+    "ext": {
+      "type": "object",
+      "description": "Vendor/project-specific fields. Keys MUST be namespaced (e.g. 'vendor.field').",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z0-9]+\\.[a-z0-9_.]+$"
+      }
+    }
+  }
+}

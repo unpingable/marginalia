@@ -16,6 +16,7 @@ from gov_webui.generation_executor import (
     ExecutorError,
     ExecutorPlan,
     GenerationExecutor,
+    ProviderOutcomeUnknown,
 )
 from gov_webui.generation_executor_cli import run
 from gov_webui.generation_store import GenerationStore, LogicalStatus
@@ -37,7 +38,11 @@ def fixture(tmp_path: Path):
         guidance_fingerprint=digest("guidance"),
         original_model="model-a",
         original_route="route-a",
-        request={"messages": [{"role": "user", "content": "Write"}]},
+        request={
+            "context_id": "context-a",
+            "messages": [{"role": "user", "content": "Write"}],
+            "model": "model-a",
+        },
     ).request
     store.set_dispatch_enabled("project-a", True)
     reserved = store.reserve_dispatch(request.id)
@@ -170,3 +175,113 @@ def test_plan_file_round_trips_and_plan_id_operation_is_exact(tmp_path: Path) ->
     loaded = ExecutorPlan.from_file(path)
     assert loaded == plan
     assert run(["plan-id", str(path)]) == plan.identity
+
+
+class FakeDurableProvider:
+    def __init__(self, response: dict | None = None) -> None:
+        self.dispatch = digest("provider-dispatch")
+        self.exact = digest("provider-event-stream")
+        self.response = response or {
+            "outcome": "authored",
+            "content": "Durably retained",
+            "provider_evidence": {
+                "dispatch": self.dispatch,
+                "exact_event_stream": self.exact,
+                "event_stream": "fixture",
+            },
+        }
+        self.execute_calls = 0
+        self.fetch_calls = 0
+        self.ack_calls = 0
+        self.fail_execute = False
+        self.fail_first_ack = False
+
+    def prepare(self, payload, **identity):
+        assert payload["model"] == "model-a"
+        assert identity["actual_route"] == "route-a"
+        return {"schema": "fixture", "dispatch": self.dispatch}
+
+    def execute(self, transaction, *, selected_model):
+        self.execute_calls += 1
+        assert transaction["dispatch"] == self.dispatch
+        assert selected_model == "model-a"
+        if self.fail_execute:
+            raise ProviderOutcomeUnknown("browser wait ended")
+        return self.response
+
+    def fetch(self, dispatch, *, selected_model):
+        self.fetch_calls += 1
+        assert dispatch == self.dispatch
+        assert selected_model == "model-a"
+        return self.response
+
+    def acknowledge(self, dispatch, exact_event_stream, custody):
+        self.ack_calls += 1
+        assert (dispatch, exact_event_stream) == (self.dispatch, self.exact)
+        assert custody == digest("response")
+        if self.fail_first_ack and self.ack_calls == 1:
+            raise ProviderOutcomeUnknown("acknowledgment lost")
+
+
+def _durable_executor(tmp_path: Path, provider: FakeDurableProvider):
+    store, request, plan, dispatch = fixture(tmp_path)
+
+    def evidence(response, **_identity):
+        assert response["content"] == "Durably retained"
+        return EvidenceReference("evidence:key-1:durable", digest("response"))
+
+    return (
+        store,
+        request,
+        dispatch,
+        GenerationExecutor(plan, provider=provider, evidence_writer=evidence),
+    )
+
+
+def test_durable_timeout_reconciles_fetched_response_without_redispatch(tmp_path: Path) -> None:
+    provider = FakeDurableProvider()
+    provider.fail_execute = True
+    store, request, dispatch, executor = _durable_executor(tmp_path, provider)
+
+    first = executor.execute(dispatch)
+    assert first.outcome == "indeterminate"
+    assert store.get_request(request.id).status is LogicalStatus.UNKNOWN
+
+    recovered = executor.reconcile(dispatch)
+    assert recovered.outcome == "success"
+    assert provider.execute_calls == 1
+    assert provider.fetch_calls == 1
+    assert provider.ack_calls == 1
+    assert store.get_request(request.id).status is LogicalStatus.CANDIDATE
+
+
+def test_lost_ack_after_candidate_reconciles_existing_candidate(tmp_path: Path) -> None:
+    provider = FakeDurableProvider()
+    provider.fail_first_ack = True
+    store, request, dispatch, executor = _durable_executor(tmp_path, provider)
+
+    first = executor.execute(dispatch)
+    assert first.outcome == "indeterminate"
+    assert store.get_request(request.id).status is LogicalStatus.CANDIDATE
+
+    recovered = executor.reconcile(dispatch)
+    assert recovered.outcome == "success"
+    assert provider.execute_calls == 1
+    assert provider.fetch_calls == 0
+    assert provider.ack_calls == 2
+    assert len(store.list_dispatches(request.id)) == 1
+
+
+def test_prepare_failure_is_definitive_before_provider_boundary(tmp_path: Path) -> None:
+    provider = FakeDurableProvider()
+
+    def refuse(*_args, **_kwargs):
+        raise ExecutorError("route policy refused")
+
+    provider.prepare = refuse
+    store, request, dispatch, executor = _durable_executor(tmp_path, provider)
+
+    result = executor.execute(dispatch)
+    assert result.outcome == "failure"
+    assert provider.execute_calls == 0
+    assert store.get_request(request.id).status is LogicalStatus.FAILED

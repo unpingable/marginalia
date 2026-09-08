@@ -1,4 +1,4 @@
-# Optional Claude Code provider. AG invokes the mounted provider binary.
+# Optional Claude Code provider. Only credential-isolated providerd receives auth.
 #
 # Mount the launcher symlink the installer maintains, not a version directory.
 # The CLI updates itself in place, so a pinned version path becomes an empty
@@ -7,10 +7,7 @@
 # container replacement, because a running container keeps the inode it started
 # with. Set MARGINALIA_CLAUDE_BINARY to pin a specific build deliberately.
 services:
-  marginalia:
-    environment:
-      - BACKEND_TYPE=claude-code
-      - CLAUDE_PATH=/opt/claude/claude
+  marginalia-providerd:
     volumes:
       - ${MARGINALIA_CLAUDE_BINARY:-${REAL_HOME:-${HOME}}/.local/bin/claude}:/opt/claude/claude:ro
-      - ${REAL_HOME:-${HOME}}/.claude:/root/.claude
+      - ${REAL_HOME:-${HOME}}/.claude:/var/lib/marginalia/provider-home/.claude

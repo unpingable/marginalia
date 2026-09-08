@@ -23,8 +23,11 @@ COPY docket-runtime/ docket-runtime/
 RUN test "$(cat ag-ng/AG_NG_CONTRACT_COMMIT)" = "$(cat AG_NG_CONTRACT_COMMIT)" \
     && test "$(cat docket-runtime/DOCKET_CONTRACT_COMMIT)" = "$(cat DOCKET_CONTRACT_COMMIT)" \
     && cargo build --locked --release --manifest-path ag-ng/Cargo.toml -p ag-app --bin ag-loopctl \
+    && cargo build --locked --release --manifest-path ag-ng/Cargo.toml -p ag-providerd \
     && cargo build --locked --release --manifest-path docket-runtime/Cargo.toml -p gwr-local --bin docket \
     && install -Dm0755 ag-ng/target/release/ag-loopctl /out/ag-loopctl \
+    && install -Dm0755 ag-ng/target/release/ag-providerd /out/ag-providerd \
+    && install -Dm0755 ag-ng/target/release/ag-providerctl /out/ag-providerctl \
     && install -Dm0755 docket-runtime/target/release/docket /out/docket
 
 FROM python:3.11-slim@sha256:a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1
@@ -35,20 +38,9 @@ WORKDIR /app
 COPY requirements.lock requirements-build.lock ./
 RUN pip install --no-cache-dir -r requirements.lock -r requirements-build.lock
 
-# Install the qualified AG sources (not fetched implicitly from a registry).
+# Install the independent historical receipt reader (not fetched implicitly).
 COPY LICENSE NOTICE /licenses/marginalia/
-COPY agent-governor/LICENSE agent-governor/NOTICE /licenses/agent-governor/
-COPY AG_CONTRACT_COMMIT /app/AG_CONTRACT_COMMIT
 COPY AG_NG_CONTRACT_COMMIT DOCKET_CONTRACT_COMMIT /app/
-COPY agent-governor/ /tmp/agent-governor/
-RUN test "$(cat /tmp/agent-governor/AG_CONTRACT_COMMIT)" = "$(cat /app/AG_CONTRACT_COMMIT)" \
-    && pip install --no-cache-dir --no-build-isolation --no-deps /tmp/agent-governor/ \
-    && rm -rf /tmp/agent-governor/
-
-COPY receipt-kernel/ /tmp/receipt-kernel/
-RUN pip install --no-cache-dir --no-build-isolation --no-deps /tmp/receipt-kernel/ \
-    && rm -rf /tmp/receipt-kernel/
-
 COPY receipt-v1/ /tmp/receipt-v1/
 RUN pip install --no-cache-dir --no-build-isolation --no-deps /tmp/receipt-v1/ \
     && rm -rf /tmp/receipt-v1/
@@ -60,11 +52,16 @@ RUN pip install --no-cache-dir --no-build-isolation --no-deps .
 
 COPY --from=codex-cli /codex /opt/codex/codex
 COPY --from=generation-companions /out/ag-loopctl /usr/local/bin/ag-loopctl
+COPY --from=generation-companions /out/ag-providerd /usr/local/bin/ag-providerd
+COPY --from=generation-companions /out/ag-providerctl /usr/local/bin/ag-providerctl
 COPY --from=generation-companions /out/docket /usr/local/bin/docket
 
-RUN python3 -c "import importlib.metadata as m; import fiction_governor, governor, receipt_kernel, receipt_v1, gov_webui; assert m.version('agent-governor') == '2.8.1'; assert m.version('marginalia') == '0.1.0'" \
+RUN python3 -c "import importlib.metadata as m; import receipt_v1, gov_webui; assert m.version('marginalia') == '0.1.0'" \
+    && python3 -c "import importlib.metadata as m; names={d.metadata['Name'].lower() for d in m.distributions()}; assert 'agent-governor' not in names and 'receipt-kernel' not in names" \
     && /opt/codex/codex --version \
     && /usr/local/bin/ag-loopctl --help >/dev/null \
+    && /usr/local/bin/ag-providerd --help >/dev/null \
+    && /usr/local/bin/ag-providerctl --help >/dev/null \
     && /usr/local/bin/docket --help >/dev/null
 
 # Operational identity is applied after dependency/application installation so
@@ -80,17 +77,17 @@ LABEL org.opencontainers.image.title="Marginalia" \
       org.opencontainers.image.revision="${MARGINALIA_BUILD_SHA}" \
       org.opencontainers.image.created="${MARGINALIA_BUILD_TIME}" \
       org.opencontainers.image.ref.name="${MARGINALIA_IMAGE_REF}" \
-      org.marginalia.ag-ng.commit="cb85d363e2495a75f78c28fb8ce9b46af1f289c0" \
-      org.marginalia.docket.commit="c49ad8d0f26fb2a13b9dbafdde84d7abfe1f867b"
+      org.marginalia.ag-ng.commit="c3210f156208b22bf21e7bd1910a84a85b519538" \
+      org.marginalia.docket.commit="181589f910b76030b312d6478bd0ac813a630855"
 ENV MARGINALIA_BUILD_SHA="${MARGINALIA_BUILD_SHA}" \
     MARGINALIA_BUILD_TIME="${MARGINALIA_BUILD_TIME}" \
     MARGINALIA_IMAGE_REF="${MARGINALIA_IMAGE_REF}"
 
-# Entrypoints: normalize the bundled subscription-backed Codex provider, then
-# start governor and uvicorn with one state root.
-COPY codex-provider.sh /app/codex-provider.sh
+# Entrypoints for the web process and credential-isolated provider daemon.
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/codex-provider.sh /app/entrypoint.sh
+COPY providerd-entrypoint.sh /app/providerd-entrypoint.sh
+COPY generation-worker-entrypoint.sh /app/generation-worker-entrypoint.sh
+RUN chmod +x /app/entrypoint.sh /app/providerd-entrypoint.sh /app/generation-worker-entrypoint.sh
 
 # Expose port
 EXPOSE 8000
@@ -99,5 +96,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')" || exit 1
 
-# Run AG daemon + Marginalia with one aligned state root.
+# Run Marginalia; model execution exists only in the required ag-ng services.
 CMD ["/app/entrypoint.sh"]

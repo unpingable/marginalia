@@ -27,6 +27,7 @@ def adapter_mod():
     import gov_webui.adapter as mod
 
     importlib.reload(mod)
+    mod.MARGINALIA_AG_NG_ONLY = False
     mod._bridge = None
     mod._context_manager = None
     mod._session_store = None

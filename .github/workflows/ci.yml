@@ -26,9 +26,8 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.11"
-  AG_CONTRACT_COMMIT: e279a94326a0a13dbe43473846b53e4c3a9b31f2
-  AG_NG_CONTRACT_COMMIT: cb85d363e2495a75f78c28fb8ce9b46af1f289c0
-  DOCKET_CONTRACT_COMMIT: c49ad8d0f26fb2a13b9dbafdde84d7abfe1f867b
+  AG_NG_CONTRACT_COMMIT: c3210f156208b22bf21e7bd1910a84a85b519538
+  DOCKET_CONTRACT_COMMIT: 181589f910b76030b312d6478bd0ac813a630855
 
 jobs:
   quality:
@@ -76,13 +75,6 @@ jobs:
       - name: Checkout Marginalia
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
-      - name: Checkout the qualified Agent Governor contract
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-        with:
-          repository: unpingable/agent_governor
-          ref: ${{ env.AG_CONTRACT_COMMIT }}
-          path: _agent_gov
-
       - name: Checkout the qualified ag-ng contract
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
@@ -97,10 +89,8 @@ jobs:
           ref: ${{ env.DOCKET_CONTRACT_COMMIT }}
           path: _docket
 
-      - name: Verify the Agent Governor contract
+      - name: Verify the ag-ng and Docket contracts
         run: |
-          test "$(tr -d '[:space:]' < AG_CONTRACT_COMMIT)" = "$AG_CONTRACT_COMMIT"
-          test "$(git -C _agent_gov rev-parse HEAD)" = "$AG_CONTRACT_COMMIT"
           test "$(tr -d '[:space:]' < AG_NG_CONTRACT_COMMIT)" = "$AG_NG_CONTRACT_COMMIT"
           test "$(git -C _ag_ng rev-parse HEAD)" = "$AG_NG_CONTRACT_COMMIT"
           test "$(tr -d '[:space:]' < DOCKET_CONTRACT_COMMIT)" = "$DOCKET_CONTRACT_COMMIT"
@@ -122,9 +112,7 @@ jobs:
             -r requirements.lock \
             -r requirements-build.lock \
             -r requirements-dev.lock
-          python -m pip install --no-build-isolation --no-deps ./_agent_gov
-          python -m pip install --no-build-isolation --no-deps ./_agent_gov/libs/receipt_kernel
-          python -m pip install --no-build-isolation --no-deps ./_agent_gov/libs/receipt_v1
+          python -m pip install --no-build-isolation --no-deps ./receipt-v1
           python -m pip install --no-build-isolation --no-deps -e .
 
       - name: Controlled negative qualification fixture
@@ -144,7 +132,6 @@ jobs:
 
       - name: Run the deterministic qualification suite
         env:
-          MARGINALIA_AG_SOURCE_DIR: ${{ github.workspace }}/_agent_gov
           MARGINALIA_AG_NG_SOURCE_DIR: ${{ github.workspace }}/_ag_ng
           MARGINALIA_DOCKET_SOURCE_DIR: ${{ github.workspace }}/_docket
         run: make test
@@ -180,13 +167,6 @@ jobs:
       - name: Checkout Marginalia
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
-      - name: Checkout the qualified Agent Governor contract
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-        with:
-          repository: unpingable/agent_governor
-          ref: ${{ env.AG_CONTRACT_COMMIT }}
-          path: _agent_gov
-
       - name: Checkout the qualified ag-ng contract
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
@@ -203,13 +183,11 @@ jobs:
 
       - name: Verify all qualified contracts
         run: |
-          test "$(git -C _agent_gov rev-parse HEAD)" = "$AG_CONTRACT_COMMIT"
           test "$(git -C _ag_ng rev-parse HEAD)" = "$AG_NG_CONTRACT_COMMIT"
           test "$(git -C _docket rev-parse HEAD)" = "$DOCKET_CONTRACT_COMMIT"
 
       - name: Stage the exact local dependencies
         env:
-          MARGINALIA_AG_SOURCE_DIR: ${{ github.workspace }}/_agent_gov
           MARGINALIA_AG_NG_SOURCE_DIR: ${{ github.workspace }}/_ag_ng
           MARGINALIA_DOCKET_SOURCE_DIR: ${{ github.workspace }}/_docket
         run: ./sync-deps.sh
@@ -220,5 +198,8 @@ jobs:
       - name: Smoke the built image
         run: |
           docker run --rm --entrypoint python3 marginalia:ci -c \
-            'import fiction_governor, governor, gov_webui, receipt_kernel, receipt_v1'
+            'import importlib.metadata as m; import gov_webui, receipt_v1; names={d.metadata["Name"].lower() for d in m.distributions()}; assert "agent-governor" not in names and "receipt-kernel" not in names'
           docker run --rm --entrypoint /opt/codex/codex marginalia:ci --version
+          docker run --rm --entrypoint /usr/local/bin/ag-providerd marginalia:ci --help
+          docker run --rm --entrypoint /usr/local/bin/ag-providerctl marginalia:ci --help
+          docker run --rm --entrypoint /usr/local/bin/docket marginalia:ci --help

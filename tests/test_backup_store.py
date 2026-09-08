@@ -24,17 +24,18 @@ from gov_webui.backup_store import BackupError, WorkspaceBackupManager
 from gov_webui.evidence_store import EncryptedEvidenceStore, create_keyring
 from gov_webui.generation_store import GenerationStore
 from gov_webui.library_store import LibraryStore
+from gov_webui.state_layout import contexts_root, shared_root
 
 
 def _populated_manager(tmp_path: Path) -> tuple[WorkspaceBackupManager, str]:
     data_root = tmp_path / "data"
     backup_root = tmp_path / "backups"
     library = LibraryStore(
-        data_root / "marginalia" / "library.json",
+        shared_root(data_root) / "library.json",
         default_context_id="erin-writing",
     )
     project = library.default_project()
-    sessions = SessionStore(data_root / ".governor" / project.context_id / "sessions")
+    sessions = SessionStore(contexts_root(data_root) / project.context_id / "sessions")
     session = sessions.create(project.context_id, title="Existing chapter")
     sessions.append_message(
         session.id,
@@ -43,14 +44,14 @@ def _populated_manager(tmp_path: Path) -> tuple[WorkspaceBackupManager, str]:
     library.add_conversation(session.id, project.id)
 
     artifact_dir = (
-        data_root / ".governor" / project.context_id / ".governor" / ".governor" / "artifacts"
+        contexts_root(data_root) / project.context_id / ".governor" / ".governor" / "artifacts"
     )
     artifact_dir.mkdir(parents=True)
     (artifact_dir / "test-record.json").write_text(
         json.dumps({"content": "Persistent draft"}) + "\n",
         encoding="utf-8",
     )
-    evidence = data_root / ".governor" / "evidence"
+    evidence = contexts_root(data_root) / "evidence"
     evidence.mkdir(parents=True)
     (evidence / "trace.json").write_text('{"receipt":"preserved"}\n')
 
@@ -67,11 +68,11 @@ def test_backup_verifies_and_survives_real_restore_rehearsal(tmp_path):
     manager, session_id = _populated_manager(tmp_path)
 
     project = manager._library().default_project()
-    session = SessionStore(manager.data_root / ".governor" / project.context_id / "sessions").get(
+    session = SessionStore(contexts_root(manager.data_root) / project.context_id / "sessions").get(
         session_id
     )
     assert session is not None
-    context_store = ContextSummaryStore(manager.data_root / ".governor" / project.context_id)
+    context_store = ContextSummaryStore(contexts_root(manager.data_root) / project.context_id)
     context_store.set_enabled(True)
     context_store.save(
         ContextSummary(
@@ -116,7 +117,7 @@ def test_backup_verifies_and_survives_real_restore_rehearsal(tmp_path):
 def test_backup_keeps_ciphertext_and_restores_only_with_separate_key(tmp_path):
     manager, _session_id = _populated_manager(tmp_path)
     project = manager._library().default_project()
-    context = manager.data_root / ".governor" / project.context_id
+    context = contexts_root(manager.data_root) / project.context_id
     generation_path = context / "marginalia" / "generation.sqlite"
     GenerationStore(generation_path).set_dispatch_enabled(project.id, True)
     keyring = tmp_path / "key-custody" / "evidence-keys.json"
@@ -148,14 +149,14 @@ def test_backup_keeps_ciphertext_and_restores_only_with_separate_key(tmp_path):
     restored_root = tmp_path / "restored-with-key"
     manager.restore(archive_path, target_data_root=restored_root)
     restored_evidence = EncryptedEvidenceStore(
-        restored_root / ".governor" / project.context_id / "marginalia" / "generation-evidence",
+        contexts_root(restored_root) / project.context_id / "marginalia" / "generation-evidence",
         keyring,
     )
     assert restored_evidence.read(evidence_id, actor="restore-test")["content"] == (
         "private restored response"
     )
     assert GenerationStore(
-        restored_root / ".governor" / project.context_id / "marginalia" / "generation.sqlite"
+        contexts_root(restored_root) / project.context_id / "marginalia" / "generation.sqlite"
     ).dispatch_enabled(project.id)
 
 

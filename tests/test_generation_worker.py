@@ -66,7 +66,17 @@ def test_prepare_writes_exact_occurrence_bound_plan_and_catalog(
     deployment = tmp_path / "deployment"
     deployment.mkdir()
     files = {}
-    for name in ("ag-loopctl", "docket", "observation", "standing", "docket-standing", "executor"):
+    for name in (
+        "ag-loopctl",
+        "docket",
+        "observation",
+        "standing",
+        "docket-standing",
+        "executor",
+        "providerctl",
+        "providerctl-config",
+        "model-config",
+    ):
         path = deployment / name
         path.write_text("fixture", encoding="utf-8")
         files[name] = path
@@ -82,6 +92,9 @@ def test_prepare_writes_exact_occurrence_bound_plan_and_catalog(
         standing_resolver=files["standing"],
         docket_standing_resolver=files["docket-standing"],
         executor=files["executor"],
+        providerctl=files["providerctl"],
+        providerctl_config=files["providerctl-config"],
+        model_config=files["model-config"],
         issuer_key=issuer,
         evidence_keyring=keyring,
     )
@@ -102,6 +115,8 @@ def test_prepare_writes_exact_occurrence_bound_plan_and_catalog(
     catalog = json.loads((governed.config_dir / "catalog.json").read_text())
     assert plan["marginalia_dispatch_id"] == dispatch.id
     assert plan["request_digest"] == dispatch.request_digest
+    assert plan["schema"] == "marginalia.generation-executor-plan/v2"
+    assert plan["providerctl"] == str(files["providerctl"])
     assert (
         catalog["entries"]["marginalia.generation-dispatch/v1"]["observation_basis"]["requirement"][
             "basis_identity"

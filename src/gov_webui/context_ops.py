@@ -24,14 +24,10 @@ from gov_webui.context_summary import (
     CounterIdentity,
 )
 from gov_webui.creative_project import CreativeProjectError, CreativeProjectStore
+from gov_webui.durable_internal_generation import accept_internal_results, generate_internal
+from gov_webui.evidence_store import EncryptedEvidenceStore
 from gov_webui.fixed_context import fiction_fixed_context_messages
-from gov_webui.daemon_client import DaemonChatClient, default_socket_path
-from gov_webui.generation_outcome import (
-    AuthoredGeneration,
-    BlockedGeneration,
-    classify_daemon_result,
-)
-from gov_webui.governed_chat_adapter import GovernedChatAdapter
+from gov_webui.generation_store import GenerationStore
 from gov_webui.library_store import LibraryStore, ProjectRecord
 from gov_webui.model_providers import (
     ConfiguredModel,
@@ -39,6 +35,7 @@ from gov_webui.model_providers import (
     load_provider_catalog,
 )
 from gov_webui.session_store import ChatSession, SessionStore
+from gov_webui.state_layout import contexts_root, shared_root
 
 
 def _safe_ref(value: str) -> str:
@@ -58,23 +55,24 @@ class ContextOperations:
         socket_path: Path | None = None,
     ) -> None:
         self.data_root = data_root
-        self.context_base = data_root / ".governor"
+        self.context_base = contexts_root(data_root)
         self.library = LibraryStore(
-            data_root / "marginalia" / "library.json",
+            shared_root(data_root) / "library.json",
             default_context_id=default_context_id,
         )
         self.model_config = model_config
         self.maintenance_model_id = maintenance_model
-        self.socket_path = socket_path or default_socket_path(self.context_base)
+        # Retained as an ignored constructor parameter for CLI compatibility
+        # during the state-layout transition. Context builds no longer use a
+        # classic daemon socket.
+        self.socket_path = socket_path
 
     def _maintenance_model(self) -> ConfiguredModel:
         if self.model_config is None:
             raise ContextSummaryError(
                 "context build requires --model-config or MARGINALIA_MODEL_CONFIG"
             )
-        model = load_provider_catalog(self.model_config).require_available(
-            self.maintenance_model_id
-        )
+        model = load_provider_catalog(self.model_config).resolve(self.maintenance_model_id)
         if model.purpose != "context-maintenance":
             raise ContextSummaryError(
                 "configured context-maintenance model is not marked for context maintenance"
@@ -328,23 +326,40 @@ class ContextOperations:
 
     async def _generate(
         self,
-        adapter: GovernedChatAdapter,
+        project: ProjectRecord,
+        session: ChatSession,
         messages: list[dict[str, str]],
         configured_model: str,
         maintenance_model: ConfiguredModel,
     ) -> SummaryModelResult:
-        raw = await adapter.chat_send(messages=messages, model=configured_model)
-        outcome = classify_daemon_result(raw, configured_model)
-        if isinstance(outcome, BlockedGeneration):
-            raise ContextSummaryError("context-maintenance output was blocked")
-        if not isinstance(outcome, AuthoredGeneration) or outcome.model != configured_model:
-            raise ContextSummaryError("context-maintenance model returned an invalid result")
-        return SummaryModelResult(
-            content=outcome.content,
-            usage=outcome.usage,
-            receipt_id=outcome.receipt["receipt_id"],
+        context_root = self.context_base / project.context_id
+        result = await generate_internal(
+            purpose="context-maintenance",
+            project_id=project.id,
+            context_id=project.context_id,
+            context_root=context_root,
+            session_id=session.id,
+            session_store=SessionStore(context_root / "sessions"),
+            generation_store=GenerationStore(context_root / "marginalia" / "generation.sqlite"),
+            evidence_store=EncryptedEvidenceStore(
+                context_root / "marginalia" / "generation-evidence",
+                Path(
+                    os.environ.get(
+                        "MARGINALIA_EVIDENCE_KEY_FILE",
+                        "/run/secrets/marginalia-generation/marginalia-evidence-keys.json",
+                    )
+                ),
+            ),
+            messages=messages,
+            configured_model=configured_model,
             provider_id=maintenance_model.provider_id,
-            model_id=maintenance_model.model_id,
+        )
+        return SummaryModelResult(
+            content=result.content,
+            usage=result.usage,
+            receipt_id=result.candidate_id,
+            provider_id=result.provider_id,
+            model_id=result.model_id,
         )
 
     async def build(
@@ -362,91 +377,89 @@ class ContextOperations:
             store = self._store(project)
             project_policy = store.policy()
             fixed_messages = self._fixed_context(project)
-            maintenance_id = f"{project.context_id[:116]}-maintenance"
-            adapter = GovernedChatAdapter(
-                DaemonChatClient(str(self.socket_path)),
-                context_id=maintenance_id,
-                expected_governor_dir=str(self.context_base),
-            )
-            try:
-                for session in self._sessions(project, session_id=session_id):
-                    counter, counter_identity, _estimated = self._session_counter(
-                        session, project_policy, catalog
-                    )
-                    policy = effective_context_policy(
-                        project_policy, self._session_window(session, catalog)
-                    )
-                    history_tokens = counter.count_messages(as_messages(session.messages))
-                    try:
-                        existing = store.load(session)
-                    except ContextSummaryError:
-                        existing = None
-                    # The watermark is not consulted here: a session under it can
-                    # still need coverage once the project's fixed context and a
-                    # prompt are counted, and this command exists to repair exactly
-                    # that. An empty required prefix below still reports not_needed.
-                    source = choose_summary_prefix(
-                        session,
-                        fixed_messages,
-                        "Continue the story.",
-                        policy,
-                        counter,
-                        additional_reserve_tokens=maintenance_lookahead_tokens(policy),
-                    )
-                    if not source:
-                        reports.append(
-                            {
-                                "session_ref": _safe_ref(session.id),
-                                "status": "not_needed",
-                                "history_tokens": history_tokens,
-                            }
-                        )
-                        continue
-                    if existing is not None and len(existing.source.covered_message_ids) >= len(
-                        source
-                    ):
-                        reports.append(
-                            {
-                                "session_ref": _safe_ref(session.id),
-                                "status": "already_valid",
-                                "covered_messages": len(existing.source.covered_message_ids),
-                            }
-                        )
-                        continue
-
-                    async def generate(
-                        messages: list[dict[str, str]],
-                        configured_model: str,
-                    ) -> SummaryModelResult:
-                        return await self._generate(
-                            adapter,
-                            messages,
-                            configured_model,
-                            maintenance_model,
-                        )
-
-                    maintainer = ContextMaintainer(
-                        store=store,
-                        policy=policy,
-                        counter=counter,
-                        configured_model=maintenance_model.id,
-                        provider_id=maintenance_model.provider_id,
-                        model_id=maintenance_model.model_id,
-                        generate=generate,
-                        compatible_configured_models=compatible_models,
-                        counter_identity=counter_identity,
-                    )
-                    summary = await maintainer.maintain(session, source)
+            for session in self._sessions(project, session_id=session_id):
+                counter, counter_identity, _estimated = self._session_counter(
+                    session, project_policy, catalog
+                )
+                policy = effective_context_policy(
+                    project_policy, self._session_window(session, catalog)
+                )
+                history_tokens = counter.count_messages(as_messages(session.messages))
+                try:
+                    existing = store.load(session)
+                except ContextSummaryError:
+                    existing = None
+                # The watermark is not consulted here: a session under it can
+                # still need coverage once the project's fixed context and a
+                # prompt are counted, and this command exists to repair exactly
+                # that. An empty required prefix below still reports not_needed.
+                source = choose_summary_prefix(
+                    session,
+                    fixed_messages,
+                    "Continue the story.",
+                    policy,
+                    counter,
+                    additional_reserve_tokens=maintenance_lookahead_tokens(policy),
+                )
+                if not source:
                     reports.append(
                         {
                             "session_ref": _safe_ref(session.id),
-                            "status": "built",
-                            "covered_messages": len(summary.source.covered_message_ids),
-                            "source_sha256": summary.source.prefix_sha256,
+                            "status": "not_needed",
+                            "history_tokens": history_tokens,
                         }
                     )
-            finally:
-                await adapter.close()
+                    continue
+                if existing is not None and len(existing.source.covered_message_ids) >= len(source):
+                    reports.append(
+                        {
+                            "session_ref": _safe_ref(session.id),
+                            "status": "already_valid",
+                            "covered_messages": len(existing.source.covered_message_ids),
+                        }
+                    )
+                    continue
+
+                async def generate(
+                    messages: list[dict[str, str]],
+                    configured_model: str,
+                ) -> SummaryModelResult:
+                    return await self._generate(
+                        project,
+                        session,
+                        messages,
+                        configured_model,
+                        maintenance_model,
+                    )
+
+                maintainer = ContextMaintainer(
+                    store=store,
+                    policy=policy,
+                    counter=counter,
+                    configured_model=maintenance_model.id,
+                    provider_id=maintenance_model.provider_id,
+                    model_id=maintenance_model.model_id,
+                    generate=generate,
+                    compatible_configured_models=compatible_models,
+                    counter_identity=counter_identity,
+                )
+                summary = await maintainer.maintain(session, source)
+                generation_store = GenerationStore(
+                    self.context_base / project.context_id / "marginalia" / "generation.sqlite"
+                )
+                accept_internal_results(
+                    generation_store,
+                    summary.generator.receipt_ids,
+                    artifact_id=(f"context-summary:{session.id}:{summary.source.prefix_sha256}"),
+                )
+                reports.append(
+                    {
+                        "session_ref": _safe_ref(session.id),
+                        "status": "built",
+                        "covered_messages": len(summary.source.covered_message_ids),
+                        "source_sha256": summary.source.prefix_sha256,
+                    }
+                )
         return {"ready": True, "sessions": reports}
 
     def validate(

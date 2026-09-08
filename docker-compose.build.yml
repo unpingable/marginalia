@@ -11,3 +11,9 @@ services:
     image: marginalia:local
   marginalia-backup:
     image: marginalia:local
+  marginalia-generation:
+    image: marginalia:local
+  marginalia-providerd:
+    image: marginalia:local
+  marginalia-synthetic:
+    image: marginalia:local

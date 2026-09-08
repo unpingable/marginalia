@@ -43,6 +43,8 @@ def accept_candidate(
     candidate_id: str,
     accounting_resolver: Callable[[str, str, dict[str, int], int | None], dict[str, Any]]
     | None = None,
+    corrected_text: str | None = None,
+    continuity_override_reason: str | None = None,
 ) -> AcceptanceResult:
     """Accept once while revision, canon, and guidance remain frozen."""
     candidate = generation_store.get_candidate(candidate_id)
@@ -54,6 +56,8 @@ def accept_candidate(
         raise RuntimeError("candidate custody record is incomplete")
     if request.project_id != project_id:
         raise PermissionError("candidate belongs to another project")
+    if request.purpose != "conversation":
+        raise PermissionError("candidate is not eligible for conversation acceptance")
 
     with project_state_lock(context_root):
         # This must precede current fingerprint checks. A crash after insertion
@@ -84,6 +88,43 @@ def accept_candidate(
             return _block(generation_store, candidate_id, "governor response requires review")
         assert isinstance(outcome, AuthoredGeneration)
 
+        authored_content = outcome.content
+        if corrected_text is not None:
+            authored_content = corrected_text.strip()
+            if not authored_content:
+                return _block(generation_store, candidate_id, "corrected response is empty")
+
+        # Deterministic application policy remains outside ag-ng. The provider
+        # response is evidence, not acceptance authority. Warning-only reports
+        # are advisory; correction/rejection findings require an explicit writer
+        # fix or proceed decision.
+        from gov_webui.writer_continuity import (
+            ContinuityChecker,
+            RecommendedAction,
+            create_registry,
+        )
+
+        report = ContinuityChecker().check(
+            authored_content,
+            create_registry(context_root / ".governor").all(),
+        )
+        requires_resolution = (
+            not report.passed and report.recommended_action is not RecommendedAction.ACCEPT
+        )
+        if requires_resolution and not continuity_override_reason:
+            return _block(
+                generation_store,
+                candidate_id,
+                "response conflicts with accepted story constraints",
+                detail={
+                    "conflict": {
+                        "violations": [item.to_dict() for item in report.violations],
+                        "recommended_action": report.recommended_action.value,
+                        "checked_anchors": report.checked_anchors,
+                    }
+                },
+            )
+
         provider_request = generation_store.request_payload(request.id)
         prompts = provider_request.get("messages")
         pending_user = next(
@@ -110,7 +151,7 @@ def accept_candidate(
             SessionMessage.create(role="user", content=pending_user),
             SessionMessage.create(
                 role="assistant",
-                content=outcome.content,
+                content=authored_content,
                 model=outcome.model,
                 usage=outcome.usage,
                 provider_id=dispatch.actual_route,
@@ -139,6 +180,12 @@ def accept_candidate(
         return AcceptanceResult(status, message_id=message_id)
 
 
-def _block(store: GenerationStore, candidate_id: str, reason: str) -> AcceptanceResult:
-    store.block_candidate(candidate_id, reason)
+def _block(
+    store: GenerationStore,
+    candidate_id: str,
+    reason: str,
+    *,
+    detail: dict[str, Any] | None = None,
+) -> AcceptanceResult:
+    store.block_candidate(candidate_id, reason, detail=detail)
     return AcceptanceResult(AcceptanceStatus.BLOCKED, reason=reason)

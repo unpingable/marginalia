@@ -111,6 +111,10 @@ from gov_webui.generation_outcome import (
     classify_daemon_result,
 )
 from gov_webui.evidence_store import EncryptedEvidenceStore
+from gov_webui.durable_internal_generation import (
+    accept_internal_results,
+    generate_internal,
+)
 from gov_webui.generation_acceptance import AcceptanceStatus, accept_candidate
 from gov_webui.generation_store import (
     delivery_digest,
@@ -166,7 +170,8 @@ from gov_webui.session_store import (
     SessionStore,
     SessionWriteResult,
 )
-from governor.context_manager import GovernorContextManager
+from gov_webui.context_store import GovernorContextManager
+from gov_webui.state_layout import contexts_root, shared_root
 
 logger = logging.getLogger(__name__)
 telemetry_logger = logging.getLogger("uvicorn.error")
@@ -178,10 +183,10 @@ telemetry_logger = logging.getLogger("uvicorn.error")
 MARGINALIA_DATA_ROOT = os.environ.get("MARGINALIA_DATA_ROOT", str(Path.home() / ".marginalia"))
 MARGINALIA_MAINTENANCE_FILE = os.environ.get(
     "MARGINALIA_MAINTENANCE_FILE",
-    str(Path(MARGINALIA_DATA_ROOT) / "marginalia" / "maintenance.txt"),
+    str(shared_root(Path(MARGINALIA_DATA_ROOT)) / "maintenance.txt"),
 )
-GOVERNOR_DAEMON_DIR = os.environ.get(
-    "GOVERNOR_DAEMON_DIR", str(Path(MARGINALIA_DATA_ROOT) / ".governor")
+MARGINALIA_CONTEXTS_DIR = os.environ.get(
+    "MARGINALIA_CONTEXTS_DIR", str(contexts_root(Path(MARGINALIA_DATA_ROOT)))
 )
 BACKEND_TYPE = os.environ.get("BACKEND_TYPE", "daemon")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -193,21 +198,24 @@ MARGINALIA_SYNTHETIC_CONTEXT_ID = os.environ.get(
     "MARGINALIA_SYNTHETIC_CONTEXT_ID", f"{GOVERNOR_CONTEXT_ID}-synthetic"
 )
 GOVERNOR_MODE = os.environ.get("GOVERNOR_MODE", "fiction")
-GOVERNOR_CONTEXTS_DIR = os.environ.get("GOVERNOR_CONTEXTS_DIR", GOVERNOR_DAEMON_DIR)
+GOVERNOR_CONTEXTS_DIR = MARGINALIA_CONTEXTS_DIR
 GOVERNOR_SHOW_OK_FOOTER = os.environ.get("GOVERNOR_SHOW_OK_FOOTER", "true").lower() in (
     "true",
     "1",
     "yes",
 )
-MARGINALIA_ENABLE_DONOR_ROUTES = os.environ.get("MARGINALIA_ENABLE_DONOR_ROUTES", "").lower() in (
-    "true",
-    "1",
-    "yes",
-)
+# The classic donor surface remains as frozen source history only.  This is an
+# architectural invariant: an environment variable cannot reactivate classic
+# Agent Governor routes in a release process.
+MARGINALIA_ENABLE_DONOR_ROUTES = False
 MARGINALIA_BACKUP_ROOT = os.environ.get("MARGINALIA_BACKUP_ROOT", "/backups")
 MARGINALIA_DURABLE_GENERATION_AVAILABLE = os.environ.get(
     "MARGINALIA_DURABLE_GENERATION_AVAILABLE", ""
 ).lower() in ("true", "1", "yes")
+# This is an architectural invariant, not a deployment toggle. Tests may
+# monkeypatch it while exercising historical request-shape fixtures, but no
+# runtime environment can route production work back through classic AG.
+MARGINALIA_AG_NG_ONLY = True
 MARGINALIA_EVIDENCE_KEY_FILE = os.environ.get(
     "MARGINALIA_EVIDENCE_KEY_FILE", "/run/secrets/marginalia-evidence-keys.json"
 )
@@ -218,6 +226,9 @@ MARGINALIA_MODEL_CONFIG = os.environ.get("MARGINALIA_MODEL_CONFIG", "").strip()
 MARGINALIA_CONTEXT_MAINTENANCE_MODEL = os.environ.get(
     "MARGINALIA_CONTEXT_MAINTENANCE_MODEL", "claude-context-summary"
 ).strip()
+MARGINALIA_PROVIDER_SOCKET = os.environ.get(
+    "MARGINALIA_PROVIDER_SOCKET", "/run/marginalia/providerd/provider.sock"
+)
 CONTEXT_MAINTENANCE_RETRY_DELAYS_SECONDS = (15.0, 60.0, 180.0)
 
 
@@ -394,8 +405,8 @@ _PRODUCT_PATH_PREFIXES = (
     "/v1/conversations/",
     "/v1/generations/",
     "/sessions/",
-    "/governor/fiction/",
-    "/governor/artifacts",
+    "/v1/story/",
+    "/v1/artifacts",
 )
 
 
@@ -534,6 +545,7 @@ class BackendSwitchRequest(BaseModel):
 
 class PendingResolutionRequest(BaseModel):
     action: str
+    candidate_id: str | None = None
     corrected_text: str | None = None
     new_anchor_text: str | None = None
     reason: str = ""
@@ -662,11 +674,11 @@ def _resolve_configured_model(
     if catalog is None:
         return requested_model, None
     try:
-        model = (
-            catalog.require_available(requested_model)
-            if require_available
-            else catalog.resolve(requested_model)
-        )
+        # In the ag-ng topology the web process owns selection while providerd
+        # owns credentials and command executables. Their deliberate isolation
+        # means web-process environment inspection cannot establish transport
+        # availability.
+        model = catalog.resolve(requested_model)
     except ProviderConfigurationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ProviderError as exc:
@@ -712,7 +724,7 @@ def _get_library_store() -> LibraryStore:
         # In production the context base is DATA_ROOT/.governor, so the
         # sidecar lives at DATA_ROOT/marginalia/library.json. Deriving it from
         # the context manager also keeps isolated tests isolated.
-        path = cm.base_dir.parent / "marginalia" / "library.json"
+        path = shared_root(Path(MARGINALIA_DATA_ROOT)) / "library.json"
         _library_store = LibraryStore(path, default_context_id=GOVERNOR_CONTEXT_ID)
         legacy_ids = [item["id"] for item in _get_default_session_store().list_summaries()]
         _library_store.sync_legacy_sessions(legacy_ids)
@@ -759,7 +771,7 @@ def _get_governed_chat_adapter(
         adapter = GovernedChatAdapter(
             DaemonChatClient(socket_path),
             context_id=project.context_id,
-            expected_governor_dir=GOVERNOR_DAEMON_DIR,
+            expected_governor_dir=str(_get_context_manager().base_dir),
         )
         if project.id == _get_library_store().snapshot().default_project_id:
             _governed_chat_adapter = adapter
@@ -782,7 +794,7 @@ def _get_synthetic_governed_chat_adapter() -> GovernedChatAdapter:
         _synthetic_governed_chat_adapter = GovernedChatAdapter(
             DaemonChatClient(socket_path),
             context_id=MARGINALIA_SYNTHETIC_CONTEXT_ID,
-            expected_governor_dir=GOVERNOR_DAEMON_DIR,
+            expected_governor_dir=str(_get_context_manager().base_dir),
         )
     return _synthetic_governed_chat_adapter
 
@@ -893,7 +905,7 @@ def _get_generation_store(project_id: str | None = None) -> GenerationStore:
 def _get_snapshot_store(project_id: str | None = None) -> ProjectSnapshotStore:
     project = _project_record(project_id)
     if project.id not in _snapshot_stores:
-        root = _get_context_manager().base_dir.parent / "marginalia" / "snapshots"
+        root = shared_root(Path(MARGINALIA_DATA_ROOT)) / "snapshots"
         _snapshot_stores[project.id] = ProjectSnapshotStore(root, project_id=project.id)
     return _snapshot_stores[project.id]
 
@@ -926,7 +938,7 @@ def _get_context_maintenance_adapter(
         _context_maintenance_adapters[maintenance_id] = GovernedChatAdapter(
             DaemonChatClient(socket_path),
             context_id=maintenance_id,
-            expected_governor_dir=GOVERNOR_DAEMON_DIR,
+            expected_governor_dir=str(_get_context_manager().base_dir),
         )
     return _context_maintenance_adapters[maintenance_id]
 
@@ -960,19 +972,19 @@ async def list_models() -> ModelList:
     try:
         catalog = _configured_provider_catalog()
         if catalog is not None:
-            available_default = catalog.available_default()
             return ModelList(
-                default_model=available_default.id if available_default else None,
+                default_model=catalog.default_model,
                 data=[
-                    ModelInfo(**model.public_dict(), owned_by=model.provider_id)
+                    ModelInfo(
+                        **{**model.public_dict(), "available": True},
+                        owned_by=model.provider_id,
+                    )
                     for model in catalog.models
                     if model.purpose == "writing"
                 ],
             )
-        adapter = _get_governed_chat_adapter()
-        models = await adapter.models()
-        return ModelList(
-            data=[ModelInfo(id=m["id"], owned_by=m.get("owned_by", "system")) for m in models]
+        raise ProviderConfigurationError(
+            "MARGINALIA_MODEL_CONFIG is required by the ag-ng-only runtime"
         )
     except ProviderConfigurationError as exc:
         raise HTTPException(status_code=500, detail=f"Provider configuration error: {exc}")
@@ -991,9 +1003,14 @@ async def get_model(model_id: str) -> ModelInfo:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         if model.purpose != "writing":
             raise HTTPException(status_code=404, detail=f"model {model_id!r} is not exposed")
-        return ModelInfo(**model.public_dict(), owned_by=model.provider_id)
-    provider = await _get_governed_chat_adapter().provider()
-    return ModelInfo(id=model_id, owned_by=provider.get("type", "daemon"))
+        return ModelInfo(
+            **{**model.public_dict(), "available": True},
+            owned_by=model.provider_id,
+        )
+    raise HTTPException(
+        status_code=500,
+        detail="MARGINALIA_MODEL_CONFIG is required by the ag-ng-only runtime",
+    )
 
 
 @app.post("/v1/markdown")
@@ -1009,40 +1026,40 @@ async def render_markdown(request: MarkdownRenderRequest) -> dict[str, str]:
 
 @app.get("/v1/backends")
 async def list_backends() -> dict[str, Any]:
-    """Report only AG's real governed-execution provider."""
+    """Report the ag-ng provider boundary without exposing secret material."""
     try:
-        governed_chat = _get_governed_chat_adapter()
-        provider = await governed_chat.provider()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Daemon error: {exc}")
-    try:
-        reachable = bool(await governed_chat.models())
-    except Exception:
-        reachable = False
-    backend_type = provider.get("type", "unknown")
-    connected = bool(provider.get("connected")) and reachable
+        catalog = _configured_provider_catalog()
+        if catalog is None:
+            raise ProviderConfigurationError(
+                "MARGINALIA_MODEL_CONFIG is required by the ag-ng-only runtime"
+            )
+    except ProviderConfigurationError as exc:
+        raise HTTPException(status_code=500, detail=f"Provider configuration error: {exc}")
+    provider_ids = sorted({model.provider_id for model in catalog.models})
+    connected = Path(MARGINALIA_PROVIDER_SOCKET).is_socket()
     return {
         "backends": [
             {
-                "type": backend_type,
+                "type": provider_id,
                 "available": connected,
                 "active": True,
-                "configured_by": "agent-governor-daemon",
+                "configured_by": "ag-providerd",
             }
+            for provider_id in provider_ids
         ],
-        "active": backend_type,
+        "active": provider_ids[0] if len(provider_ids) == 1 else "ag-ng-providerd",
         "connected": connected,
-        "authoritative": "agent-governor-daemon",
+        "authoritative": "ag-ng",
     }
 
 
 @app.post("/v1/backends/switch")
 async def switch_backend(request: BackendSwitchRequest) -> dict[str, Any]:
-    """Reject local switches: the AG daemon owns the actual provider."""
+    """Reject local switches: ag-providerd configuration owns routing."""
     raise HTTPException(
         status_code=409,
         detail=(
-            "Provider configuration is owned by the Agent Governor daemon; "
+            "Provider configuration is owned by ag-providerd and its mounted configuration; "
             f"Marginalia cannot switch it to {request.backend_type!r}."
         ),
     )
@@ -1050,36 +1067,155 @@ async def switch_backend(request: BackendSwitchRequest) -> dict[str, Any]:
 
 @app.get("/v1/governed-chat/pending")
 async def governed_chat_pending(project_id: str | None = None) -> dict[str, Any]:
-    """Observe durable pending state in Marginalia's active context."""
-    try:
-        return {"pending": await _get_governed_chat_adapter(project_id).pending()}
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Daemon error: {exc}")
+    """Return the newest unresolved application conflict for this project."""
+    project = _project_record(project_id)
+    store = _get_generation_store(project.id)
+    for logical in reversed(store.list_requests((LogicalStatus.BLOCKED,))):
+        if logical.project_id != project.id or logical.purpose != "conversation":
+            continue
+        events = store.events(logical.id)
+        latest_by_candidate: dict[str, dict[str, Any]] = {}
+        for event in events:
+            if event["candidate_id"]:
+                latest_by_candidate[event["candidate_id"]] = event
+        for candidate_id, event in reversed(list(latest_by_candidate.items())):
+            detail = event.get("detail", {})
+            conflict = (
+                detail.get("conflict") if event["event_type"] == "candidate_blocked" else None
+            )
+            if isinstance(conflict, dict):
+                return {
+                    "pending": {
+                        "id": candidate_id,
+                        "candidate_id": candidate_id,
+                        "request_id": logical.id,
+                        "violations": conflict.get("violations", []),
+                        "recommended_action": conflict.get("recommended_action"),
+                        "checked_anchors": conflict.get("checked_anchors", 0),
+                    }
+                }
+    return {"pending": None}
 
 
 @app.post("/v1/governed-chat/resolve")
 async def governed_chat_resolve(
     request: PendingResolutionRequest,
 ) -> dict[str, Any]:
-    """Resolve pending state through the same context-bound AG adapter."""
+    """Apply an explicit author decision to a durable application conflict."""
     if request.action not in {"fix", "revise", "proceed"}:
         raise HTTPException(
             status_code=400,
             detail="action must be one of: fix, revise, proceed",
         )
-    try:
-        return await _get_governed_chat_adapter(request.project_id).resolve_pending(
-            request.action,
-            corrected_text=request.corrected_text,
-            new_anchor_text=request.new_anchor_text,
-            reason=request.reason,
-            scope=request.scope,
-            expiry=request.expiry,
+    project = _project_record(request.project_id)
+    pending = (await governed_chat_pending(project.id))["pending"]
+    if pending is None:
+        raise HTTPException(status_code=404, detail="no unresolved response conflict")
+    candidate_id = request.candidate_id or pending["candidate_id"]
+    if candidate_id != pending["candidate_id"]:
+        raise HTTPException(status_code=409, detail="the selected conflict is no longer current")
+    store = _get_generation_store(project.id)
+
+    if request.action == "revise":
+        statement = (request.new_anchor_text or "").strip()
+        if not statement:
+            raise HTTPException(status_code=400, detail="a proposed canon revision is required")
+        anchor_ids = {
+            item.get("anchor_id")
+            for item in pending.get("violations", [])
+            if isinstance(item, dict) and item.get("anchor_id") not in {None, "__system__"}
+        }
+        if len(anchor_ids) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "select a conflict involving exactly one canon anchor "
+                    "before proposing a revision"
+                ),
+            )
+        anchor_id = next(iter(anchor_ids))
+        anchor_type = next(
+            (
+                item.get("anchor_type")
+                for item in pending["violations"]
+                if item.get("anchor_id") == anchor_id
+            ),
+            "canon",
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Daemon error: {exc}")
+        kind = {
+            "prohibition": "constraint",
+            "definition": "world_rule",
+            "persona": "character",
+        }.get(anchor_type, "world_rule")
+        logical = store.get_request(pending["request_id"])
+        assert logical is not None
+        proposal = _get_canon_review_store(project.id).add(
+            kind=kind,
+            subject=anchor_id,
+            statement=statement,
+            confidence=1.0,
+            conversation_id=logical.session_id,
+            message_id=candidate_id,
+            draft={
+                "source": "generation-conflict-writer-revision",
+                "candidate_id": candidate_id,
+            },
+            warrant="author_revision",
+            target_anchor_id=anchor_id,
+        )
+        store.record_candidate_resolution(
+            candidate_id,
+            "revise",
+            detail={"proposal_id": proposal.id, "anchor_id": anchor_id},
+        )
+        return {
+            "success": True,
+            "proposal_id": proposal.id,
+            "message": (
+                "Canon revision proposed for review. The blocked response was not accepted; "
+                "generate again after accepting any canon change."
+            ),
+        }
+
+    if request.action == "fix" and not (request.corrected_text or "").strip():
+        raise HTTPException(status_code=400, detail="corrected text is required")
+    if request.action == "proceed" and not request.reason.strip():
+        raise HTTPException(status_code=400, detail="an override reason is required")
+    context = _get_context_manager().get_or_create(project.context_id, mode="fiction")
+    result = accept_candidate(
+        generation_store=store,
+        evidence_store=EncryptedEvidenceStore(
+            context.root / "marginalia" / "generation-evidence",
+            Path(MARGINALIA_EVIDENCE_KEY_FILE),
+        ),
+        session_store=_get_session_store(project.id),
+        context_root=context.root,
+        project_id=project.id,
+        candidate_id=candidate_id,
+        accounting_resolver=_message_accounting,
+        corrected_text=request.corrected_text if request.action == "fix" else None,
+        continuity_override_reason=request.reason if request.action == "proceed" else None,
+    )
+    if result.status is AcceptanceStatus.BLOCKED:
+        raise HTTPException(status_code=409, detail=result.reason)
+    detail: dict[str, Any] = {}
+    if request.action == "fix":
+        assert request.corrected_text is not None
+        detail["corrected_text_sha256"] = hashlib.sha256(
+            request.corrected_text.strip().encode("utf-8")
+        ).hexdigest()
+    else:
+        detail.update(
+            {"reason": request.reason.strip(), "scope": request.scope, "expiry": request.expiry}
+        )
+    store.record_candidate_resolution(candidate_id, request.action, detail=detail)
+    return {
+        "success": True,
+        "message_id": result.message_id,
+        "message": (
+            "Corrected response accepted." if request.action == "fix" else "Exception accepted."
+        ),
+    }
 
 
 def _library_project_payload(
@@ -1593,7 +1729,7 @@ async def update_creative_project(
 
 @app.get("/v1/generation/settings")
 async def get_generation_settings(project_id: str | None = None) -> dict[str, Any]:
-    """Return the prominent project-level durable-generation controls."""
+    """Return the prominent project-level ag-ng dispatch controls."""
     project = _project_record(project_id)
     settings = _get_generation_store(project.id).settings(project.id)
     fallback = settings.fallback_policy[0][0] if settings.fallback_policy else None
@@ -1602,10 +1738,12 @@ async def get_generation_settings(project_id: str | None = None) -> dict[str, An
         "enabled": settings.dispatch_enabled,
         "fallback_model": fallback,
         "status": (
-            "ready"
+            "ag-ng custody ready"
             if MARGINALIA_DURABLE_GENERATION_AVAILABLE
-            else "This deployment has not enabled the durable generation worker."
+            else "The ag-ng generation worker is unavailable."
         ),
+        "platform": "ag-ng",
+        "classic_fallback": False,
     }
 
 
@@ -1651,6 +1789,8 @@ def _generation_status_payload(project_id: str, request_id: str) -> dict[str, An
     if logical is None:
         raise HTTPException(status_code=404, detail="generation request not found")
     if logical.project_id != project.id:
+        raise HTTPException(status_code=404, detail="generation request not found")
+    if logical.purpose != "conversation":
         raise HTTPException(status_code=404, detail="generation request not found")
     if logical.status is LogicalStatus.CANDIDATE and logical.candidate_id:
         context = _get_context_manager().get_or_create(project.context_id, mode="fiction")
@@ -2609,28 +2749,36 @@ def _commit_authored_turn(
 async def _generate_context_summary(
     *,
     project_id: str | None,
+    session_id: str,
     messages: list[dict[str, str]],
     configured_model: str,
     model_identity: ConfiguredModel,
 ) -> SummaryModelResult:
-    """Run maintenance in an isolated governor context and return no narrative type."""
-    raw = await _get_context_maintenance_adapter(project_id).chat_send(
+    """Run maintenance through ag-ng/Docket custody, never the classic daemon."""
+    project = _project_record(project_id)
+    context = _get_context_manager().get_or_create(project.context_id, mode="fiction")
+    result = await generate_internal(
+        purpose="context-maintenance",
+        project_id=project.id,
+        context_id=project.context_id,
+        context_root=context.root,
+        session_id=session_id,
+        session_store=_get_session_store(project.id),
+        generation_store=_get_generation_store(project.id),
+        evidence_store=EncryptedEvidenceStore(
+            context.root / "marginalia" / "generation-evidence",
+            Path(MARGINALIA_EVIDENCE_KEY_FILE),
+        ),
         messages=messages,
-        model=configured_model,
-    )
-    outcome = classify_daemon_result(raw, configured_model)
-    if isinstance(outcome, BlockedGeneration):
-        raise ContextSummaryError("context-maintenance output was blocked")
-    if not isinstance(outcome, AuthoredGeneration):
-        raise ContextSummaryError("context-maintenance model returned no usable result")
-    if outcome.model != configured_model:
-        raise ContextSummaryError("context-maintenance model identity changed during execution")
-    return SummaryModelResult(
-        content=outcome.content,
-        usage=outcome.usage,
-        receipt_id=outcome.receipt["receipt_id"],
+        configured_model=configured_model,
         provider_id=model_identity.provider_id,
-        model_id=model_identity.model_id,
+    )
+    return SummaryModelResult(
+        content=result.content,
+        usage=result.usage,
+        receipt_id=result.candidate_id,
+        provider_id=result.provider_id,
+        model_id=result.model_id,
     )
 
 
@@ -2722,7 +2870,7 @@ async def _perform_context_maintenance_once(
             raise ContextMaintenanceUnavailable(
                 "context maintenance requires configured model providers"
             )
-        maintenance_model = catalog.require_available(MARGINALIA_CONTEXT_MAINTENANCE_MODEL)
+        maintenance_model = catalog.resolve(MARGINALIA_CONTEXT_MAINTENANCE_MODEL)
         if maintenance_model.purpose != "context-maintenance":
             raise ContextMaintenanceUnavailable(
                 "configured context-maintenance model is not marked for context maintenance"
@@ -2733,6 +2881,7 @@ async def _perform_context_maintenance_once(
         ) -> SummaryModelResult:
             return await _generate_context_summary(
                 project_id=project_id,
+                session_id=session_id,
                 messages=prompt,
                 configured_model=configured_model,
                 model_identity=maintenance_model,
@@ -2754,6 +2903,11 @@ async def _perform_context_maintenance_once(
             chunk_concurrency=MARGINALIA_MAINTENANCE_CHUNK_CONCURRENCY,
         )
         summary = await maintainer.maintain(session, source_messages)
+        accept_internal_results(
+            _get_generation_store(project_id),
+            summary.generator.receipt_ids,
+            artifact_id=f"context-summary:{session.id}:{summary.source.prefix_sha256}",
+        )
         telemetry_logger.info(
             "context_maintenance completed session=%s revision=%s covered_messages=%s",
             session.id,
@@ -3003,6 +3157,20 @@ async def chat_completions(
     Delegates to the governor daemon for the full governed pipeline:
     pending check → augment → generate → check → receipt.
     """
+    if MARGINALIA_AG_NG_ONLY and (
+        request.project_id is None
+        or request.session_id is None
+        or request.client_request_id is None
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "ag-ng generation requires project_id, session_id, and a stable client_request_id"
+            ),
+        )
+    if MARGINALIA_AG_NG_ONLY and not MARGINALIA_DURABLE_GENERATION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="the ag-ng generation worker is unavailable")
+
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
     durable_store: GenerationStore | None = None
     durable_settings = None
@@ -3042,7 +3210,9 @@ async def chat_completions(
         return _failure_response(_generation_failure(ServiceMaintenanceError(maintenance)))
 
     selected_model, model_identity = _resolve_configured_model(request.model)
-    governed_chat = _get_governed_chat_adapter(request.project_id)
+    governed_chat = (
+        None if MARGINALIA_AG_NG_ONLY else _get_governed_chat_adapter(request.project_id)
+    )
     try:
         commit_target = _prepare_generation_commit(request)
     except StaleSessionRevisionError as exc:
@@ -3213,11 +3383,21 @@ async def chat_completions(
         )
 
     if request.stream:
+        assert governed_chat is not None
         return StreamingResponse(
             _stream_via_daemon(governed_chat, messages, selected_model, model_identity),
             media_type="text/event-stream",
         )
 
+    if MARGINALIA_AG_NG_ONLY:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "new ag-ng dispatches are stopped for this project; existing work "
+                "remains inspectable and reconcilable"
+            ),
+        )
+    assert governed_chat is not None
     execution = governor_progress.begin(model_identity.provider_id if model_identity else "codex")
     generation_started = time.monotonic()
     try:
@@ -3334,37 +3514,63 @@ async def chat_completions(
 
 @app.post("/v1/internal/synthetic-governor")
 async def synthetic_governor(request: SyntheticGovernorRequest) -> dict[str, Any]:
-    """Exercise governed execution without creating a user-visible conversation."""
+    """Exercise ag-ng/Docket custody without creating a visible conversation."""
     selected_model, identity = _resolve_configured_model(request.model)
-    backend = identity.provider_id if identity else "codex"
+    if identity is None:
+        raise HTTPException(status_code=503, detail="synthetic model is not configured")
+    project = _project_record()
+    context = _get_context_manager().get_or_create(project.context_id, mode="fiction")
+    synthetic_sessions = SessionStore(context.root / "marginalia" / "synthetic-sessions")
+    summaries = synthetic_sessions.list_summaries()
+    session = (
+        synthetic_sessions.get(summaries[0]["id"])
+        if summaries
+        else synthetic_sessions.create(
+            MARGINALIA_SYNTHETIC_CONTEXT_ID,
+            model=selected_model,
+            title="Internal ag-ng synthetic",
+        )
+    )
+    assert session is not None
+    backend = identity.provider_id
     execution = governor_progress.begin(backend)
     prompt = (
         f"[MARGINALIA_SYNTHETIC_V1:{request.marker}] "
         "Reply briefly to confirm the governed reply path is functioning."
     )
     try:
-        result = await _get_synthetic_governed_chat_adapter().chat_send(
+        result = await generate_internal(
+            purpose="synthetic",
+            project_id=project.id,
+            context_id=MARGINALIA_SYNTHETIC_CONTEXT_ID,
+            context_root=context.root,
+            session_id=session.id,
+            session_store=synthetic_sessions,
+            generation_store=_get_generation_store(project.id),
+            evidence_store=EncryptedEvidenceStore(
+                context.root / "marginalia" / "generation-evidence",
+                Path(MARGINALIA_EVIDENCE_KEY_FILE),
+            ),
             messages=[{"role": "user", "content": prompt}],
-            model=selected_model,
+            configured_model=selected_model,
+            provider_id=identity.provider_id,
         )
-        content = result.get("content")
-        if not isinstance(content, str) or not content.strip():
+        if not result.content.strip():
             raise RuntimeError("synthetic governed reply was empty")
-        receipt = result.get("receipt")
-        if not isinstance(receipt, dict) or not receipt.get("receipt_id"):
-            raise RuntimeError("synthetic governed reply omitted its authority receipt")
+        accept_internal_results(
+            _get_generation_store(project.id),
+            [result.candidate_id],
+            artifact_id=f"synthetic:{request.marker}",
+        )
         governor_progress.succeeded(execution)
         return {
             "status": "PASS",
             "backend": backend,
             "model": selected_model,
             "reply_nonempty": True,
-            "receipt_id": receipt["receipt_id"],
+            "receipt_id": result.candidate_id,
             "context_id": MARGINALIA_SYNTHETIC_CONTEXT_ID,
         }
-    except DaemonTimeoutError as exc:
-        governor_progress.failed(execution, "governor_timeout", capacity_uncertain=True)
-        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except asyncio.CancelledError:
         governor_progress.failed(execution, "cancelled")
         raise
@@ -4489,14 +4695,14 @@ def _merge_canon_description(existing: str | None, *, subject: str, statement: s
     return prefix + _CANON_STATEMENT_SEPARATOR.join(parts)
 
 
-@app.get("/governor/fiction/characters")
+@app.get("/v1/story/characters")
 async def list_characters(project_id: str | None = None) -> dict[str, Any]:
     """List all characters for fiction mode."""
     ctx, _ = _resolve_context(project_id)
     if ctx is None:
         return {"characters": [], "message": "No governor context initialized."}
 
-    from governor.continuity import AnchorType, create_registry
+    from gov_webui.writer_continuity import AnchorType, create_registry
 
     registry = create_registry(ctx.governor_dir)
     anchors = registry.all()
@@ -4519,14 +4725,14 @@ async def list_characters(project_id: str | None = None) -> dict[str, Any]:
     return {"characters": characters}
 
 
-@app.post("/governor/fiction/characters")
+@app.post("/v1/story/characters")
 async def add_character(request: CharacterRequest) -> dict[str, Any]:
     """Add a character for fiction mode."""
     ctx, _ = _resolve_context(request.project_id)
     if ctx is None:
         raise HTTPException(status_code=400, detail="No governor context initialized.")
 
-    from governor.continuity import Anchor, AnchorType, Severity, create_registry
+    from gov_webui.writer_continuity import Anchor, AnchorType, Severity, create_registry
 
     with project_state_lock(ctx.root):
         registry = create_registry(ctx.governor_dir)
@@ -4563,7 +4769,7 @@ async def add_character(request: CharacterRequest) -> dict[str, Any]:
     }
 
 
-@app.delete("/governor/fiction/characters/{char_id}")
+@app.delete("/v1/story/characters/{char_id}")
 async def remove_character(
     char_id: str,
     project_id: str | None = None,
@@ -4573,7 +4779,7 @@ async def remove_character(
     if ctx is None:
         raise HTTPException(status_code=400, detail="No governor context initialized.")
 
-    from governor.continuity import create_registry
+    from gov_webui.writer_continuity import create_registry
 
     with project_state_lock(ctx.root):
         registry = create_registry(ctx.governor_dir)
@@ -4586,14 +4792,14 @@ async def remove_character(
     raise HTTPException(status_code=404, detail="Character not found.")
 
 
-@app.get("/governor/fiction/world-rules")
+@app.get("/v1/story/world-rules")
 async def list_world_rules(project_id: str | None = None) -> dict[str, Any]:
     """List all world rules for fiction mode."""
     ctx, _ = _resolve_context(project_id)
     if ctx is None:
         return {"rules": [], "message": "No governor context initialized."}
 
-    from governor.continuity import AnchorType, create_registry
+    from gov_webui.writer_continuity import AnchorType, create_registry
 
     registry = create_registry(ctx.governor_dir)
     anchors = registry.all()
@@ -4611,14 +4817,14 @@ async def list_world_rules(project_id: str | None = None) -> dict[str, Any]:
     return {"rules": rules}
 
 
-@app.post("/governor/fiction/world-rules")
+@app.post("/v1/story/world-rules")
 async def add_world_rule(request: WorldRuleRequest) -> dict[str, Any]:
     """Add a world rule for fiction mode."""
     ctx, _ = _resolve_context(request.project_id)
     if ctx is None:
         raise HTTPException(status_code=400, detail="No governor context initialized.")
 
-    from governor.continuity import Anchor, AnchorType, Severity, create_registry
+    from gov_webui.writer_continuity import Anchor, AnchorType, Severity, create_registry
 
     with project_state_lock(ctx.root):
         registry = create_registry(ctx.governor_dir)
@@ -4642,14 +4848,14 @@ async def add_world_rule(request: WorldRuleRequest) -> dict[str, Any]:
     }
 
 
-@app.get("/governor/fiction/forbidden")
+@app.get("/v1/story/forbidden")
 async def list_forbidden(project_id: str | None = None) -> dict[str, Any]:
     """List all forbidden things for fiction mode."""
     ctx, _ = _resolve_context(project_id)
     if ctx is None:
         return {"forbidden": [], "message": "No governor context initialized."}
 
-    from governor.continuity import AnchorType, create_registry
+    from gov_webui.writer_continuity import AnchorType, create_registry
 
     registry = create_registry(ctx.governor_dir)
     anchors = registry.all()
@@ -4668,14 +4874,14 @@ async def list_forbidden(project_id: str | None = None) -> dict[str, Any]:
     return {"forbidden": forbidden}
 
 
-@app.post("/governor/fiction/forbidden")
+@app.post("/v1/story/forbidden")
 async def add_forbidden(request: ForbiddenRequest) -> dict[str, Any]:
     """Add a forbidden thing for fiction mode."""
     ctx, _ = _resolve_context(request.project_id)
     if ctx is None:
         raise HTTPException(status_code=400, detail="No governor context initialized.")
 
-    from governor.continuity import Anchor, AnchorType, Severity, create_registry
+    from gov_webui.writer_continuity import Anchor, AnchorType, Severity, create_registry
 
     with project_state_lock(ctx.root):
         registry = create_registry(ctx.governor_dir)
@@ -4707,11 +4913,11 @@ _pending_captures: dict[str, dict[str, Any]] = {}
 _capture_counter: int = 0
 
 
-@app.post("/governor/fiction/capture/scan")
+@app.post("/v1/story/capture/scan")
 async def capture_scan(request: CaptureRequest) -> dict[str, Any]:
     """Scan text for canon-worthy statements. Returns capture candidates."""
     try:
-        from fiction_governor.canon_capture import CanonCaptureClassifier
+        from gov_webui.writer_canon_capture import CanonCaptureClassifier
     except ImportError:
         return {"captures": [], "error": "Canon capture classifier not available."}
 
@@ -4753,7 +4959,7 @@ async def capture_scan(request: CaptureRequest) -> dict[str, Any]:
     }
 
 
-@app.get("/governor/fiction/captures")
+@app.get("/v1/story/captures")
 async def list_pending_captures(
     project_id: str | None = None,
     status: str = "pending",
@@ -4772,7 +4978,7 @@ async def list_pending_captures(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/governor/fiction/capture/{capture_id}/accept")
+@app.post("/v1/story/capture/{capture_id}/accept")
 @_project_mutation_locked
 async def accept_capture(capture_id: str, request: CaptureAcceptRequest) -> dict[str, Any]:
     """Promote a pending capture to canon (creates character or world rule anchor)."""
@@ -4789,7 +4995,7 @@ async def accept_capture(capture_id: str, request: CaptureAcceptRequest) -> dict
     if ctx is None:
         raise HTTPException(status_code=400, detail="No governor context initialized.")
 
-    from governor.continuity import Anchor, AnchorType, Severity, create_registry
+    from gov_webui.writer_continuity import Anchor, AnchorType, Severity, create_registry
 
     registry = create_registry(ctx.governor_dir)
 
@@ -4922,7 +5128,7 @@ async def accept_capture(capture_id: str, request: CaptureAcceptRequest) -> dict
     raise HTTPException(status_code=400, detail=f"Unknown capture kind: {kind}")
 
 
-@app.patch("/governor/fiction/capture/{capture_id}")
+@app.patch("/v1/story/capture/{capture_id}")
 async def update_capture(
     capture_id: str,
     request: CaptureUpdateRequest,
@@ -4943,7 +5149,7 @@ async def update_capture(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/governor/fiction/capture/{capture_id}/reject")
+@app.post("/v1/story/capture/{capture_id}/reject")
 async def reject_capture(
     capture_id: str,
     project_id: str | None = None,
@@ -5033,7 +5239,7 @@ async def list_constraints() -> dict[str, Any]:
     if ctx is None:
         return {"constraints": [], "message": "No governor context initialized."}
 
-    from governor.continuity import AnchorType, create_registry
+    from gov_webui.writer_continuity import AnchorType, create_registry
 
     registry = create_registry(ctx.governor_dir)
     anchors = registry.all()
@@ -5060,7 +5266,7 @@ async def add_constraint(request: ConstraintRequest) -> dict[str, Any]:
     if ctx is None:
         raise HTTPException(status_code=400, detail="No governor context initialized.")
 
-    from governor.continuity import Anchor, AnchorType, Severity, create_registry
+    from gov_webui.writer_continuity import Anchor, AnchorType, Severity, create_registry
 
     registry = create_registry(ctx.governor_dir)
 
@@ -5098,7 +5304,7 @@ async def code_compare_last() -> dict[str, Any]:
     try:
         from governor.interferometry import InterferometryStore
         from governor.code_interferometry import compute_code_divergence
-        from governor.continuity import create_registry
+        from gov_webui.writer_continuity import create_registry
 
         store = InterferometryStore(ctx.governor_dir)
         irun = store.last()
@@ -5132,7 +5338,7 @@ async def code_compare_run(request: CompareRequest) -> dict[str, Any]:
     import asyncio
     from governor.interferometry import InterferometryStore, run_ensemble
     from governor.code_interferometry import compute_code_divergence
-    from governor.continuity import create_registry
+    from gov_webui.writer_continuity import create_registry
 
     # Parse backend configs
     backend_configs = []
@@ -5365,7 +5571,7 @@ async def code_run(request: RunRequest) -> dict[str, Any]:
     try:
         ctx, _ = _resolve_context()
         if ctx is not None:
-            from governor.continuity import AnchorType, create_registry
+            from gov_webui.writer_continuity import AnchorType, create_registry
 
             registry = create_registry(ctx.governor_dir)
             anchors = registry.all()
@@ -6210,7 +6416,37 @@ async def health_live() -> dict[str, Any]:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    """Bounded dependency status plus cheap governor progress state."""
+    """Bounded dependency status for the active execution platform."""
+    if MARGINALIA_AG_NG_ONLY:
+        catalog_valid = False
+        try:
+            catalog_valid = _configured_provider_catalog() is not None
+        except Exception:
+            pass
+        socket_ready = Path(MARGINALIA_PROVIDER_SOCKET).is_socket()
+        platform_ready = MARGINALIA_DURABLE_GENERATION_AVAILABLE and catalog_valid and socket_ready
+        cm = _get_context_manager()
+        ctx = cm.get(GOVERNOR_CONTEXT_ID)
+        return {
+            "status": "healthy" if platform_ready else "degraded",
+            "backend": {
+                "type": "ag-ng-providerd",
+                "connected": socket_ready,
+                "authoritative": "ag-ng",
+            },
+            "generation": {
+                "platform": "ag-ng",
+                "docket_custody": MARGINALIA_DURABLE_GENERATION_AVAILABLE,
+                "provider_socket_ready": socket_ready,
+                "model_catalog_valid": catalog_valid,
+                "classic_fallback": False,
+                "contexts_root": str(_get_context_manager().base_dir),
+                "context_id": GOVERNOR_CONTEXT_ID,
+                "mode": GOVERNOR_MODE,
+                "initialized": ctx is not None,
+            },
+        }
+
     backend: dict[str, Any] = {"type": "unknown", "connected": False}
     contract_ok = False
     provider_reachable = False
@@ -6248,7 +6484,7 @@ async def health() -> dict[str, Any]:
             "mode": GOVERNOR_MODE,
             "initialized": ctx is not None,
             "contract_ok": contract_ok,
-            "daemon_dir": GOVERNOR_DAEMON_DIR,
+            "daemon_dir": str(_get_context_manager().base_dir),
             "execution": execution,
         },
     }
@@ -6426,7 +6662,7 @@ async def export_governor_state() -> dict[str, Any]:
     if ctx is None:
         return {"mode": GOVERNOR_MODE, "anchors": [], "corrections": []}
 
-    from governor.continuity import AnchorType, create_registry
+    from gov_webui.writer_continuity import AnchorType, create_registry
 
     registry = create_registry(ctx.governor_dir)
     anchors = registry.all()
@@ -6499,7 +6735,7 @@ async def import_governor_state(payload: dict[str, Any]) -> dict[str, Any]:
     if ctx is None:
         raise HTTPException(status_code=400, detail="No governor context initialized.")
 
-    from governor.continuity import Anchor, AnchorType, Severity, create_registry
+    from gov_webui.writer_continuity import Anchor, AnchorType, Severity, create_registry
 
     registry = create_registry(ctx.governor_dir)
 
@@ -6562,10 +6798,7 @@ async def import_governor_state(payload: dict[str, Any]) -> dict[str, Any]:
 @app.get("/api/info")
 async def api_info() -> dict[str, Any]:
     """JSON endpoint with API info and available endpoints."""
-    try:
-        backend = (await _get_governed_chat_adapter().provider()).get("type", "unknown")
-    except Exception:
-        backend = "unavailable"
+    backend = "ag-ng-providerd"
     endpoints = {
         "ui": "/",
         "models": "/v1/models",
@@ -6596,12 +6829,12 @@ async def api_info() -> dict[str, Any]:
         "sessions_append_message": "/sessions/{id}/messages",
         "sessions_fork": "/sessions/{id}/fork",
         "conversation_tree": "/v1/conversations/tree",
-        "fiction_characters": "/governor/fiction/characters",
-        "fiction_world_rules": "/governor/fiction/world-rules",
-        "fiction_forbidden": "/governor/fiction/forbidden",
-        "fiction_capture_scan": "/governor/fiction/capture/scan",
-        "fiction_captures": "/governor/fiction/captures",
-        "artifacts": "/governor/artifacts",
+        "fiction_characters": "/v1/story/characters",
+        "fiction_world_rules": "/v1/story/world-rules",
+        "fiction_forbidden": "/v1/story/forbidden",
+        "fiction_capture_scan": "/v1/story/capture/scan",
+        "fiction_captures": "/v1/story/captures",
+        "artifacts": "/v1/artifacts",
         "workspace_backups": "/v1/workspaces/{workspace_id}/backups",
     }
     if MARGINALIA_ENABLE_DONOR_ROUTES:
@@ -6657,7 +6890,7 @@ async def api_info() -> dict[str, Any]:
         "deployment": deployment_metadata(),
         "schemas": schema_versions(),
         "backend": backend,
-        "provider_owner": "agent-governor-daemon",
+        "provider_owner": "ag-ng-providerd",
         "openai_compatible": True,
         "governor_context": GOVERNOR_CONTEXT_ID,
         "governor_mode": GOVERNOR_MODE,
@@ -6986,7 +7219,7 @@ async def v2_list_anchors() -> dict[str, Any]:
     if ctx is None:
         return {"anchors": []}
 
-    from governor.continuity import create_registry
+    from gov_webui.writer_continuity import create_registry
 
     try:
         registry = create_registry(ctx.governor_dir)
@@ -7453,7 +7686,7 @@ def _artifact_exception_response(exc: Exception) -> JSONResponse:
     return _artifact_error(status_code=500, code="internal_error", message=str(exc))
 
 
-@app.get("/governor/artifacts")
+@app.get("/v1/artifacts")
 async def artifacts_list(
     project_id: str | None = None,
     view: str = "all",
@@ -7508,7 +7741,7 @@ async def artifacts_list(
         return _artifact_exception_response(exc)
 
 
-@app.post("/governor/artifacts", status_code=201)
+@app.post("/v1/artifacts", status_code=201)
 async def artifacts_create(request: ArtifactCreateRequest) -> JSONResponse:
     """Create a new artifact."""
     from gov_webui.artifact_store import ArtifactStoreError
@@ -7564,7 +7797,7 @@ async def artifacts_create(request: ArtifactCreateRequest) -> JSONResponse:
         return _artifact_exception_response(exc)
 
 
-@app.post("/governor/artifacts/{artifact_id}/canon-proposal", status_code=201)
+@app.post("/v1/artifacts/{artifact_id}/canon-proposal", status_code=201)
 async def artifacts_propose_canon(
     artifact_id: str,
     request: ArtifactCanonProposalRequest,
@@ -7608,7 +7841,7 @@ async def artifacts_propose_canon(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.get("/governor/artifacts/{artifact_id}/canon-comparison")
+@app.get("/v1/artifacts/{artifact_id}/canon-comparison")
 async def artifacts_compare_canon(
     artifact_id: str,
     project_id: str | None = None,
@@ -7616,7 +7849,7 @@ async def artifacts_compare_canon(
 ) -> dict[str, Any]:
     """Run the existing deterministic continuity checker against accepted canon."""
     from gov_webui.artifact_store import ArtifactStoreError
-    from governor.continuity import ContinuityChecker, create_registry
+    from gov_webui.writer_continuity import ContinuityChecker, create_registry
 
     try:
         project = _project_record(project_id)
@@ -7661,7 +7894,7 @@ async def artifacts_compare_canon(
         return _artifact_exception_response(exc)
 
 
-@app.get("/governor/artifacts/state")
+@app.get("/v1/artifacts/state")
 async def artifacts_state(project_id: str | None = None) -> dict:
     """Quick poll endpoint for artifact index version."""
     from gov_webui.artifact_store import ArtifactStoreError
@@ -7680,7 +7913,7 @@ async def artifacts_state(project_id: str | None = None) -> dict:
         return _artifact_exception_response(exc)
 
 
-@app.get("/governor/artifacts/{artifact_id}")
+@app.get("/v1/artifacts/{artifact_id}")
 async def artifacts_get(artifact_id: str, project_id: str | None = None) -> dict:
     """Get artifact detail + latest content."""
     from gov_webui.artifact_store import ArtifactStoreError
@@ -7709,7 +7942,7 @@ async def artifacts_get(artifact_id: str, project_id: str | None = None) -> dict
         return _artifact_exception_response(exc)
 
 
-@app.put("/governor/artifacts/{artifact_id}")
+@app.put("/v1/artifacts/{artifact_id}")
 async def artifacts_update(
     artifact_id: str,
     request: ArtifactUpdateRequest,
@@ -7743,7 +7976,7 @@ async def artifacts_update(
         return _artifact_exception_response(exc)
 
 
-@app.patch("/governor/artifacts/{artifact_id}")
+@app.patch("/v1/artifacts/{artifact_id}")
 async def artifacts_update_lifecycle(
     artifact_id: str,
     request: ArtifactLifecycleRequest,
@@ -7772,7 +8005,7 @@ async def artifacts_update_lifecycle(
         return _artifact_exception_response(exc)
 
 
-@app.put("/governor/artifacts/{artifact_id}/working-copy")
+@app.put("/v1/artifacts/{artifact_id}/working-copy")
 async def artifacts_save_working_copy(
     artifact_id: str,
     request: ArtifactWorkingCopyRequest,
@@ -7798,7 +8031,7 @@ async def artifacts_save_working_copy(
         return _artifact_exception_response(exc)
 
 
-@app.delete("/governor/artifacts/{artifact_id}/working-copy")
+@app.delete("/v1/artifacts/{artifact_id}/working-copy")
 async def artifacts_discard_working_copy(
     artifact_id: str,
     project_id: str | None = None,
@@ -7818,7 +8051,7 @@ async def artifacts_discard_working_copy(
         return _artifact_exception_response(exc)
 
 
-@app.delete("/governor/artifacts/{artifact_id}")
+@app.delete("/v1/artifacts/{artifact_id}")
 async def artifacts_delete(artifact_id: str, project_id: str | None = None) -> dict:
     """Delete artifact from index."""
     from gov_webui.artifact_store import ArtifactStoreError
@@ -7835,7 +8068,7 @@ async def artifacts_delete(artifact_id: str, project_id: str | None = None) -> d
         return _artifact_exception_response(exc)
 
 
-@app.get("/governor/artifacts/{artifact_id}/version/{version}")
+@app.get("/v1/artifacts/{artifact_id}/version/{version}")
 async def artifacts_get_version(
     artifact_id: str,
     version: int,
@@ -7857,7 +8090,7 @@ async def artifacts_get_version(
         return _artifact_exception_response(exc)
 
 
-@app.get("/governor/artifacts/{artifact_id}/compare")
+@app.get("/v1/artifacts/{artifact_id}/compare")
 async def artifacts_compare_versions(
     artifact_id: str,
     from_version: int,
@@ -7897,7 +8130,7 @@ async def artifacts_compare_versions(
         return _artifact_exception_response(exc)
 
 
-@app.post("/governor/artifacts/{artifact_id}/version/{version}/restore")
+@app.post("/v1/artifacts/{artifact_id}/version/{version}/restore")
 async def artifacts_restore_version(
     artifact_id: str,
     version: int,
@@ -8037,7 +8270,7 @@ def _build_verify_report(dicts: list[dict]) -> dict:
     }
 
 
-@app.get("/governor/receipts/export")
+@app.get("/v1/historical-receipts/export")
 async def export_receipt_chain():
     """Export all receipt_v1 records as canonical JSONL."""
     dicts = _load_receipt_v1_dicts()
@@ -8059,14 +8292,14 @@ async def export_receipt_chain():
     )
 
 
-@app.post("/governor/receipts/verify")
+@app.post("/v1/historical-receipts/verify")
 async def verify_receipt_chain():
     """Verify the integrity of the current on-disk receipt chain."""
     dicts = _load_receipt_v1_dicts()
     return _build_verify_report(dicts)
 
 
-@app.post("/governor/receipts/verify-upload")
+@app.post("/v1/historical-receipts/verify-upload")
 async def verify_uploaded_receipts(request: Request):
     """Verify an uploaded JSONL file's receipt chain integrity."""
     body = await request.body()

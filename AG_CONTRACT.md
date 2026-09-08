@@ -1,28 +1,32 @@
-# Marginalia / Agent Governor contract
+# Marginalia / ag-ng execution contract
 
-Marginalia M0 is qualified against:
+Marginalia is qualified against these immutable companion revisions:
 
-- package: `agent-governor==2.8.1`
-- source commit: `e279a94326a0a13dbe43473846b53e4c3a9b31f2`
-- published annotated tag: `marginalia-chat-contract-m0`
-- governed-chat contract: `capabilities.governed_chat.contract_version == "1"`
+- ag-ng: `c3210f156208b22bf21e7bd1910a84a85b519538`;
+- Docket: `181589f910b76030b312d6478bd0ac813a630855`;
+- the vendored, read-only `receipt-v1` compatibility reader at version `0.1.0`.
 
-The package version prevents an unbounded dependency resolution. The source
-commit identifies the exact local/container build input, and the annotated tag
-makes that input reconstructible from the configured AG origin rather than
-depending on an unpublished sibling checkout. At startup the
-`GovernedChatAdapter` also fails closed unless AG advertises context-scoped
-pending state, authoritative receipts, and the same governor state directory
-that Marginalia was configured to use.
+`AG_NG_CONTRACT_COMMIT` and `DOCKET_CONTRACT_COMMIT` are the build contract.
+`sync-deps.sh` exports those exact Git objects into the image context. It does
+not read an Agent Governor classic checkout.
 
-For a sibling checkout, the expected source layout is:
+The ownership boundary is intentionally split:
 
-```text
-git/
-├── agent_gov/
-└── agent_gov_ui/
-    └── marginalia/
-```
+1. Marginalia freezes a logical request, its original selection, authorized
+   fallback policy, revision, canon, guidance, and relevant request settings.
+2. ag-ng authorizes each exact provider dispatch. Each dispatch has its own
+   immutable identity for its actual route, model, and body.
+3. Docket owns attempt custody and worker reconciliation.
+4. Marginalia's executor owns provider transport and encrypted response
+   evidence.
+5. Marginalia's application alone decides whether a candidate may enter a
+   session or become a derived application artifact.
 
-`sync-deps.sh` verifies the sibling checkout commit before staging AG into a
-container build context.
+Provider success is not acceptance. Conversation acceptance is a cross-process,
+crash-safe compare-and-swap covering session revision, canon, and project
+guidance. Candidate identity makes it idempotent. Historical acceptance is
+resolved before current fingerprints are checked.
+
+Agent Governor classic, `receipt-kernel`, and their Python runtime APIs are not
+installed in the release image. The remaining classic source and tests are
+frozen history and cannot be enabled with an environment variable.

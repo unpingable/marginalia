@@ -1,14 +1,18 @@
 # Marginalia household operations
 
-Marginalia's Compose deployment has three processes built from the same image:
+Marginalia's Compose deployment has five processes built from the same image:
 
-- `marginalia` runs the Agent Governor daemon and writing-room API.
+- `marginalia` runs the writing-room API and application acceptance boundary.
+- `marginalia-generation` runs Docket custody and the Marginalia executor.
+- `marginalia-providerd` runs ag-ng's credential-isolated provider service.
 - `marginalia-backup` reads `/data` and performs enabled workspace schedules.
-- `marginalia-synthetic` performs bounded isolated governor/provider probes.
+- `marginalia-synthetic` submits bounded isolated probes through the same
+  durable generation path.
 
-Both use the existing `marginalia_data` volume. The worker mounts that volume
-read-only. A Docker-managed NFS volume (recommended) or host bind is mounted at
-`/backups`; no backup operation rewrites the live data volume.
+The web and generation worker share `marginalia_data`; the backup worker mounts
+it read-only. Providerd has a separate state volume and shares only its Unix
+socket with the worker. A Docker-managed NFS volume (recommended) or host bind
+is mounted at `/backups`; no backup operation rewrites the live data volume.
 
 ## Configure the backup destination
 
@@ -47,7 +51,7 @@ verifies the archive before reporting success.
 
 ## Startup and migration safety
 
-Every application start runs this before starting the daemon or web server:
+Every web start migrates the state layout and runs this before serving requests:
 
 ```bash
 python3 -m gov_webui.ops \
@@ -74,8 +78,8 @@ docker compose exec -T marginalia \
 ## Health and operational provenance
 
 - `/health/live` proves the web process is alive.
-- `/health/ready` requires the AG contract/provider, governor progress, and
-  durable records to be ready; it returns HTTP 503 otherwise. Its separate
+- `/health/ready` requires the ag-ng provider socket, Docket custody, model
+  catalog, and durable records to be ready; it returns HTTP 503 otherwise. Its separate
   `context_preparation` field reports whether long-fiction derived context is
   ready, required, or currently running without declaring the whole appliance
   unhealthy while resumable preparation is pending.
@@ -88,18 +92,16 @@ and deployment ID are also stored in every backup manifest.
 
 ## Live updates and incident retention
 
-The current appliance is a single web-and-governor container. Replacing that
-container creates a brief service interruption and can stop Marginalia waiting for an in-flight
-generation without proving whether provider execution completed. That unresolved
-state is not automatically retryable. Do not rebuild
-or recreate a household's live container while someone is writing. Announce a
-quiet update window, confirm `execution.in_flight` is zero in
-`/health/ready`, take and verify a backup, and then perform the replacement.
-The zero count is a preflight signal, not a drain lock; there is currently no
-zero-downtime handoff.
+The appliance is a multi-process custody system. Replacing web does not abandon
+worker custody, but replacing provider or worker during an active call may leave
+a provider outcome unknown. Unknown is not automatically retryable. Do not
+rebuild or recreate a household stack while someone is writing. Announce a
+quiet window, turn off new project dispatches, inspect all non-terminal work,
+take and verify a backup, and then replace every service with the same qualified
+digest. A zero count is a preflight signal, not a drain lock.
 
 For an announced maintenance window, create
-`/data/marginalia/maintenance.txt` in the application volume. Its first 500
+`/data/.marginalia/shared/maintenance.txt` in the application volume. Its first 500
 characters become a non-dismissible, non-narrative browser notice; generation
 returns typed retryable `service_maintenance` without calling a provider, while
 read-only browsing and backup remain available. Remove the file after health,
@@ -173,6 +175,8 @@ curl -fsS http://127.0.0.1:8000/health/live
 curl -fsS http://127.0.0.1:8000/health/ready
 curl -fsS http://127.0.0.1:8000/v1/system
 docker compose logs --tail=100 marginalia-backup
+docker compose logs --tail=100 marginalia-generation
+docker compose logs --tail=100 marginalia-providerd
 docker compose logs --tail=100 marginalia-synthetic
 tail -n 20 /backups/marginalia-synthetics.jsonl
 ```

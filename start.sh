@@ -17,4 +17,4 @@ COMPOSE_FILES+=(-f docker-compose.build.yml)
 docker compose "${COMPOSE_FILES[@]}" up --build -d "$@"
 
 echo "Marginalia: http://localhost:${MARGINALIA_PORT:-8000}"
-echo "Provider ownership: Agent Governor daemon (BACKEND_TYPE=${BACKEND_TYPE:-anthropic})"
+echo "Provider ownership: ag-providerd; attempt custody: Docket"
