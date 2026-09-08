@@ -8,6 +8,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -257,7 +259,6 @@ def test_codex_provider_wrapper_refuses_invalid_timeout(tmp_path: Path, value: s
         "/governor/status",
         "/governor/code/project",
         "/governor/research/state",
-        "/v1/historical-receipts/export",
         "/governor/config/effective",
         "/v2/runs",
         "/v2/intent/templates",
@@ -268,6 +269,127 @@ def test_codex_provider_wrapper_refuses_invalid_timeout(tmp_path: Path, value: s
 def test_donor_operator_routes_are_unreachable_by_default(product_client, path: str) -> None:
     client, _ = product_client
     assert client.get(path).status_code == 404
+
+
+def test_configured_writer_auth_protects_mutations_without_closing_reads(
+    product_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, adapter = product_client
+    monkeypatch.setattr(adapter, "GOVERNOR_AUTH_TOKEN", "test-secret-token")
+
+    assert client.get("/health").status_code == 200
+    missing = client.post("/sessions/", json={"title": "Protected"})
+    assert missing.status_code == 401
+    assert "Authorization" in missing.json()["detail"]
+    wrong = client.post(
+        "/sessions/",
+        json={"title": "Protected"},
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+    assert wrong.status_code == 403
+    allowed = client.post(
+        "/sessions/",
+        json={"title": "Protected"},
+        headers={"Authorization": "Bearer test-secret-token"},
+    )
+    assert allowed.status_code == 200
+    assert client.delete("/sessions/missing").status_code == 401
+
+
+def test_session_api_preserves_defaults_and_missing_resource_errors(product_client) -> None:
+    client, _ = product_client
+
+    created = client.post("/sessions/", json={})
+    assert created.status_code == 200
+    assert created.json()["title"] == "New conversation"
+
+    assert client.get("/sessions/missing").status_code == 404
+    assert client.patch("/sessions/missing", json={"title": "Still missing"}).status_code == 404
+    assert client.delete("/sessions/missing").status_code == 404
+    assert (
+        client.post(
+            "/sessions/missing/messages",
+            json={"role": "user", "content": "No session owns this."},
+        ).status_code
+        == 404
+    )
+
+
+def test_internal_synthetic_generation_cannot_mutate_writer_sessions(
+    product_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, adapter = product_client
+    writer = client.post("/sessions/", json={"title": "Writer session"}).json()
+    writer_id = writer["id"]
+    before = client.get(f"/sessions/{writer_id}").json()
+
+    identity = SimpleNamespace(provider_id="test-provider", model_id="synthetic-model")
+    monkeypatch.setattr(
+        adapter,
+        "_resolve_configured_model",
+        lambda *_args, **_kwargs: ("synthetic-model", identity),
+    )
+    generate = AsyncMock(
+        return_value=SimpleNamespace(content="synthetic pass", candidate_id="candidate-1")
+    )
+    accept = MagicMock()
+    evidence = object()
+    monkeypatch.setattr(adapter, "generate_internal", generate)
+    monkeypatch.setattr(adapter, "accept_internal_results", accept)
+    monkeypatch.setattr(adapter, "EncryptedEvidenceStore", lambda *_args, **_kwargs: evidence)
+
+    response = client.post(
+        "/v1/internal/synthetic-governor",
+        json={"model": "synthetic-model", "marker": "semantic-isolation"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PASS"
+    assert client.get(f"/sessions/{writer_id}").json() == before
+    call = generate.await_args.kwargs
+    assert call["purpose"] == "synthetic"
+    assert call["context_id"] == adapter.MARGINALIA_SYNTHETIC_CONTEXT_ID
+    assert call["session_store"].sessions_dir.name == "synthetic-sessions"
+    assert call["session_store"].sessions_dir != adapter._get_session_store().sessions_dir
+    assert call["evidence_store"] is evidence
+    accept.assert_called_once_with(
+        call["generation_store"],
+        ["candidate-1"],
+        artifact_id="synthetic:semantic-isolation",
+    )
+
+
+def test_artifact_api_preserves_validation_not_found_and_stale_conflicts(
+    product_client,
+) -> None:
+    client, _ = product_client
+
+    invalid = client.post(
+        "/v1/artifacts",
+        json={"title": "Invalid", "content": "x", "kind": "spreadsheet"},
+    )
+    assert invalid.status_code == 422
+    assert invalid.json()["error"]["code"] == "validation_error"
+    missing = client.get("/v1/artifacts/missing")
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "artifact_not_found"
+
+    created = client.post(
+        "/v1/artifacts",
+        json={"title": "Draft", "content": "first", "kind": "markdown"},
+    ).json()
+    artifact_id = created["artifact"]["id"]
+    updated = client.put(
+        f"/v1/artifacts/{artifact_id}",
+        json={"content": "second", "expected_current_version": 1},
+    )
+    assert updated.status_code == 200
+    stale = client.put(
+        f"/v1/artifacts/{artifact_id}",
+        json={"content": "lost update", "expected_current_version": 1},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "stale_version"
 
 
 def test_product_api_info_lists_only_writing_surfaces(product_client) -> None:

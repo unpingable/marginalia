@@ -39,6 +39,9 @@ context also fails closed. Existing conversations are enrolled into the
 | `/v1/backends/switch` | POST | Always returns `409`; provider configuration belongs to AG |
 | `/v1/governed-chat/pending` | GET | Observe actionable pending state in the active context |
 | `/v1/governed-chat/resolve` | POST | Correct, revise a rule, or explicitly proceed in that same context |
+| `/v1/historical-receipts/export` | GET | Export the preserved pre-ag-ng `receipt_v1` archive as canonical JSONL |
+| `/v1/historical-receipts/verify` | POST | Verify the preserved on-disk receipt chain without granting it runtime authority |
+| `/v1/historical-receipts/verify-upload` | POST | Verify a supplied historical JSONL chain without importing it |
 
 Authority receipts remain part of the application/AG correctness contract but
 are not presented as ordinary writing UI.
@@ -149,7 +152,9 @@ duplicates or changes artifact content.
 Old code-builder, research, dashboard, intent-compiler, raw-receipt, and generic
 administration routes remain in source only to keep their historical tests
 available during staged deletion. They return `404` in a normal Marginalia
-runtime and are omitted from `/api/info`. The test-only
+runtime and are omitted from `/api/info`. The narrow
+`/v1/historical-receipts/*` readers above are the sole product boundary for
+preserved classic receipts; they cannot authorize ag-ng work. The test-only
 Classic donor routes are frozen source history and cannot be enabled by runtime
 configuration.
 

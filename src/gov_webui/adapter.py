@@ -395,6 +395,9 @@ _PRODUCT_EXACT_PATHS = {
     "/v1/manuscript",
     "/v1/search",
     "/v1/entities",
+    "/v1/historical-receipts/export",
+    "/v1/historical-receipts/verify",
+    "/v1/historical-receipts/verify-upload",
 }
 _PRODUCT_PATH_PREFIXES = (
     "/v1/models/",
@@ -6815,6 +6818,9 @@ async def api_info() -> dict[str, Any]:
         "project_snapshots": "/v1/project/snapshots",
         "project_search": "/v1/search",
         "project_entities": "/v1/entities",
+        "historical_receipts_export": "/v1/historical-receipts/export",
+        "historical_receipts_verify": "/v1/historical-receipts/verify",
+        "historical_receipts_verify_upload": "/v1/historical-receipts/verify-upload",
         "manuscript": "/v1/manuscript",
         "health": "/health",
         "health_live": "/health/live",

@@ -31,14 +31,19 @@ Of the 423 absent Gate 3H IDs, 418 came from ten retired modules. Their count is
 an executable inventory in `tests/conftest.py` and is checked by
 `test_retired_test_inventory_has_an_audited_crosswalk`.
 
-That inventory guard is one additional test in the corrected candidate. Its
-ordinary host run therefore collects 450, executes 449, and reports the same
-one conditional skip. With the exact image binaries supplied, the complete
-suite executes all 450 with no skip.
+That inventory guard was one additional test in the first corrected candidate.
+The later semantic review did not treat that count as acceptance. It removed
+one misleading parameter that asserted the historical archive was a donor 404
+and added eleven product-boundary tests: configured authentication, session
+defaults and missing resources, synthetic isolation, artifact error mapping,
+and seven historical-receipt access/integrity cases. The resulting suite
+collects 460. An ordinary host run can execute 459 and conditionally skip only
+the exact-companion witness; release qualification must supply the candidate's
+two companion binaries and execute all 460.
 
 | Retired module | Gate 3H cases | Disposition |
 | --- | ---: | --- |
-| `test_adapter.py` | 248 | Mixed classic-daemon, donor-product, and old combined-adapter tests. Its fixture explicitly selects `GOVERNOR_MODE=general` and disables the ag-ng-only boundary, so it cannot qualify the shipped fiction product. Writer flows were reauthored against the ag-ng-only application as mapped below. |
+| `test_adapter.py` | 248 | Mixed classic-daemon, donor-product, and old combined-adapter tests. Its fixture explicitly selects `GOVERNOR_MODE=general` and disables the ag-ng-only boundary, so it cannot qualify the shipped fiction product. Its still-applicable assertions were reviewed and ported by behavior, as mapped below. |
 | `test_code_builder_smoke.py` | 5 | Code-builder donor product removed from Marginalia. |
 | `test_dashboard_v2_api.py` | 39 | Agent Governor operator dashboard and run API removed from the writer product. |
 | `test_governed_chat_adapter.py` | 6 | Classic daemon receipt/stream adapter replaced by durable request, dispatch, evidence, and acceptance tests. |
@@ -56,8 +61,52 @@ The remaining five removed IDs were direct contract replacements:
 - the relative classic provider work-directory test became the closed,
   non-secret command-environment and provider configuration tests in
   `test_ag_provider_config.py`;
-- the classic `/governor/receipts/export` route check became the historical
-  receipt archive route check in `test_marginalia_product.py`.
+- the classic `/governor/receipts/export` route-presence check was superseded
+  by the executable export and integrity cases in
+  `test_historical_receipts.py`.
+
+## Semantic disposition of the mixed adapter module
+
+The 248-case module was split semantically rather than copied wholesale. The
+table names every behavior family it contained. “Retired” means the behavior
+belonged to a removed donor product or Classic operator contract; it does not
+mean a writer invariant was left untested.
+
+| Baseline behavior family | Disposition and active executable replacement | Lost negative-case coverage |
+| --- | --- | --- |
+| Writing shell, product identity, and API discovery | Preserved by `test_root_is_an_intentional_marginalia_writing_shell`, `test_product_api_info_lists_only_writing_surfaces`, and `test_information_architecture.py`. | Donor terms and routes are explicitly absent; no gap. |
+| Health, liveness/readiness, models, backend discovery, and selection | Preserved by `test_ag_ng_health_names_the_real_execution_owners`, provider API tests, model-provider configuration tests, and distribution preflight. Classic daemon fields and environment-selected backends were retired. | Unknown models, missing credentials, model substitution, unavailable providers, and non-switchable AG ownership all have active refusal cases; no gap. |
+| Chat response shape, transactional generation, cancellation/failure, streaming finality, constraints, footer, and receipt semantics | Replaced by `test_generation_executor.py`, `test_generation_worker.py`, `test_generation_acceptance.py`, `test_generation_boundaries.py`, `test_provider_api.py`, and the exact ag-ng/Docket witness. The Classic footer and `receipt_v1` authorization claim were retired; candidate/evidence identity is the replacement. | Active cases cover blank/malformed provider results, cancellation, indeterminate custody, no partial prose, stale revisions, changed canon/guidance, duplicate delivery, and safe errors; no gap. |
+| Session list/create/get/update/delete/append and round trips | Preserved by `test_session_store.py`, `test_library_store.py`, and conversation lifecycle tests in `test_information_architecture.py`. | The baseline's default-title and missing GET/PATCH/DELETE/append cases were absent from the active HTTP boundary; `test_session_api_preserves_defaults_and_missing_resource_errors` ports them. |
+| Fiction capture, review, characters, world rules, and restrictions | Preserved by `test_canon_review_store.py`, `test_canon_authority.py`, story/capture integration in `test_information_architecture.py`, and promotion/refusal cases in `test_marginalia_product.py`. | Missing/resolved candidates, invalid authority, unresolved referents, and uncanonical premises remain executable; no gap. |
+| Artifact CRUD, provenance, revision history, style policy, and optimistic concurrency | Preserved by `test_artifact_store.py` and artifact lifecycle integration in `test_information_architecture.py`. Research/code style branches were retired with those donor modes. | Store-level invalid-kind, missing-content, missing-version, and stale-write cases remained. `test_artifact_api_preserves_validation_not_found_and_stale_conflicts` restores their HTTP status/error-shape boundary. |
+| Historical `receipt_v1` export and verification | Preserved as a read-only migration archive, never as ag-ng authority. | This was a concrete gap: all three `/v1/historical-receipts/*` handlers were behind the product-route deny boundary and the prior “replacement” only asserted a 404. `test_historical_receipts.py` now executes discovery, canonical export, intact verification, tamper detection, chain-break detection, empty archive, and malformed-line reporting. |
+| Optional bearer authentication for writer mutations | Preserved at the fiction-product middleware boundary. | The only positive/negative cases were in the excluded mixed module. `test_configured_writer_auth_protects_mutations_without_closing_reads` ports open reads plus missing, wrong, correct, and DELETE-token cases. |
+| Synthetic ag-ng health generation isolation | Preserved by the internal-generation custody path and `test_durable_internal_generation.py`. | The durable tests proved result custody but did not assert that the HTTP synthetic probe leaves a real writer session byte-for-byte unchanged. `test_internal_synthetic_generation_cannot_mutate_writer_sessions` ports that negative invariant and checks the separate session store. |
+| Classic Governor status/now/why/history/detail UI and effective-config summaries | Retired Classic operator product. These are also the behaviors in excluded `test_summaries.py`; they are not manuscript context summaries. | Not applicable to the writer product. Context summaries have independent admission, evidence-coverage, staleness, and failure tests. |
+| Research ledger, research capture, why-overlay, and research style/config | Retired research donor product. | Not applicable; no research routes or UI are advertised. |
+| Code project/plan/files/run, constraint injection, and code style/config | Retired code-builder donor product. | Not applicable; no code routes or UI are advertised. |
+| Generic `/governor/export` and `/governor/import` | Split. Writer export is preserved by project JSON/ZIP export tests. Legacy state migration is covered by state-layout and library migrations. The generic anchor-import API was never a Marginalia writing-room workflow and was retired rather than relabeled as a project importer. | Writer export, migration, duplicate-state refusal, and restore have negative coverage. A new authoring import workflow would be new architecture, not a missing ag-ng migration assertion. |
+
+## Semantic disposition of the other excluded modules
+
+| Excluded module | Still-applicable behavior and executable replacement | Negative-case conclusion |
+| --- | --- | --- |
+| `test_code_builder_smoke.py` | None; complete-loop, phase, file-run, and transition behavior belonged to the removed code donor. | Its stale, invalid-transition, and run-failure cases are not writer contracts. Artifact/session concurrency has its own active negatives. |
+| `test_dashboard_v2_api.py` | None; run lists, controls, demos, claims, reports, and dashboard HTML belonged to the Classic operator dashboard. | Its missing-run/artifact/demo cases retired with those endpoints. Durable generation inspection is covered through `/v1/generations/*`. |
+| `test_governed_chat_adapter.py` | Receipt authority, provider discovery, context binding, and withheld streaming are replaced by ag-ng authorization, the frozen request digest, Docket custody, evidence storage, and candidate acceptance. | Missing/unconfirmed authorization, route substitution, and pre-finality leakage are covered by provider-gateway, generation-boundary, and exact-witness cases. |
+| `test_intent_api.py` | None; general/code/research intent templates and compilation were a donor API. | Invalid template/schema/value cases retired with the unadvertised endpoints. |
+| `test_live_governed_chat_contract.py` | The applicable block/restart/pending-isolation/resolve-authority sequence is replaced by durable conflict state, exact custody, and revision-checked acceptance. | Cross-project isolation, stale acceptance, unresolved custody, and recovery without redispatch execute in active tests and the cross-process witness. |
+| `test_parity.py` | Applicable auth/dispatch/footer concerns moved from Classic-daemon translation to ag-ng/providerd plus Marginalia acceptance. | Missing credentials, transport/auth normalization without secret leakage, provider substitution, and operational-metadata separation all remain active. |
+| `test_reliability.py` | Deadline, cancellation, child-process cleanup, readiness, and synthetic-probe concerns remain applicable but the Classic RPC/socket supervisor does not. They execute in local-command, model-provider, worker/executor, usage-accounting, health, and crash tests. | Active negatives cover total deadlines, nonzero exits, cancellation, unknown custody, stopped workers, and no redispatch. |
+| `test_research_builder_smoke.py` | None; research drafts, extensions, validator, phases, and bans belonged to the removed research donor. | Its validator and transition failures are not fiction-writer contracts. |
+| `test_summaries.py` | None directly; it derived Classic dashboard pills, referee voice, why feed, and history. | Manuscript context summarization is separately covered for malformed output, insufficient evidence, stale source, overflow, failed maintenance, and admission refusal. |
+
+The semantic review found and repaired four concrete preservation gaps: archive
+routability/integrity, configured-auth negatives, session-boundary negatives,
+and synthetic-session isolation. It also restored artifact HTTP error mapping
+that had survived only at the store layer. No still-applicable assertion remains
+known only to an excluded module.
 
 ## Writer workflow preservation
 
