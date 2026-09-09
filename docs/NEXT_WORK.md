@@ -208,6 +208,16 @@ The regression is
    timeouts belong in the characterization set; 30 successes is merely a
    suggestion threshold, not tail-latency qualification.
 
+6. **Canonical Ollama GPU boundary qualification.** Ollama snap 0.32.14's
+   canonical `snap.ollama.listener.service` can discover the RTX 5060 Ti through
+   `cuda_v13`, but parallel invocations are moved into transient snap scopes and
+   discover CPU only—even with the same AppArmor label and an isolated network
+   namespace. Forced `cuda_v12` is specifically disqualified (`size_vram=0`).
+   Qualify the production tag/context through canonical `11434` under a bounded
+   production-resource change, or replace the snap deployment with a separately
+   qualified Ollama service boundary. Do not treat successful CPU controls as
+   evidence for the GPU route.
+
 6. **Open fictional ontology — base protections shipped; richer classification
    deferred.** The canon
    authority boundary (see `RELIABILITY.md`) refuses an interpretation as a
@@ -534,6 +544,11 @@ deterministic qualification and synthetic behavioral fuzzing.
 - A declared context window is trusted as configured. Marginalia does not
   discover a model's real window, so a wrong or absent `context_window_tokens`
   still permits an oversized launch that only the provider can reject.
+- The enrolled Orion route is retained but not production-ready: full-path CPU
+  controls pass, while strict snap service/device custody prevents an isolated
+  parallel process from reproducing canonical GPU access. Production generation
+  remains paused until `11434` reports nonzero VRAM for the exact tag/context or
+  another deployment boundary is explicitly qualified.
 - Maintenance progress is process-local, but startup now reconciles it: a
   bounded number of sessions whose durable checkpoint is ahead of their summary
   are rescheduled when the application starts, so a container replacement

@@ -80,20 +80,20 @@ request provider-side storage and contains no response/job identifier that the
 provider contract can retrieve. It remains `outcome_unknown` unless new
 authoritative evidence appears; it was not and must not be redispatched.
 
-The later repair campaign completed one capped Anthropic generation through the
-full custody and application-acceptance path; its terminal receipt is recorded
-in `PRODUCTION-PROVIDER-REPAIR-2026-09-08.md`. Kimi command qualification remains
-pending the operator-reported subscription reset. No substitute model or
-credential was used for either route.
+The later repair campaign completed capped Anthropic and Kimi generations
+through the full custody and application-acceptance path; their terminal
+receipts are recorded in `PRODUCTION-PROVIDER-REPAIR-2026-09-08.md`. No
+substitute model or validation API credential was used for either route.
 
 ## Remaining decisions
 
-1. Decide whether to qualify a CPU-only Orion configuration at the intended
-   production context, or adopt the tested 4,096-token ceiling and its
-   performance tradeoff. This is an operator-visible production behavior change.
+1. Qualify Orion through the canonical snap service boundary at root `11434`,
+   or select a different explicitly qualified Ollama deployment boundary.
+   Parallel snap invocations run in transient scopes and discovered CPU only;
+   they cannot substantiate Erin's GPU route.
 2. Reconcile the preserved OpenAI dispatch if provider evidence later makes that
    possible; never redispatch it under the same logical attempt.
 3. Diagnose why the authenticated Moonshot catalog does not advertise the
    configured `kimi-k3` model before claiming that API route ready.
-4. Run bounded Anthropic and post-reset Kimi live qualification when execution
-   is available. Validation-only API keys remain prohibited from production.
+4. Keep all validation-only API keys prohibited from production; the terminal
+   Anthropic and command-backed Kimi receipts do not enroll those API routes.
