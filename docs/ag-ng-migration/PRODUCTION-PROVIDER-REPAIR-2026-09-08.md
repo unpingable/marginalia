@@ -120,6 +120,33 @@ check; plaintext was removed. Canonical Ollama remained active, responsive, and
 idle afterward, so it was not restarted. Production Marginalia remained on its
 prior image with both projects paused.
 
+### Owning-layer follow-up — 2026-09-09
+
+The earlier host RM/GSP initialization failure is classified as **transient**.
+Physical-memory fragmentation is a plausible explanation, because the failure
+coincided with `NV_ERR_NO_MEMORY` while the Normal zone had no free blocks at
+order 6 or higher, but causation is **not established**. No memory compaction,
+module reload, service restart, or reboot was performed.
+
+At 19:27 UTC a fresh idle preflight again enumerated the exact RTX 5060 Ti and
+reported 16,311 MiB total / 15,845 MiB free with no compute processes. Canonical
+Ollama 0.32.14 was active, responsive, and had no loaded models. Exactly one
+bounded host CUDA driver-API probe then produced:
+
+- `cuInit=0`, device-count query `=0` with one device, and device lookup `=0`;
+- `cuCtxCreate_v2=2` (`CUDA_ERROR_OUT_OF_MEMORY`);
+- no `cuMemGetInfo`, device allocation, or free was attempted after that
+  context-creation failure.
+
+The post-probe check still enumerated the same GPU with 15,845 MiB free, no
+compute processes, and an active/idle canonical Ollama service. The narrow
+kernel window added no `NV_ERR_NO_MEMORY`, GSP, or Xid entry; it contained only
+the already-observed `kbifInitLtr_GB202` warning. This establishes the current
+boundary as **working NVML enumeration but failed CUDA context creation**, not
+ordinary reported-VRAM exhaustion. Per the stop condition, no small-model
+Ollama canary and no Orion/Marginalia dispatch followed. Production remains
+unchanged and Generation remains paused.
+
 ## Provider catalog
 
 Authenticated, non-generating Moonshot discovery returned only

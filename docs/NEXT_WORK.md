@@ -221,6 +221,13 @@ The regression is
    replace the snap deployment with a separately qualified service. Do not
    treat successful CPU controls as evidence for the GPU route.
 
+   A later host check showed that the RM/GSP enumeration failure was transient:
+   `nvidia-smi` again reported the RTX 5060 Ti with 15,845 MiB free. However, one
+   bounded host CUDA probe then failed `cuCtxCreate_v2` with
+   `CUDA_ERROR_OUT_OF_MEMORY` before any allocation. Physical-memory
+   fragmentation remains plausible but unproven. No model canary or Orion retry
+   is permitted until a fresh host CUDA context and allocation/free both pass.
+
 6. **Open fictional ontology — base protections shipped; richer classification
    deferred.** The canon
    authority boundary (see `RELIABILITY.md`) refuses an interpretation as a
