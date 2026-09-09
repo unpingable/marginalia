@@ -165,6 +165,7 @@ def message_accounting(
     inference: str | None = None,
     input_cost_per_million_usd: float | None = None,
     output_cost_per_million_usd: float | None = None,
+    execution_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build honest per-message usage and provider-cost presentation data."""
     observed = observed_from_normalized_usage(usage)
@@ -187,9 +188,15 @@ def message_accounting(
             + observed.completion_tokens * output_cost_per_million_usd
         ) / 1_000_000
         cost_note = "Estimated from configured token rates; provider billing remains authoritative."
+    identity = execution_identity or {}
     return {
         "provider_id": provider_id,
         "model_id": model_id,
+        "configured_provider_id": identity.get("configured_provider_id", provider_id),
+        "configured_model_id": identity.get("configured_model_id", model_id),
+        "observed_provider_id": identity.get("observed_provider_id"),
+        "observed_model_id": identity.get("observed_model_id"),
+        "observed_identity_status": identity.get("observed_status", "unavailable"),
         "estimated_prompt_tokens": estimated_prompt_tokens,
         "reported_prompt_tokens": observed.prompt_tokens,
         "reported_completion_tokens": observed.completion_tokens,

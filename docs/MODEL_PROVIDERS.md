@@ -57,6 +57,7 @@ actually configured or verified:
           "label": "Writer",
           "purpose": "writing",
           "context_window_tokens": 32768,
+          "max_output_tokens": 4096,
           "token_safety_multiplier": 1.1,
           "pricing": {
             "input_per_million_usd": 0,
@@ -93,9 +94,33 @@ become shell or caller-selected argv.
 writing model. Model IDs are stable application choices; upstream model names
 are separate.
 
+An operator may retain a temporarily unsupported selection in the writer-facing
+catalog without enrolling a dispatch route:
+
+```json
+{
+  "id": "kimi-k3",
+  "model": "kimi-k3",
+  "label": "Kimi K3",
+  "availability": "unavailable",
+  "unavailable_reason": "Configured model is unavailable for this account."
+}
+```
+
+The reason is bounded, printable operator text and must not contain credential
+material. The selection remains visible and disabled; a direct API request is
+refused before authorization or dispatch. Removing the provider from the
+catalog is not the mechanism for reporting temporary unavailability.
+
 Configured context ceilings, discovery evidence, and observed successful prompt
 sizes are different facts. A successful prompt establishes only a tested lower
 bound. Never describe it as the provider maximum.
+
+`max_output_tokens` is the configured HTTP-provider output ceiling (default 4,096)
+and becomes part of the immutable physical-dispatch request.
+Command adapters have their own fixed arguments and may not expose a token cap;
+their bounded process deadline and captured-byte ceiling are therefore reported
+as backend limitations rather than mislabeled as a token limit.
 
 ## Create identities and policy
 
@@ -142,8 +167,12 @@ Parser success alone is insufficient.
 ## Writer-facing selection and status
 
 Configured writing models appear in the conversation selector grouped by local
-or hosted model and local or subscription agent. The selected actual model and
-route are frozen into each dispatch and displayed with the result.
+or hosted model and local or subscription agent. The configured selection and
+route are frozen into each dispatch and displayed with the result. They are not
+promoted into physical-execution evidence. Provider-returned model identity is
+recorded separately when present. Command tools that do not attest the physical
+provider/model are displayed as **Observed provider/model unavailable**, even
+though their configured selection remains known.
 
 Usage is reported as provider-reported, normalized, or unavailable. Cost is:
 

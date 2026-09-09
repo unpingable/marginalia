@@ -136,6 +136,11 @@ class AgProviderGateway:
         if not isinstance(payload, dict) or set(payload) != {"context_id", "messages", "model"}:
             raise ExecutorError("frozen provider request does not have the exact v1 shape")
         model = self.catalog.resolve(payload["model"])
+        configured_unavailable = model.availability_error(include_runtime=False)
+        if configured_unavailable:
+            raise ExecutorError(
+                f"configured provider model is unavailable: {configured_unavailable}"
+            )
         messages = payload["messages"]
         if not isinstance(messages, list) or not messages:
             raise ExecutorError("frozen provider request has no messages")
@@ -151,7 +156,12 @@ class AgProviderGateway:
         if model.protocol == "openai-compatible":
             return (
                 model,
-                {"model": model.model_id, "messages": normalized, "stream": False},
+                {
+                    "model": model.model_id,
+                    "messages": normalized,
+                    "stream": False,
+                    "max_tokens": model.max_output_tokens,
+                },
                 "chat.completions.create",
             )
         if model.protocol == "anthropic-messages":
@@ -159,7 +169,7 @@ class AgProviderGateway:
             body: dict[str, Any] = {
                 "model": model.model_id,
                 "messages": [item for item in normalized if item["role"] != "system"],
-                "max_tokens": 4096,
+                "max_tokens": model.max_output_tokens,
                 "stream": False,
             }
             if not body["messages"]:
@@ -201,12 +211,22 @@ class AgProviderGateway:
             raise ProviderOutcomeUnknown("provider response body is not canonical UTF-8") from exc
 
         transaction_model = self.catalog.resolve(selected_model)
-        content, usage = self._parse_body(transaction_model, body)
+        content, usage, observed = self._parse_body(transaction_model, body)
         return {
             "outcome": "authored",
             "content": content,
             "model": transaction_model.id,
             "usage": usage,
+            # Selection and observation are deliberately different facts.  In
+            # particular, a command adapter's configured model argument is not
+            # evidence of which physical model the external tool actually ran.
+            "execution_identity": {
+                "configured_provider_id": transaction_model.provider_id,
+                "configured_model_id": transaction_model.model_id,
+                "observed_provider_id": observed.get("provider_id"),
+                "observed_model_id": observed.get("model_id"),
+                "observed_status": observed["status"],
+            },
             "receipt": {
                 "receipt_id": exact,
                 "authority": "ag-ng",
@@ -215,23 +235,37 @@ class AgProviderGateway:
         }
 
     @staticmethod
-    def _parse_body(model: ConfiguredModel, body: str) -> tuple[str, dict[str, int]]:
+    def _parse_body(
+        model: ConfiguredModel, body: str
+    ) -> tuple[str, dict[str, int], dict[str, str | None]]:
         if model.protocol == "openai-compatible":
             try:
                 data = json.loads(body)
                 choice = data["choices"][0]
                 content = choice["message"]["content"]
                 usage_raw = data.get("usage") or {}
-                if data.get("model", model.model_id) != model.model_id or not isinstance(
-                    content, str
-                ):
+                observed_model = data.get("model")
+                observed_provider = data.get("provider") or data.get("provider_id")
+                if observed_model is not None and observed_model != model.model_id:
+                    raise TypeError
+                if not isinstance(content, str):
                     raise TypeError
                 usage = _usage(
                     usage_raw.get("prompt_tokens", 0), usage_raw.get("completion_tokens", 0)
                 )
             except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise ProviderOutcomeUnknown("provider returned malformed chat completion") from exc
-            return content, usage
+            return (
+                content,
+                usage,
+                {
+                    "provider_id": (
+                        observed_provider if isinstance(observed_provider, str) else None
+                    ),
+                    "model_id": observed_model if isinstance(observed_model, str) else None,
+                    "status": "attested" if isinstance(observed_model, str) else "unavailable",
+                },
+            )
         if model.protocol == "anthropic-messages":
             try:
                 data = json.loads(body)
@@ -250,7 +284,17 @@ class AgProviderGateway:
                 ) from exc
             if not content:
                 raise ProviderOutcomeUnknown("provider returned no authored text")
-            return content, usage
+            return (
+                content,
+                usage,
+                {
+                    # Anthropic's Messages response attests its model but does
+                    # not carry a physical-provider identity field.
+                    "provider_id": None,
+                    "model_id": data["model"],
+                    "status": "attested",
+                },
+            )
         if model.command and model.command.adapter == "claude-code":
             try:
                 data = json.loads(body)
@@ -263,13 +307,23 @@ class AgProviderGateway:
                 content = data["result"]
                 raw = data.get("usage") or {}
                 usage = _usage(raw.get("input_tokens", 0), raw.get("output_tokens", 0))
+                observed_model = data.get("model")
             except (KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise ProviderOutcomeUnknown("Claude Code returned malformed output") from exc
             if not isinstance(content, str) or not content:
                 raise ProviderOutcomeUnknown("Claude Code returned no authored text")
-            return content, usage
+            return (
+                content,
+                usage,
+                {
+                    "provider_id": None,
+                    "model_id": observed_model if isinstance(observed_model, str) else None,
+                    "status": "attested" if isinstance(observed_model, str) else "unavailable",
+                },
+            )
         messages: list[str] = []
         prompt_tokens = completion_tokens = 0
+        observed_model: str | None = None
         for line in body.splitlines():
             try:
                 event = json.loads(line)
@@ -280,6 +334,8 @@ class AgProviderGateway:
                     value = event.get("content")
                     if isinstance(value, str):
                         messages.append(value)
+                if isinstance(event, dict) and isinstance(event.get("model"), str):
+                    observed_model = event["model"]
             elif isinstance(event, dict):
                 item = event.get("item")
                 if event.get("type") == "item.completed" and isinstance(item, dict):
@@ -291,7 +347,15 @@ class AgProviderGateway:
                     completion_tokens = _nonnegative_int(raw.get("output_tokens", 0))
         if not messages:
             raise ProviderOutcomeUnknown("command provider returned no authored text")
-        return messages[-1], _usage(prompt_tokens, completion_tokens)
+        return (
+            messages[-1],
+            _usage(prompt_tokens, completion_tokens),
+            {
+                "provider_id": None,
+                "model_id": observed_model,
+                "status": "attested" if observed_model is not None else "unavailable",
+            },
+        )
 
     def _invoke(
         self, operation: str, document: dict[str, Any], *, timeout: float

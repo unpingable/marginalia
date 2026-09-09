@@ -683,6 +683,14 @@ def _resolve_configured_model(
         # means web-process environment inspection cannot establish transport
         # availability.
         model = catalog.resolve(requested_model)
+        unavailable = model.availability_error(include_runtime=False)
+        if unavailable:
+            raise ProviderError(
+                "configured_model_unavailable",
+                unavailable,
+                provider_id=model.provider_id,
+                model_id=model.model_id,
+            )
     except ProviderConfigurationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ProviderError as exc:
@@ -697,11 +705,19 @@ def _message_accounting(
     provider_id: str,
     usage: dict[str, int],
     estimated_prompt_tokens: int | None = None,
+    execution_identity: dict[str, Any] | None = None,
     *,
     latency_ms: float | None = None,
 ) -> dict[str, Any]:
     catalog = _configured_provider_catalog()
     identity = catalog.resolve(configured_model) if catalog is not None else None
+    if execution_identity is not None:
+        expected_model = identity.model_id if identity is not None else configured_model
+        if (
+            execution_identity.get("configured_provider_id") != provider_id
+            or execution_identity.get("configured_model_id") != expected_model
+        ):
+            raise ValueError("provider evidence identity differs from the frozen dispatch")
     result = message_accounting(
         provider_id=provider_id,
         model_id=identity.model_id if identity is not None else configured_model,
@@ -715,6 +731,7 @@ def _message_accounting(
         output_cost_per_million_usd=(
             identity.output_cost_per_million_usd if identity is not None else None
         ),
+        execution_identity=execution_identity,
     )
     telemetry_logger.info("accepted_message_accounting %s", json.dumps(result))
     return result
@@ -980,7 +997,7 @@ async def list_models() -> ModelList:
                 default_model=catalog.default_model,
                 data=[
                     ModelInfo(
-                        **{**model.public_dict(), "available": True},
+                        **model.public_dict(include_runtime=False),
                         owned_by=model.provider_id,
                     )
                     for model in catalog.models
@@ -1008,7 +1025,7 @@ async def get_model(model_id: str) -> ModelInfo:
         if model.purpose != "writing":
             raise HTTPException(status_code=404, detail=f"model {model_id!r} is not exposed")
         return ModelInfo(
-            **{**model.public_dict(), "available": True},
+            **model.public_dict(include_runtime=False),
             owned_by=model.provider_id,
         )
     raise HTTPException(
@@ -2732,6 +2749,7 @@ def _commit_authored_turn(
                 outcome.usage,
                 estimated_prompt_tokens=estimated_prompt_tokens,
                 latency_ms=latency_ms,
+                execution_identity=outcome.execution_identity,
             )
             if model_identity
             else None

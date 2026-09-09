@@ -191,6 +191,49 @@ def test_missing_credential_refused_without_substitution(tmp_path: Path) -> None
     assert catalog.resolve("local-model").provider_id == "local"
 
 
+def test_operator_unavailable_model_stays_visible_and_never_dispatches(tmp_path: Path) -> None:
+    path = write_config(tmp_path / "providers.json")
+    config = json.loads(path.read_text(encoding="utf-8"))
+    model = config["providers"][2]["models"][0]
+    model["availability"] = "unavailable"
+    model["unavailable_reason"] = "Configured model is unavailable for this account."
+    path.write_text(json.dumps(config), encoding="utf-8")
+    catalog = load_provider_catalog(path)
+    configured = catalog.resolve("remote-model")
+
+    public = configured.public_dict(include_runtime=False)
+    assert public["available"] is False
+    assert public["unavailable_reason"] == model["unavailable_reason"]
+    with pytest.raises(ProviderError) as caught:
+        catalog.require_available("remote-model", environ={"REMOTE_TEST_KEY": "present"})
+    assert caught.value.code == "configured_model_unavailable"
+
+
+@pytest.mark.parametrize(
+    "availability, reason, expected",
+    [
+        ("unavailable", None, "unavailable_reason"),
+        ("enabled", "not allowed", "requires availability"),
+        ("unknown", None, "availability must"),
+        ("unavailable", "x" * 241, "at most 240"),
+        ("unavailable", "unsafe\nreason", "printable"),
+    ],
+)
+def test_operator_unavailable_shape_is_strict(
+    tmp_path: Path, availability: str, reason: str | None, expected: str
+) -> None:
+    path = write_config(tmp_path / "providers.json")
+    config = json.loads(path.read_text(encoding="utf-8"))
+    model = config["providers"][2]["models"][0]
+    model["availability"] = availability
+    if reason is not None:
+        model["unavailable_reason"] = reason
+    path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(ProviderConfigurationError, match=expected):
+        load_provider_catalog(path)
+
+
 def test_anthropic_configuration_requires_credential_variable(tmp_path: Path) -> None:
     path = write_config(tmp_path / "providers.json")
     config = json.loads(path.read_text(encoding="utf-8"))
@@ -997,3 +1040,23 @@ def test_deployment_may_still_declare_a_tighter_read_bound(tmp_path: Path) -> No
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     assert load_provider_catalog(path).resolve("local-model").read_timeout_seconds == 120
+
+
+def test_catalog_freezes_a_bounded_provider_output_ceiling(tmp_path: Path) -> None:
+    path = tmp_path / "providers.json"
+    payload = json.loads(write_config(path).read_text(encoding="utf-8"))
+    payload["providers"][1]["models"][0]["max_output_tokens"] = 32
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert load_provider_catalog(path).resolve("local-model").max_output_tokens == 32
+
+
+@pytest.mark.parametrize("value", [0, 32_769, True, "32"])
+def test_invalid_provider_output_ceiling_is_refused(tmp_path: Path, value: object) -> None:
+    path = tmp_path / "providers.json"
+    payload = json.loads(write_config(path).read_text(encoding="utf-8"))
+    payload["providers"][1]["models"][0]["max_output_tokens"] = value
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ProviderConfigurationError, match="max_output_tokens"):
+        load_provider_catalog(path)

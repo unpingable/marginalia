@@ -11,6 +11,7 @@ import pytest
 
 from gov_webui.ag_provider_config import render_provider_configs
 from gov_webui.generation_secrets import create_provider_rpc_identities
+from gov_webui.model_providers import load_provider_catalog
 
 
 def _write_catalog(path: Path, providers: list[dict[str, object]]) -> None:
@@ -300,3 +301,43 @@ def test_production_shaped_catalog_preserves_all_transport_routes(tmp_path: Path
     }
     assert endpoints["claude"]["transport"]["kind"] == "command"
     assert endpoints["claude"]["transport"]["command"]["adapter"] == "claude-code"
+
+
+def test_explicitly_unavailable_model_is_not_enrolled_for_dispatch(tmp_path: Path) -> None:
+    secrets = tmp_path / "secrets"
+    _, _, metadata = create_provider_rpc_identities(secrets)
+    models = tmp_path / "providers.json"
+    _write_catalog(
+        models,
+        [
+            {
+                "id": "available",
+                "protocol": "openai-compatible",
+                "base_url": "https://available.invalid/v1",
+                "api_key_env": "AVAILABLE_KEY",
+                "models": [{"id": "writer", "model": "writer", "label": "Writer"}],
+            },
+            {
+                "id": "moonshot",
+                "protocol": "openai-compatible",
+                "base_url": "https://api.moonshot.invalid/v1",
+                "api_key_env": "MOONSHOT_KEY",
+                "models": [
+                    {
+                        "id": "kimi-k3",
+                        "model": "kimi-k3",
+                        "label": "Kimi K3",
+                        "availability": "unavailable",
+                        "unavailable_reason": "Configured model is unavailable for this account.",
+                    }
+                ],
+            },
+        ],
+    )
+
+    daemon, _ = render_provider_configs(models, metadata)
+    endpoints = {item["id"]: item for item in tomllib.loads(daemon)["endpoints"]}
+
+    assert set(endpoints) == {"available"}
+    catalog = load_provider_catalog(models)
+    assert catalog.resolve("kimi-k3").public_dict(include_runtime=False)["available"] is False

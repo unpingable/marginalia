@@ -14,6 +14,12 @@ it read-only. Providerd has a separate state volume and shares only its Unix
 socket with the worker. A Docker-managed NFS volume (recommended) or host bind
 is mounted at `/backups`; no backup operation rewrites the live data volume.
 
+For container diagnosis, use `./provider-inspect.sh CONTAINER...`. It reports
+only the image identity, lifecycle/health state, restart count, runtime, and
+mount destinations with their write flags. It deliberately omits the full
+container environment, mount sources, labels, and configuration JSON. Never use
+an unrestricted `docker inspect` or environment dump in qualification records.
+
 ## Configure the backup destination
 
 Copy `.env.example` to the untracked `.env` and configure the NFS export:

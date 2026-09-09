@@ -28,6 +28,7 @@ _PROTOCOLS = {
 }
 _COMMAND_ADAPTERS = {"claude-code", "kimi-code"}
 _MODEL_PURPOSES = {"writing", "context-maintenance"}
+_AVAILABILITY_STATES = {"enabled", "unavailable"}
 
 # Protocols where Marginalia drives an agent process rather than calling a model
 # endpoint. The parser forbids `api_key_env` on both, so an agent's credential is
@@ -115,6 +116,9 @@ class ConfiguredModel:
     inference: str = "hosted"
     input_cost_per_million_usd: float | None = None
     output_cost_per_million_usd: float | None = None
+    max_output_tokens: int = 4096
+    availability: str = "enabled"
+    configured_unavailable_reason: str | None = None
 
     @property
     def kind(self) -> str:
@@ -143,7 +147,16 @@ class ConfiguredModel:
     def category_label(self) -> str:
         return _CATEGORY_LABELS[self.category]
 
-    def availability_error(self, environ: Mapping[str, str] | None = None) -> str | None:
+    def availability_error(
+        self,
+        environ: Mapping[str, str] | None = None,
+        *,
+        include_runtime: bool = True,
+    ) -> str | None:
+        if self.availability == "unavailable":
+            return self.configured_unavailable_reason
+        if not include_runtime:
+            return None
         env = os.environ if environ is None else environ
         if self.api_key_env and not env.get(self.api_key_env):
             return f"required credential environment variable {self.api_key_env} is not set"
@@ -166,8 +179,13 @@ class ConfiguredModel:
                 return "configured command working directory is unavailable"
         return None
 
-    def public_dict(self, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
-        unavailable = self.availability_error(environ)
+    def public_dict(
+        self,
+        environ: Mapping[str, str] | None = None,
+        *,
+        include_runtime: bool = True,
+    ) -> dict[str, Any]:
+        unavailable = self.availability_error(environ, include_runtime=include_runtime)
         result: dict[str, Any] = {
             "id": self.id,
             "label": self.label,
@@ -239,7 +257,13 @@ class ProviderCatalog:
         unavailable = model.availability_error(environ)
         if unavailable:
             raise ProviderError(
-                "missing_credential" if model.api_key_env else "unavailable_command",
+                (
+                    "configured_model_unavailable"
+                    if model.availability == "unavailable"
+                    else "missing_credential"
+                    if model.api_key_env
+                    else "unavailable_command"
+                ),
                 unavailable,
                 provider_id=model.provider_id,
                 model_id=model.model_id,
@@ -483,10 +507,13 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                     "id",
                     "model",
                     "label",
+                    "availability",
+                    "unavailable_reason",
                     "purpose",
                     "tokenizer_encoding",
                     "token_safety_multiplier",
                     "context_window_tokens",
+                    "max_output_tokens",
                     "pricing",
                 },
                 model_location,
@@ -496,6 +523,29 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                 raise ProviderConfigurationError(f"duplicate configured model id {configured_id!r}")
             configured_ids.add(configured_id)
             label = _required_string(model.get("label"), f"{model_location}.label")
+            availability = _required_string(
+                model.get("availability", "enabled"), f"{model_location}.availability"
+            )
+            if availability not in _AVAILABILITY_STATES:
+                raise ProviderConfigurationError(
+                    f"{model_location}.availability must be 'enabled' or 'unavailable'"
+                )
+            raw_unavailable_reason = model.get("unavailable_reason")
+            configured_unavailable_reason: str | None = None
+            if availability == "unavailable":
+                configured_unavailable_reason = _required_string(
+                    raw_unavailable_reason, f"{model_location}.unavailable_reason"
+                )
+                if len(configured_unavailable_reason) > 240 or any(
+                    ord(character) < 32 for character in configured_unavailable_reason
+                ):
+                    raise ProviderConfigurationError(
+                        f"{model_location}.unavailable_reason must be at most 240 printable characters"
+                    )
+            elif raw_unavailable_reason is not None:
+                raise ProviderConfigurationError(
+                    f"{model_location}.unavailable_reason requires availability='unavailable'"
+                )
             purpose = _required_string(model.get("purpose", "writing"), f"{model_location}.purpose")
             if purpose not in _MODEL_PURPOSES:
                 raise ProviderConfigurationError(
@@ -531,6 +581,16 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                         f"{model_location}.context_window_tokens must be between 1000 and 10000000"
                     )
                 context_window_tokens = raw_window
+
+            max_output_tokens = model.get("max_output_tokens", 4096)
+            if (
+                isinstance(max_output_tokens, bool)
+                or not isinstance(max_output_tokens, int)
+                or not 1 <= max_output_tokens <= 32_768
+            ):
+                raise ProviderConfigurationError(
+                    f"{model_location}.max_output_tokens must be between 1 and 32768"
+                )
 
             pricing = model.get("pricing")
             input_cost: float | None = None
@@ -593,6 +653,9 @@ def load_provider_catalog(path: str | Path) -> ProviderCatalog:
                     inference=inference,
                     input_cost_per_million_usd=input_cost,
                     output_cost_per_million_usd=output_cost,
+                    max_output_tokens=max_output_tokens,
+                    availability=availability,
+                    configured_unavailable_reason=configured_unavailable_reason,
                 )
             )
 

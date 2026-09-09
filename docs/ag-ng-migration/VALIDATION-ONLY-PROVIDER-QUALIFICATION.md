@@ -15,9 +15,14 @@ acceptance record.
   identities, runtime, provider-work, and provider-state directories.
 - The daemon was removed after the bounded checks, unmounting all three
   validation-only credentials. Production remained paused and unchanged.
-- Preserved evidence and state are rooted at
-  `/tmp/marginalia-livequal-20260908.KUwgIJ`. That root includes one unresolved
-  OpenAI custody record and must not be deleted as routine temporary cleanup.
+- The complete stopped qualification tree formerly under `/tmp` is now held in
+  the established encrypted NAS evidence boundary at
+  `/tank/nfs/marginalia/ag-ng-migration/qualification/production-provider-repair-20260908`.
+  Its encrypted archive SHA-256 is
+  `559e7bae8653114dc1841e411187e6e5d9ff61214d09e3a3dd29d6bb950704b6`.
+  A restore with the separately held recovery key reproduced all 16 file hashes
+  and passed SQLite integrity checking. The plaintext temporary tree was then
+  removed.
 
 ## Orion
 
@@ -56,7 +61,7 @@ container without printing credential material:
 | --- | --- | --- |
 | OpenAI | HTTP 200; 127 models returned | `gpt-5.4` present |
 | Anthropic | HTTP 200; 11 models returned | `claude-sonnet-5` present |
-| Moonshot | HTTP 200; 2 models returned | `kimi-k3` absent |
+| Moonshot | HTTP 200; 2 models returned | `kimi-k3` absent; account advertised `kimi-k2.7-code` and `kimi-k2.6` |
 
 The Moonshot result establishes authentication/connectivity only. It neither
 establishes balance nor qualifies a generation, and the configured-model
@@ -68,14 +73,18 @@ reconciliation. It was not retried and must not be treated as safe to retry:
 
 `sha256:777c94a517232f88eaf239ad58a42da8234234db7c89794dc6e9025ca7a06248`
 
-The record contains reservation/custody evidence but no completion. Removing
-the daemon stopped credential exposure; the independent state was preserved so
-the unknown outcome is not rewritten as failure or success.
+The record contains reservation/custody evidence but no completion. A read-only
+`fetch_inference` against the preserved daemon state, with no API credential
+mounted, returned `indeterminate`. The frozen Chat Completions request did not
+request provider-side storage and contains no response/job identifier that the
+provider contract can retrieve. It remains `outcome_unknown` unless new
+authoritative evidence appears; it was not and must not be redispatched.
 
-No Anthropic generation was executed in this pass. External execution was
-unavailable after the authenticated catalog check. Kimi command qualification
-also remains pending the operator-reported subscription reset. No substitute
-model or credential was used for either route.
+The later repair campaign completed one capped Anthropic generation through the
+full custody and application-acceptance path; its terminal receipt is recorded
+in `PRODUCTION-PROVIDER-REPAIR-2026-09-08.md`. Kimi command qualification remains
+pending the operator-reported subscription reset. No substitute model or
+credential was used for either route.
 
 ## Remaining decisions
 

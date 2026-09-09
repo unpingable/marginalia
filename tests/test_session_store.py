@@ -67,6 +67,11 @@ def test_previous_image_rewrite_reconstructs_only_proven_accounting() -> None:
     assert message.accounting == {
         "provider_id": "provider-a",
         "model_id": "upstream-a",
+        "configured_provider_id": "provider-a",
+        "configured_model_id": "upstream-a",
+        "observed_provider_id": None,
+        "observed_model_id": None,
+        "observed_identity_status": "unavailable",
         "estimated_prompt_tokens": None,
         "reported_prompt_tokens": 7,
         "reported_completion_tokens": 3,

@@ -39,6 +39,7 @@ class AuthoredGeneration:
     model: str
     usage: dict[str, int]
     receipt: dict[str, Any]
+    execution_identity: dict[str, Any] | None = None
     footer: str | None = None
 
 
@@ -101,11 +102,42 @@ def classify_daemon_result(
     if footer is not None and not isinstance(footer, str):
         raise InvalidGenerationResult("governor returned a malformed status footer")
 
+    execution_identity = result.get("execution_identity")
+    if execution_identity is not None:
+        if not isinstance(execution_identity, dict):
+            raise InvalidGenerationResult("provider returned malformed execution identity")
+        required = {
+            "configured_provider_id",
+            "configured_model_id",
+            "observed_provider_id",
+            "observed_model_id",
+            "observed_status",
+        }
+        if set(execution_identity) != required:
+            raise InvalidGenerationResult("provider returned malformed execution identity")
+        if execution_identity["observed_status"] not in {"attested", "unavailable"}:
+            raise InvalidGenerationResult("provider returned malformed execution identity")
+        for name in {"configured_provider_id", "configured_model_id"}:
+            if not isinstance(execution_identity[name], str) or not execution_identity[name]:
+                raise InvalidGenerationResult("provider returned malformed execution identity")
+        for name in {"observed_provider_id", "observed_model_id"}:
+            if execution_identity[name] is not None and not isinstance(
+                execution_identity[name], str
+            ):
+                raise InvalidGenerationResult("provider returned malformed execution identity")
+        if (
+            execution_identity["observed_status"] == "attested"
+            and execution_identity["observed_provider_id"] is None
+            and execution_identity["observed_model_id"] is None
+        ):
+            raise InvalidGenerationResult("provider returned malformed execution identity")
+
     return AuthoredGeneration(
         outcome="authored",
         content=content,
         model=model,
         usage=usage,
         receipt=receipt,
+        execution_identity=execution_identity,
         footer=footer,
     )

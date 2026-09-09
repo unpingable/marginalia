@@ -34,6 +34,15 @@ def test_retired_test_inventory_has_an_audited_crosswalk() -> None:
         assert f"{baseline_cases}" in crosswalk
 
 
+def test_operational_inspection_helper_never_dumps_secret_bearing_fields() -> None:
+    helper = (REPO_ROOT / "provider-inspect.sh").read_text(encoding="utf-8")
+
+    assert "docker inspect --format" in helper
+    assert ".Config.Env" not in helper
+    assert ".Mounts}}{{json .Source" not in helper
+    assert "{{json .Destination}}" in helper
+
+
 def test_sync_stages_the_complete_qualified_ag_distribution(tmp_path: Path) -> None:
     probe = tmp_path / "marginalia-source"
     probe.mkdir()

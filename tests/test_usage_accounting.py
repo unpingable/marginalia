@@ -245,6 +245,27 @@ def test_accounting_without_an_estimate_still_records_cost() -> None:
     assert payload["observed_cost_usd"] == 0.0466262
 
 
+def test_accounting_separates_configured_and_observed_identity() -> None:
+    payload = message_accounting(
+        provider_id="command-route",
+        model_id="configured-label",
+        usage={},
+        execution_identity={
+            "configured_provider_id": "command-route",
+            "configured_model_id": "configured-label",
+            "observed_provider_id": None,
+            "observed_model_id": None,
+            "observed_status": "unavailable",
+        },
+    )
+
+    assert payload["configured_provider_id"] == "command-route"
+    assert payload["configured_model_id"] == "configured-label"
+    assert payload["observed_provider_id"] is None
+    assert payload["observed_model_id"] is None
+    assert payload["observed_identity_status"] == "unavailable"
+
+
 def test_message_cost_is_estimated_only_from_explicit_rates() -> None:
     payload = message_accounting(
         provider_id="gateway",

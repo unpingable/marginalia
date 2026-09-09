@@ -795,7 +795,10 @@
       // itself. Ungrouped entries (a catalog without the taxonomy) stay flat.
       const groups = new Map();
       state.models.forEach((model) => {
-        const option = new Option(model.label || model.id, model.id);
+        const optionLabel = model.available === false
+          ? `${model.label || model.id} — unavailable`
+          : (model.label || model.id);
+        const option = new Option(optionLabel, model.id);
         option.disabled = model.available === false;
         if (model.unavailable_reason) option.title = model.unavailable_reason;
         const key = model.category || "";
@@ -1484,7 +1487,7 @@
       const label = document.createElement("div");
       label.className = "message-role";
       const identity = provenance?.provider_id && provenance?.model_id
-        ? ` · ${provenance.provider_id} / ${provenance.model_id}`
+        ? ` · configured ${provenance.provider_id} / ${provenance.model_id}`
         : (role === "assistant" && id ? " · model unrecorded" : "");
       label.textContent = role === "assistant" ? `Marginalia${identity}` : "You";
       const body = document.createElement("div");
@@ -1496,6 +1499,9 @@
         const accounting = document.createElement("div");
         accounting.className = "message-accounting";
         const detail = provenance.accounting;
+        const observedIdentity = detail.observed_identity_status === "attested"
+          ? `Observed ${detail.observed_provider_id || "provider unavailable"} / ${detail.observed_model_id || "model unavailable"}`
+          : "Observed provider/model unavailable";
         const tokens = detail.reported_total_tokens == null
           ? "Token usage unavailable"
           : `${Number(detail.reported_total_tokens).toLocaleString()} tokens reported`;
@@ -1506,7 +1512,7 @@
           const digits = Number(detail.cost_usd) < 0.01 ? 4 : 2;
           cost = `Provider cost $${Number(detail.cost_usd).toFixed(digits)} (estimated)`;
         }
-        accounting.textContent = `${tokens} · ${cost}`;
+        accounting.textContent = `${observedIdentity} · ${tokens} · ${cost}`;
         accounting.title = detail.cost_note || "";
         wrapper.append(accounting);
       }

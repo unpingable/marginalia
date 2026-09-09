@@ -95,6 +95,8 @@ def render_provider_configs(
 
     grouped: dict[str, list[ConfiguredModel]] = {}
     for model in catalog.models:
+        if model.availability == "unavailable":
+            continue
         grouped.setdefault(model.provider_id, []).append(model)
 
     daemon = [

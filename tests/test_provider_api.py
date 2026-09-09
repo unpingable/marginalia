@@ -279,6 +279,35 @@ def test_model_api_and_new_session_use_an_available_default(provider_client) -> 
     assert refused.status_code == 200
 
 
+def test_operator_unavailable_model_is_visible_but_disabled(provider_client) -> None:
+    client, adapter = provider_client
+    config_path = Path(adapter.MARGINALIA_MODEL_CONFIG)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    model = config["providers"][1]["models"][0]
+    model["availability"] = "unavailable"
+    model["unavailable_reason"] = "Configured model is unavailable for this account."
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    listed = client.get("/v1/models")
+    assert listed.status_code == 200
+    unavailable = next(item for item in listed.json()["data"] if item["id"] == "fiction-model-b")
+    assert unavailable["available"] is False
+    assert unavailable["unavailable_reason"] == model["unavailable_reason"]
+    detail = client.get("/v1/models/fiction-model-b")
+    assert detail.status_code == 200
+    assert detail.json()["available"] is False
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "fiction-model-b",
+            "messages": [{"role": "user", "content": "Do not dispatch."}],
+        },
+    )
+    assert response.status_code == 503
+    adapter._governed_chat_adapter.chat_send.assert_not_awaited()
+
+
 def test_chat_response_records_exact_configured_identity(provider_client) -> None:
     client, adapter = provider_client
 
@@ -295,6 +324,26 @@ def test_chat_response_records_exact_configured_identity(provider_client) -> Non
     assert response.json()["provider_id"] == "provider-a"
     assert response.json()["model_id"] == "upstream-a"
     assert adapter._governed_chat_adapter.chat_send.await_args.kwargs["model"] == "fiction-model"
+
+
+def test_accounting_refuses_provider_identity_that_differs_from_frozen_selection(
+    provider_client,
+) -> None:
+    _, adapter = provider_client
+
+    with pytest.raises(ValueError, match="frozen dispatch"):
+        adapter._message_accounting(
+            "fiction-model",
+            "provider-a",
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            execution_identity={
+                "configured_provider_id": "substituted-provider",
+                "configured_model_id": "upstream-a",
+                "observed_provider_id": None,
+                "observed_model_id": "upstream-a",
+                "observed_status": "attested",
+            },
+        )
 
 
 def test_unknown_configured_model_refuses_before_generation(provider_client) -> None:

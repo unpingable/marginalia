@@ -41,7 +41,9 @@ def accept_candidate(
     context_root: Path,
     project_id: str,
     candidate_id: str,
-    accounting_resolver: Callable[[str, str, dict[str, int], int | None], dict[str, Any]]
+    accounting_resolver: Callable[
+        [str, str, dict[str, int], int | None, dict[str, Any] | None], dict[str, Any]
+    ]
     | None = None,
     corrected_text: str | None = None,
     continuity_override_reason: str | None = None,
@@ -137,16 +139,24 @@ def accept_candidate(
         )
         if not isinstance(pending_user, str) or not pending_user.strip():
             return _block(generation_store, candidate_id, "frozen request has no user turn")
-        accounting = (
-            accounting_resolver(
-                dispatch.actual_model,
-                dispatch.actual_route,
-                outcome.usage,
-                request.estimated_prompt_tokens,
+        try:
+            accounting = (
+                accounting_resolver(
+                    dispatch.actual_model,
+                    dispatch.actual_route,
+                    outcome.usage,
+                    request.estimated_prompt_tokens,
+                    outcome.execution_identity,
+                )
+                if accounting_resolver
+                else None
             )
-            if accounting_resolver
-            else None
-        )
+        except ValueError:
+            return _block(
+                generation_store,
+                candidate_id,
+                "provider evidence identity differs from the frozen dispatch",
+            )
         messages = [
             SessionMessage.create(role="user", content=pending_user),
             SessionMessage.create(
