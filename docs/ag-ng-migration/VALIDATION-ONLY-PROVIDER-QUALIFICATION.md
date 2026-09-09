@@ -87,10 +87,12 @@ substitute model or validation API credential was used for either route.
 
 ## Remaining decisions
 
-1. Qualify Orion through the canonical snap service boundary at root `11434`,
-   or select a different explicitly qualified Ollama deployment boundary.
-   Parallel snap invocations run in transient scopes and discovered CPU only;
-   they cannot substantiate Erin's GPU route.
+1. Repair the canonical Ollama/cuda-v13 memory-discovery failure at root
+   `11434`, or select a different explicitly qualified Ollama deployment
+   boundary. The one authorized canonical request failed terminally before GPU
+   placement even though NVIDIA reported the GPU free. Parallel snap invocations
+   discovered CPU only; transient-scope device denial remains a hypothesis, not
+   an established cause.
 2. Reconcile the preserved OpenAI dispatch if provider evidence later makes that
    possible; never redispatch it under the same logical attempt.
 3. Diagnose why the authenticated Moonshot catalog does not advertise the

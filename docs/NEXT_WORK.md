@@ -212,11 +212,14 @@ The regression is
    canonical `snap.ollama.listener.service` can discover the RTX 5060 Ti through
    `cuda_v13`, but parallel invocations are moved into transient snap scopes and
    discover CPU only—even with the same AppArmor label and an isolated network
-   namespace. Forced `cuda_v12` is specifically disqualified (`size_vram=0`).
-   Qualify the production tag/context through canonical `11434` under a bounded
-   production-resource change, or replace the snap deployment with a separately
-   qualified Ollama service boundary. Do not treat successful CPU controls as
-   evidence for the GPU route.
+   namespace. The scope difference is observed, but scope-based device denial is
+   only a hypothesis. Forced `cuda_v12` is specifically disqualified
+   (`size_vram=0`). One bounded canonical `11434` request then selected cuda-v13
+   but timed out refreshing GPU memory, reused stale 2.1/2.5 GiB values while
+   NVIDIA reported 15,845 MiB free, and failed `cudaMemGetInfo`/allocation before
+   placing any layer. Repair and requalify the owning Ollama/CUDA boundary, or
+   replace the snap deployment with a separately qualified service. Do not
+   treat successful CPU controls as evidence for the GPU route.
 
 6. **Open fictional ontology — base protections shipped; richer classification
    deferred.** The canon
@@ -545,10 +548,11 @@ deterministic qualification and synthetic behavioral fuzzing.
   discover a model's real window, so a wrong or absent `context_window_tokens`
   still permits an oversized launch that only the provider can reject.
 - The enrolled Orion route is retained but not production-ready: full-path CPU
-  controls pass, while strict snap service/device custody prevents an isolated
-  parallel process from reproducing canonical GPU access. Production generation
-  remains paused until `11434` reports nonzero VRAM for the exact tag/context or
-  another deployment boundary is explicitly qualified.
+  controls pass, while the canonical cuda-v13 route has a definitive
+  memory-discovery/startup failure. Production generation remains paused until
+  `11434` reports nonzero VRAM for the exact tag/context or another deployment
+  boundary is explicitly qualified. The different transient scope is diagnostic
+  evidence, not yet a proven explanation for CPU-only parallel listeners.
 - Maintenance progress is process-local, but startup now reconciles it: a
   bounded number of sessions whose durable checkpoint is ahead of their summary
   are rescheduled when the application starts, so a container replacement

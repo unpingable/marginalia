@@ -43,8 +43,10 @@ An exact `snap run ollama.listener` was also started inside a disposable network
 namespace so it could bind its own `11434`. It had the same
 `snap.ollama.listener` AppArmor label as production, but snap-confine placed it
 in a transient scope rather than the canonical service cgroup and it discovered
-CPU only. This isolates the remaining GPU-access difference to snap's canonical
-service/device custody. The disposable unit and namespace were removed.
+CPU only. The different cgroup/scope is correlated with that result, but device
+denial by the transient scope is only a hypothesis: both processes ran as root,
+used seccomp mode 2, and had the same enforcing AppArmor label. The causal
+mechanism was not established. The disposable unit and namespace were removed.
 
 A separate one-GPU-layer qualification tag was prepared without modifying the
 production tag:
@@ -74,6 +76,49 @@ attempt was retried:
 
 All three encrypted archives passed five-database integrity and separately keyed
 restore checks. Their plaintext trees were removed.
+
+### Canonical `11434` qualification
+
+After separate authorization, exactly one synthetic request used the existing
+canonical listener with no retry, fallback, service restart, configuration
+change, model pull, context reduction, or substitution. Preflight established:
+
+- canonical service active at Ollama 0.32.14 snap revision 131, with `home`,
+  `network`, `network-bind`, and `opengl` interfaces connected;
+- exact tag digest
+  `cc1c59d7d41149d62fff9aeb1a02589d005248f24955bd5d59e6ecd433c66e66`
+  and baked `num_ctx 24576`;
+- zero loaded models on canonical `11434` and the separately known Gutenberg
+  `11436` listener, no NVIDIA compute process, 15,845 MiB host-reported VRAM
+  free, and about 60 GiB RAM available;
+- historical and live runner selection at
+  `/snap/ollama/131/lib/ollama/cuda_v13`.
+
+The request ended in definitive HTTP 500 custody:
+
+- logical request `gen_6ff041365ca44e62bf13d41ff4933a95` (`failed`);
+- dispatch `dsp_890e7b68d5b24bf88628bd72644d8f6a` (`failed`);
+- provider dispatch
+  `sha256:26a83d725aac8bdd7d677c52975c15768d1cdc6319c99758e2f900f94382858e`;
+- exactly one physical dispatch and no candidate or application insertion.
+
+Concurrent journal evidence shows the cuda-v13 GPU-discovery watchdog timing
+out, then Ollama reusing old memory values of 2.1 GiB available / 2.5 GiB free
+while NVIDIA reported 15,845 MiB free. The exact runner launched with
+`-c 24576`, `cudaMemGetInfo` returned 0/0, and a 1,137.77 MiB allocation failed.
+Retrying with the multimodal projector on CPU ended in the same CUDA error.
+Twenty concurrent samples observed only 0--17 MiB nominal GPU use, no compute
+application, no loaded canonical model, and no activity on the known `11436`
+consumer. No GPU layer placement occurred.
+
+The encrypted custody tree, raw concurrent journal, allowlisted telemetry, and
+profile comparison are retained at
+`orion-canonical-11434-failed-19962cd-20260909`, archive SHA-256
+`5b8119912efe46ffa73ba674584b38f50e548c126ca3e338fb318568a7dc567f`.
+All five databases and every restored file passed the separately keyed restore
+check; plaintext was removed. Canonical Ollama remained active, responsive, and
+idle afterward, so it was not restarted. Production Marginalia remained on its
+prior image with both projects paused.
 
 ## Provider catalog
 
@@ -155,8 +200,9 @@ fragments found zero copies in the plaintext receipt or encrypted custody tree.
 
 Anthropic and Kimi now have terminal accepted full-path receipts, and the
 production-shaped catalog and exact companion suite pass. Orion remains the
-only provider-catalog blocker: the exact GPU boundary cannot be reproduced by a
-parallel invocation of this strictly confined snap. Production stays paused and
-unchanged until canonical root `11434` is separately authorized and proves the
-exact production tag/context with nonzero VRAM through the full path, or the
-operator chooses a different explicitly qualified Ollama deployment boundary.
+only provider-catalog blocker. Canonical `11434` now has a definitive
+cuda-v13/Ollama owning-layer failure: its memory discovery disagrees with NVIDIA
+and model startup OOMs before GPU placement. Production stays paused and
+unchanged until that owning layer is repaired and a newly authorized exact
+request proves nonzero VRAM, or the operator chooses a different explicitly
+qualified Ollama deployment boundary. The failed attempt must not be retried.
