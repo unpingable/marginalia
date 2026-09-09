@@ -127,14 +127,17 @@ async function mockExistingSession(page: Page, messages: Array<Record<string, un
   return session;
 }
 
-test('reload reconciles a lost acknowledgement and shows actual usage and cost state', async ({ page }) => {
+test('reload reconciles a lost acknowledgement and separates configured from observed identity', async ({ page }) => {
   await mockWritingRoom(page, true, true);
   const messages = [
     { id: 'user-1', role: 'user', content: 'Continue once.', timestamp: '2026-09-07T00:00:00Z' },
     {
       id: 'assistant-1', role: 'assistant', content: 'Exactly one continuation.',
-      timestamp: '2026-09-07T00:00:01Z', provider_id: 'openrouter', model_id: 'actual/model',
+      timestamp: '2026-09-07T00:00:01Z', provider_id: 'openrouter', model_id: 'configured/route',
       accounting: {
+        configured_provider_id: 'openrouter', configured_model_id: 'configured/route',
+        observed_provider_id: 'openrouter', observed_model_id: 'actual/model',
+        observed_identity_status: 'attested',
         reported_total_tokens: 321, cost_status: 'estimated', cost_usd: 0.0042,
         cost_note: 'Estimated from configured token rates.',
       },
@@ -162,14 +165,37 @@ test('reload reconciles a lost acknowledgement and shows actual usage and cost s
   await page.goto('/');
   await page.locator('button.session', { hasText: 'Interrupted scene' }).click();
   await expect(page.getByText('Exactly one continuation.')).toBeVisible();
-  await expect(page.getByText('Marginalia · openrouter / actual/model')).toBeVisible();
+  await expect(page.getByText('Marginalia · configured openrouter / configured/route')).toBeVisible();
   await expect(page.locator('.message-accounting')).toHaveText(
-    '321 tokens reported · Provider cost $0.0042 (estimated)',
+    'Observed openrouter / actual/model · 321 tokens reported · Provider cost $0.0042 (estimated)',
   );
   await expect(page.locator('#prompt')).toHaveValue('');
   await expect.poll(() => page.evaluate(() => localStorage.getItem(
     'marginalia.durable-generation.default.session-1',
   ))).toBeNull();
+});
+
+test('command provenance does not promote a configured label into observed identity', async ({ page }) => {
+  await mockWritingRoom(page, true, true);
+  await mockExistingSession(page, [{
+    id: 'assistant-command', role: 'assistant', content: 'Command-backed continuation.',
+    timestamp: '2026-09-07T00:00:01Z', provider_id: 'kimi-code-local', model_id: 'kimi-code/k3-256k',
+    accounting: {
+      configured_provider_id: 'kimi-code-local', configured_model_id: 'kimi-code/k3-256k',
+      observed_provider_id: null, observed_model_id: null,
+      observed_identity_status: 'unavailable', reported_total_tokens: null,
+      cost_status: 'unavailable', cost_usd: null,
+    },
+  }]);
+
+  await page.goto('/');
+  await page.locator('button.session', { hasText: 'Interrupted scene' }).click();
+  await expect(page.getByText(
+    'Marginalia · configured kimi-code-local / kimi-code/k3-256k',
+  )).toBeVisible();
+  await expect(page.locator('.message-accounting')).toHaveText(
+    'Observed provider/model unavailable · Token usage unavailable · Provider cost unavailable',
+  );
 });
 
 test('rapid double submit creates one browser delivery', async ({ page }) => {
