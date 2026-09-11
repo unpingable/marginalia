@@ -285,3 +285,4 @@ def test_prepare_failure_is_definitive_before_provider_boundary(tmp_path: Path) 
     assert result.outcome == "failure"
     assert provider.execute_calls == 0
     assert store.get_request(request.id).status is LogicalStatus.FAILED
+    assert store.get_request(request.id).failure_type == "provider_unavailable"

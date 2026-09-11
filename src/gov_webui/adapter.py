@@ -120,6 +120,7 @@ from gov_webui.generation_acceptance import AcceptanceStatus, accept_candidate
 from gov_webui.generation_store import (
     delivery_digest,
     GenerationDisabled,
+    GenerationSettingsVersionConflict,
     GenerationStore,
     IdempotencyConflict,
     LogicalStatus,
@@ -570,6 +571,7 @@ class CreativeProjectUpdateRequest(BaseModel):
 
 class GenerationSettingsUpdateRequest(BaseModel):
     enabled: bool
+    expected_version: int = Field(ge=0)
     fallback_model: str | None = None
     project_id: str | None = None
 
@@ -1757,6 +1759,10 @@ async def get_generation_settings(project_id: str | None = None) -> dict[str, An
     return {
         "available": MARGINALIA_DURABLE_GENERATION_AVAILABLE,
         "enabled": settings.dispatch_enabled,
+        "version": settings.version,
+        "policy_semantics": settings.policy_semantics,
+        "migration_disposition": settings.migration_disposition,
+        "migrated_at": settings.migrated_at,
         "fallback_model": fallback,
         "status": (
             "ag-ng custody ready"
@@ -1768,25 +1774,46 @@ async def get_generation_settings(project_id: str | None = None) -> dict[str, An
     }
 
 
-@app.put("/v1/generation/settings")
+@app.put("/v1/generation/settings", response_model=None)
 async def update_generation_settings(
     request: GenerationSettingsUpdateRequest,
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     """Toggle new dispatches without disabling inspection or reconciliation."""
     project = _project_record(request.project_id)
     if request.enabled and not MARGINALIA_DURABLE_GENERATION_AVAILABLE:
-        raise HTTPException(status_code=503, detail="durable generation worker is unavailable")
+        return _failure_response(
+            _generation_failure(ProviderUnavailableError("generation worker unavailable"))
+        )
     fallbacks = []
     if request.fallback_model:
-        selected, identity = _resolve_configured_model(request.fallback_model)
+        try:
+            selected, identity = _resolve_configured_model(request.fallback_model)
+        except HTTPException as exc:
+            if exc.status_code != 503:
+                raise
+            return _failure_response(
+                _generation_failure(ProviderUnavailableError("fallback provider unavailable"))
+            )
         fallbacks.append(
             {"model": selected, "route": identity.provider_id if identity else "governor"}
         )
-    _get_generation_store(project.id).set_settings(
-        project.id,
-        dispatch_enabled=request.enabled,
-        fallback_policy=fallbacks,
-    )
+    try:
+        _get_generation_store(project.id).set_settings(
+            project.id,
+            dispatch_enabled=request.enabled,
+            expected_version=request.expected_version,
+            fallback_policy=fallbacks,
+        )
+    except GenerationSettingsVersionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "generation_settings_version_conflict",
+                "message": str(exc),
+                "expected_version": exc.expected_version,
+                "current_version": exc.current_version,
+            },
+        ) from exc
     return await get_generation_settings(project.id)
 
 
@@ -1866,11 +1893,19 @@ def _generation_status_payload(project_id: str, request_id: str) -> dict[str, An
             "message": logical.last_error,
         }
     if logical.status is LogicalStatus.FAILED:
+        failure_type = logical.failure_type or GenerationFailureKind.PROVIDER_EXECUTION.value
+        message = (
+            "The selected model provider is unavailable. Choose another available model "
+            "or try again later."
+            if failure_type == GenerationFailureKind.PROVIDER_UNAVAILABLE.value
+            else "The model provider could not complete the generation."
+        )
         return {
             "outcome": "failure",
             "request_id": request_id,
             "client_request_id": logical.client_request_id,
-            "message": logical.last_error or "The provider returned a confirmed failure.",
+            "failure_type": failure_type,
+            "message": message,
             "retryable": True,
         }
     return {
@@ -2515,6 +2550,14 @@ class ServiceMaintenanceError(RuntimeError):
     """An operator has temporarily paused authored generation."""
 
 
+class ProjectGenerationPausedError(RuntimeError):
+    """The project's authorized generation policy currently prevents dispatch."""
+
+
+class ProviderUnavailableError(RuntimeError):
+    """No qualified provider route can presently accept this generation."""
+
+
 class OutdatedClientError(RuntimeError):
     """A client used a generation contract this build no longer serves.
 
@@ -2539,7 +2582,26 @@ def _maintenance_message() -> str | None:
 def _generation_failure(exc: BaseException) -> FailedGeneration:
     """Classify an exception, expose a safe summary, and log full diagnostics."""
     incident_id = f"gen-{uuid.uuid4().hex[:12]}"
-    if isinstance(exc, DaemonAuthError):
+    if isinstance(exc, ProjectGenerationPausedError):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.PROJECT_PAUSED,
+            message="Generation is paused for this project. Enable generation to continue.",
+            retryable=False,
+            incident_id=incident_id,
+        )
+    elif isinstance(exc, ProviderUnavailableError):
+        failure = FailedGeneration(
+            outcome="failure",
+            kind=GenerationFailureKind.PROVIDER_UNAVAILABLE,
+            message=(
+                "The selected model provider is unavailable. Choose another available model "
+                "or try again later."
+            ),
+            retryable=True,
+            incident_id=incident_id,
+        )
+    elif isinstance(exc, DaemonAuthError):
         failure = FailedGeneration(
             outcome="failure",
             kind=GenerationFailureKind.AUTHENTICATION,
@@ -2678,6 +2740,8 @@ def _generation_failure(exc: BaseException) -> FailedGeneration:
 def _failure_response(failure: FailedGeneration) -> JSONResponse:
     status = {
         GenerationFailureKind.AUTHENTICATION: 401,
+        GenerationFailureKind.PROJECT_PAUSED: 409,
+        GenerationFailureKind.PROVIDER_UNAVAILABLE: 503,
         GenerationFailureKind.TIMEOUT: 504,
         GenerationFailureKind.STALE_CONTEXT: 409,
         GenerationFailureKind.CONTEXT_MAINTENANCE: 503,
@@ -3190,10 +3254,16 @@ async def chat_completions(
                 "ag-ng generation requires project_id, session_id, and a stable client_request_id"
             ),
         )
+    maintenance = _maintenance_message()
+    if maintenance is not None:
+        return _failure_response(_generation_failure(ServiceMaintenanceError(maintenance)))
     if MARGINALIA_AG_NG_ONLY and not MARGINALIA_DURABLE_GENERATION_AVAILABLE:
-        raise HTTPException(status_code=503, detail="the ag-ng generation worker is unavailable")
+        return _failure_response(
+            _generation_failure(ProviderUnavailableError("generation worker unavailable"))
+        )
 
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    durable_mode = MARGINALIA_AG_NG_ONLY or MARGINALIA_DURABLE_GENERATION_AVAILABLE
     durable_store: GenerationStore | None = None
     durable_settings = None
     request_delivery_digest: str | None = None
@@ -3218,20 +3288,18 @@ async def chat_completions(
                 payload = _generation_status_payload(project.id, existing.id)
                 status_code = 202 if payload["outcome"] in {"pending", "unknown"} else 200
                 return JSONResponse(status_code=status_code, content=payload)
-            if not durable_settings.dispatch_enabled:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "durable generation is off for this project; the request was not "
-                        "rerouted through synchronous generation"
-                    ),
+            if durable_mode and not durable_settings.dispatch_enabled:
+                return _failure_response(
+                    _generation_failure(ProjectGenerationPausedError(project.id))
                 )
-
-    maintenance = _maintenance_message()
-    if maintenance is not None:
-        return _failure_response(_generation_failure(ServiceMaintenanceError(maintenance)))
-
-    selected_model, model_identity = _resolve_configured_model(request.model)
+    try:
+        selected_model, model_identity = _resolve_configured_model(request.model)
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        return _failure_response(
+            _generation_failure(ProviderUnavailableError("configured provider unavailable"))
+        )
     governed_chat = (
         None if MARGINALIA_AG_NG_ONLY else _get_governed_chat_adapter(request.project_id)
     )
@@ -3246,10 +3314,10 @@ async def chat_completions(
         project = _project_record(request.project_id)
         durable_store = durable_store or _get_generation_store(project.id)
         durable_settings = durable_settings or durable_store.settings(project.id)
-        if durable_settings.dispatch_enabled:
+        if durable_mode and durable_settings.dispatch_enabled:
             if not MARGINALIA_DURABLE_GENERATION_AVAILABLE:
-                raise HTTPException(
-                    status_code=503, detail="durable generation worker is unavailable"
+                return _failure_response(
+                    _generation_failure(ProviderUnavailableError("generation worker unavailable"))
                 )
             if request.stream:
                 raise HTTPException(

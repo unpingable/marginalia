@@ -13,6 +13,8 @@ class GenerationFailureKind(StrEnum):
 
     TIMEOUT = "timeout"
     AUTHENTICATION = "authentication"
+    PROJECT_PAUSED = "project_paused"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
     PROVIDER_EXECUTION = "provider_execution"
     TRANSPORT = "transport"
     INVALID_RESULT = "invalid_result"

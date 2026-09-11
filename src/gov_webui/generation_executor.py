@@ -600,7 +600,11 @@ class GenerationExecutor:
                     "marginalia.executor-predispatch-failure/v1",
                     {"attempt": dispatch.attempt, "reason": reason},
                 )
-                self.generations.mark_failed(durable.id, reason)
+                self.generations.mark_failed(
+                    durable.id,
+                    reason,
+                    failure_type="provider_unavailable",
+                )
                 return self.attempts.finish(
                     dispatch,
                     ExecutorOutcome(dispatch.attempt, dispatch.marker, receipt, "failure"),

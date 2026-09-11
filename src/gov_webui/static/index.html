@@ -258,6 +258,11 @@
     .send-button { width: 42px; height: 42px; border: 0; border-radius: 11px; background: var(--accent); color: #fff; font-size: 20px; }
     .send-button:disabled { opacity: .45; cursor: wait; }
     .composer-hint { padding: 7px 4px 0; color: var(--muted); font-size: 10px; text-align: center; }
+    .generation-paused-control {
+      width: 100%; margin-bottom: 8px; padding: 10px 12px; border: 1px solid #d8b57f;
+      border-radius: 9px; color: #59482f; background: #fff8e9; text-align: left;
+      font-weight: 650;
+    }
 
     .workspace { display: grid; grid-template-rows: 72px auto 1fr; min-width: 0; }
     .workspace-header { display: flex; align-items: center; justify-content: space-between; padding: 0 17px; border-bottom: 1px solid var(--line); }
@@ -457,6 +462,8 @@
             <button class="small-button" data-resolution="proceed">Allow this once</button>
           </div>
         </div>
+        <button type="button" class="generation-paused-control" id="generation-paused-control" hidden>Generation is paused for this project. Enable generation</button>
+        <div class="generation-paused-control" id="generation-unavailable-control" role="alert" hidden>Generation is unavailable. Choose an available model or try again later.</div>
         <form class="composer" id="composer">
           <textarea id="prompt" aria-label="Message Marginalia" placeholder="Write a scene, ask a craft question, explore what happens next…" rows="1"></textarea>
           <button class="send-button" id="send" aria-label="Send">↑</button>
@@ -568,15 +575,15 @@
       <div class="dialog-header"><h2>Project direction</h2><button type="button" class="icon-button" id="close-project" aria-label="Close">Close</button></div>
       <div class="dialog-body">
         <section class="reliability-box" aria-labelledby="generation-reliability-title">
-          <h3 class="reliability-title" id="generation-reliability-title">Generation reliability</h3>
-          <p class="reliability-copy">Keep a generation in durable custody if this tab closes or a local model takes longer than the browser wait. Turning this off stops new durable dispatches; recovery and inspection continue.</p>
-          <label class="toggle-row" for="durable-generation"><input type="checkbox" id="durable-generation">Allow new model dispatches for this project</label>
+          <h3 class="reliability-title" id="generation-reliability-title">Generation</h3>
+          <p class="reliability-copy">Marginalia uses durable custody for every generation. Turn generation off to pause new writing requests for this project; recovery and inspection continue.</p>
+          <label class="toggle-row" for="generation-enabled"><input type="checkbox" id="generation-enabled">Generation enabled</label>
           <div class="field"><label for="fallback-model">Automatic fallback after a confirmed failure</label><select id="fallback-model"><option value="">No automatic fallback</option></select></div>
           <div class="reliability-status" id="generation-reliability-status">Checking worker availability…</div>
           <details class="reliability-help">
             <summary>What does this change?</summary>
             <p>Marginalia records the request before a model starts. You can reload or close this tab and the same request will be inspected instead of silently run twice. A response enters the conversation only if its original conversation, canon, and project direction still match.</p>
-            <p>If an outcome cannot be confirmed, Marginalia labels it unknown and keeps reconciling. Turning this setting off stops new durable dispatches; it does not discard work already in custody.</p>
+            <p>If an outcome cannot be confirmed, Marginalia labels it unknown and keeps reconciling. Pausing generation prevents new submissions; it does not discard work already in custody.</p>
           </details>
         </section>
         <div class="field"><label for="project-brief">Project brief</label><textarea id="project-brief" placeholder="What are you writing? What matters about its premise, form, or destination?"></textarea></div>
@@ -684,7 +691,7 @@
       artifactSource: null, manuscript: {nodes: [], version: 1}, snapshots: [],
       selectedMessageIds: new Set(), artifactView: "active", artifactQuery: "", entities: [], canonCounts: null,
       system: null, outlineMessageTargets: new Map(), artifactTargetNodeId: null, pendingOutlineNodeId: null,
-      loadedBuild: null, stale: false,
+      loadedBuild: null, stale: false, providerReady: null,
       resumingGeneration: false,
       pendingGenerationCandidateId: null,
     };
@@ -773,13 +780,17 @@
           ? models.default_model : availableModels[0]?.id || "";
         syncModelPicker();
         renderGenerationSettings();
+        state.providerReady = availableModels.length > 0 && backends.connected !== false;
+        applyComposerState();
         $("#provider-dot").classList.toggle("offline", !backends.connected);
       } catch (error) {
+        state.providerReady = false;
         const select = $("#model-select");
         select.replaceChildren(new Option("Writing service unavailable", ""));
         select.disabled = true;
         select.title = error.message;
         $("#provider-dot").classList.add("offline");
+        applyComposerState();
       }
     }
 
@@ -827,17 +838,28 @@
       select.title = current?.unavailable_reason || "Model for future responses in this conversation";
     }
 
-    function applyMaintenanceState() {
+    function applyComposerState() {
       const maintenance = state.system?.maintenance;
       const active = maintenance?.active === true;
+      const projectPaused = state.generationSettings !== null
+        && state.generationSettings.available === true
+        && state.generationSettings.enabled !== true;
+      const providerUnavailable = !projectPaused && (
+        (state.generationSettings !== null && state.generationSettings.available !== true)
+        || state.providerReady === false
+      );
       const dialog = $("#maintenance-dialog");
       $("#maintenance-message").textContent = maintenance?.message
         || "Writing is temporarily paused while Marginalia is being checked.";
-      $("#prompt").disabled = active;
-      $("#send").disabled = active || state.busy;
+      $("#prompt").disabled = active || projectPaused || providerUnavailable;
+      $("#send").disabled = active || projectPaused || providerUnavailable || state.busy;
+      $("#generation-paused-control").hidden = !projectPaused;
+      $("#generation-unavailable-control").hidden = !providerUnavailable;
       if (active && !dialog.open) dialog.showModal();
       if (!active && dialog.open) dialog.close();
     }
+
+    function applyMaintenanceState() { applyComposerState(); }
 
     async function loadSystem() {
       state.system = await api("/v1/system");
@@ -1138,7 +1160,7 @@
 
     function renderGenerationSettings() {
       const settings = state.generationSettings;
-      const toggle = $("#durable-generation");
+      const toggle = $("#generation-enabled");
       const fallback = $("#fallback-model");
       const status = $("#generation-reliability-status");
       const quickSwitch = $("#generation-switch");
@@ -1152,22 +1174,23 @@
       fallback.disabled = !settings?.available || !toggle.checked;
       status.textContent = settings?.available
         ? (toggle.checked
-          ? "On — new work survives disconnects; indeterminate work is reconciled, never silently retried."
-          : "Ready, but off for this project.")
-        : settings?.status || "The durable generation worker is unavailable.";
+          ? "Generation is enabled. New work uses durable custody and safe reconciliation."
+          : "Generation is paused for this project. Save after enabling it to resume.")
+        : settings?.status || "The generation worker is unavailable.";
       status.classList.toggle("unavailable", !settings?.available);
       quickSwitch.textContent = settings?.available
         ? (toggle.checked ? "Generation enabled" : "Generation paused")
         : "Generation unavailable";
       quickSwitch.setAttribute("aria-pressed", String(Boolean(toggle.checked)));
+      applyComposerState();
     }
 
-    $("#durable-generation").addEventListener("change", (event) => {
+    $("#generation-enabled").addEventListener("change", (event) => {
       const enabled = event.target.checked;
       $("#fallback-model").disabled = !state.generationSettings?.available || !enabled;
       $("#generation-reliability-status").textContent = enabled
-        ? "Will turn on when you save — new work will survive disconnects."
-        : "Will stop new durable dispatches when you save. Existing work remains inspectable.";
+        ? "Will enable generation when you save."
+        : "Will pause new generation when you save. Existing work remains inspectable.";
     });
 
     async function loadProject() {
@@ -1211,7 +1234,8 @@
           api("/v1/generation/settings", {
             method: "PUT",
             body: JSON.stringify({
-              enabled: $("#durable-generation").checked,
+              enabled: $("#generation-enabled").checked,
+              expected_version: state.generationSettings?.version,
               fallback_model: $("#fallback-model").value || null,
               project_id: state.activeProjectId,
             }),
@@ -1683,6 +1707,17 @@
         applyStaleClientState();
         return toast("Marginalia was updated; reload before sending. Your prompt is kept.");
       }
+      if (
+        state.generationSettings?.available === true
+        && state.generationSettings?.enabled === false
+      ) {
+        applyComposerState();
+        return toast("Generation is paused for this project. Enable generation to continue.");
+      }
+      if (state.generationSettings?.available === false || state.providerReady === false) {
+        applyComposerState();
+        return toast("Generation is unavailable. Choose an available model or try again later.");
+      }
       if (!content || state.busy) return;
       state.busy = true;
       $("#send").disabled = true;
@@ -1729,7 +1764,7 @@
         if (terminalResponse.outcome !== "authored" || terminalResponse.committed_messages?.length !== 2) {
           const boundaryError = new Error("Generation returned no committed authored result.");
           boundaryError.payload = terminalResponse.outcome === "failure"
-            ? {...terminalResponse, failure_type: "provider_execution"}
+            ? {...terminalResponse, failure_type: terminalResponse.failure_type || "provider_execution"}
             : {outcome: "failure", failure_type: "invalid_result", retryable: true};
           throw boundaryError;
         }
@@ -1786,8 +1821,8 @@
         );
       } finally {
         state.busy = false;
-        $("#send").disabled = false;
-        prompt.focus();
+        applyComposerState();
+        if (!prompt.disabled) prompt.focus();
       }
     }
 
@@ -2704,6 +2739,10 @@
       });
       $("#edit-project").addEventListener("click", () => $("#project-settings").showModal());
       $("#generation-switch").addEventListener("click", () => $("#project-settings").showModal());
+      $("#generation-paused-control").addEventListener("click", () => {
+        $("#project-settings").showModal();
+        $("#generation-enabled").focus();
+      });
       $("#close-project").addEventListener("click", () => $("#project-settings").close());
       $("#project-form").addEventListener("submit", saveProject);
       $("#export-project").addEventListener("click", exportProject);

@@ -36,6 +36,25 @@ class GenerationDisabled(GenerationStoreError):
     """New dispatches are disabled for this project."""
 
 
+class GenerationSettingsVersionConflict(GenerationStoreError):
+    """A concurrent writer changed generation policy before this update."""
+
+    def __init__(self, expected_version: int, current_version: int) -> None:
+        self.expected_version = expected_version
+        self.current_version = current_version
+        super().__init__(
+            f"expected generation settings version {expected_version}, "
+            f"current version is {current_version}"
+        )
+
+
+GENERATION_POLICY_SEMANTICS = "generation-enabled/v1"
+LEGACY_GENERATION_POLICY_SEMANTICS = "durable-generation-opt-in/v1"
+LEGACY_GENERATION_POLICY_DISPOSITION = (
+    "legacy durable-generation preference retired; generation enabled"
+)
+
+
 class LogicalStatus(StrEnum):
     QUEUED = "queued"
     DISPATCHING = "dispatching"
@@ -75,6 +94,7 @@ class LogicalRequest:
     candidate_id: str | None
     accepted_candidate_id: str | None
     last_error: str | None
+    failure_type: str | None
     created_at: str
     updated_at: str
 
@@ -116,6 +136,10 @@ class GenerationSettings:
     dispatch_enabled: bool
     fallback_policy: tuple[tuple[str, str], ...]
     updated_at: str | None
+    version: int
+    policy_semantics: str
+    migration_disposition: str | None
+    migrated_at: str | None
 
 
 def _now() -> str:
@@ -155,7 +179,7 @@ def delivery_digest(
 class GenerationStore:
     """SQLite custody index shared by the web and worker processes."""
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -178,7 +202,11 @@ class GenerationStore:
                     project_id TEXT PRIMARY KEY,
                     dispatch_enabled INTEGER NOT NULL CHECK(dispatch_enabled IN (0, 1)),
                     fallback_policy_json TEXT NOT NULL DEFAULT '[]',
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+                    policy_semantics TEXT NOT NULL DEFAULT 'generation-enabled/v1',
+                    migration_disposition TEXT,
+                    migrated_at TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS logical_request (
@@ -203,6 +231,7 @@ class GenerationStore:
                     candidate_id TEXT,
                     accepted_candidate_id TEXT,
                     last_error TEXT,
+                    failure_type TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(project_id, client_request_id)
@@ -247,6 +276,10 @@ class GenerationStore:
                 );
                 """
             )
+            # Web and worker processes can open the same store concurrently on
+            # deployment. Serialize additive migration and re-read the schema
+            # only after owning the write lock.
+            connection.execute("BEGIN IMMEDIATE")
             settings_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(generation_settings)")
             }
@@ -254,6 +287,41 @@ class GenerationStore:
                 connection.execute(
                     """ALTER TABLE generation_settings ADD COLUMN fallback_policy_json
                        TEXT NOT NULL DEFAULT '[]'"""
+                )
+            legacy_generation_policy = "policy_semantics" not in settings_columns
+            if "version" not in settings_columns:
+                connection.execute(
+                    "ALTER TABLE generation_settings ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+                )
+            if "policy_semantics" not in settings_columns:
+                connection.execute(
+                    "ALTER TABLE generation_settings ADD COLUMN policy_semantics "
+                    f"TEXT NOT NULL DEFAULT '{LEGACY_GENERATION_POLICY_SEMANTICS}'"
+                )
+            if "migration_disposition" not in settings_columns:
+                connection.execute(
+                    "ALTER TABLE generation_settings ADD COLUMN migration_disposition TEXT"
+                )
+            if "migrated_at" not in settings_columns:
+                connection.execute("ALTER TABLE generation_settings ADD COLUMN migrated_at TEXT")
+            if legacy_generation_policy:
+                migrated_at = _now()
+                connection.execute(
+                    """UPDATE generation_settings
+                       SET dispatch_enabled=1,
+                           version=version+1,
+                           policy_semantics=?,
+                           migration_disposition=?,
+                           migrated_at=?,
+                           updated_at=?
+                       WHERE policy_semantics=?""",
+                    (
+                        GENERATION_POLICY_SEMANTICS,
+                        LEGACY_GENERATION_POLICY_DISPOSITION,
+                        migrated_at,
+                        migrated_at,
+                        LEGACY_GENERATION_POLICY_SEMANTICS,
+                    ),
                 )
             request_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(logical_request)")
@@ -269,7 +337,10 @@ class GenerationStore:
                     "ALTER TABLE logical_request ADD COLUMN purpose TEXT NOT NULL "
                     "DEFAULT 'conversation'"
                 )
+            if "failure_type" not in request_columns:
+                connection.execute("ALTER TABLE logical_request ADD COLUMN failure_type TEXT")
             connection.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
+            connection.commit()
 
     @staticmethod
     def _fallbacks(value: Iterable[dict[str, str]]) -> tuple[tuple[str, str], ...]:
@@ -285,14 +356,19 @@ class GenerationStore:
         return tuple(result)
 
     def set_dispatch_enabled(self, project_id: str, enabled: bool) -> None:
+        """Set policy for internal fixtures and operators, preserving other fields."""
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
-                """INSERT INTO generation_settings(project_id,dispatch_enabled,updated_at)
-                   VALUES(?,?,?) ON CONFLICT(project_id) DO UPDATE SET
-                   dispatch_enabled=excluded.dispatch_enabled, updated_at=excluded.updated_at""",
-                (project_id, int(enabled), now),
+                """INSERT INTO generation_settings(
+                       project_id,dispatch_enabled,updated_at,version,policy_semantics
+                   ) VALUES(?,?,?,1,?) ON CONFLICT(project_id) DO UPDATE SET
+                   dispatch_enabled=excluded.dispatch_enabled,
+                   updated_at=excluded.updated_at,
+                   version=generation_settings.version+1,
+                   policy_semantics=excluded.policy_semantics""",
+                (project_id, int(enabled), now, GENERATION_POLICY_SEMANTICS),
             )
             connection.commit()
 
@@ -301,6 +377,7 @@ class GenerationStore:
         project_id: str,
         *,
         dispatch_enabled: bool,
+        expected_version: int,
         fallback_policy: Iterable[dict[str, str]] = (),
     ) -> GenerationSettings:
         fallbacks = self._fallbacks(fallback_policy)
@@ -310,29 +387,65 @@ class GenerationStore:
         ).decode()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT version FROM generation_settings WHERE project_id=?",
+                (project_id,),
+            ).fetchone()
+            current_version = int(row["version"]) if row is not None else 0
+            if current_version != expected_version:
+                connection.rollback()
+                raise GenerationSettingsVersionConflict(expected_version, current_version)
+            next_version = current_version + 1
             connection.execute(
                 """INSERT INTO generation_settings(
-                       project_id,dispatch_enabled,fallback_policy_json,updated_at
-                   ) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET
+                       project_id,dispatch_enabled,fallback_policy_json,updated_at,
+                       version,policy_semantics
+                   ) VALUES(?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET
                    dispatch_enabled=excluded.dispatch_enabled,
                    fallback_policy_json=excluded.fallback_policy_json,
-                   updated_at=excluded.updated_at""",
-                (project_id, int(dispatch_enabled), encoded, now),
+                   updated_at=excluded.updated_at,
+                   version=excluded.version,
+                   policy_semantics=excluded.policy_semantics""",
+                (
+                    project_id,
+                    int(dispatch_enabled),
+                    encoded,
+                    now,
+                    next_version,
+                    GENERATION_POLICY_SEMANTICS,
+                ),
             )
             connection.commit()
-        return GenerationSettings(dispatch_enabled, fallbacks, now)
+        return self.settings(project_id)
 
     def settings(self, project_id: str) -> GenerationSettings:
         with self._connect() as connection:
             row = connection.execute(
-                """SELECT dispatch_enabled,fallback_policy_json,updated_at
+                """SELECT dispatch_enabled,fallback_policy_json,updated_at,version,
+                          policy_semantics,migration_disposition,migrated_at
                    FROM generation_settings WHERE project_id=?""",
                 (project_id,),
             ).fetchone()
         if row is None:
-            return GenerationSettings(False, (), None)
+            return GenerationSettings(
+                True,
+                (),
+                None,
+                0,
+                GENERATION_POLICY_SEMANTICS,
+                "generation enabled by default; no legacy setting existed",
+                None,
+            )
         fallbacks = self._fallbacks(json.loads(row["fallback_policy_json"]))
-        return GenerationSettings(bool(row["dispatch_enabled"]), fallbacks, row["updated_at"])
+        return GenerationSettings(
+            bool(row["dispatch_enabled"]),
+            fallbacks,
+            row["updated_at"],
+            int(row["version"]),
+            row["policy_semantics"],
+            row["migration_disposition"],
+            row["migrated_at"],
+        )
 
     def dispatch_enabled(self, project_id: str) -> bool:
         with self._connect() as connection:
@@ -340,7 +453,7 @@ class GenerationStore:
                 "SELECT dispatch_enabled FROM generation_settings WHERE project_id=?",
                 (project_id,),
             ).fetchone()
-        return bool(row[0]) if row is not None else False
+        return bool(row[0]) if row is not None else True
 
     def create_request(
         self,
@@ -611,7 +724,8 @@ class GenerationStore:
                 ),
             )
             connection.execute(
-                "UPDATE logical_request SET status=?,updated_at=? WHERE id=?",
+                """UPDATE logical_request
+                   SET status=?,last_error=NULL,failure_type=NULL,updated_at=? WHERE id=?""",
                 (LogicalStatus.DISPATCHING, now, logical_request_id),
             )
             self._event(
@@ -722,16 +836,50 @@ class GenerationStore:
             error=reason,
         )
 
-    def mark_failed(self, dispatch_id: str, reason: str) -> None:
+    def mark_failed(
+        self,
+        dispatch_id: str,
+        reason: str,
+        *,
+        failure_type: str = "provider_execution",
+    ) -> None:
         """Record only a qualified terminal failure, never mere timeout/absence."""
-        self._dispatch_transition(
-            dispatch_id,
-            expected=(DispatchStatus.RESERVED, DispatchStatus.EXECUTING),
-            dispatch_status=DispatchStatus.FAILED,
-            logical_status=LogicalStatus.FAILED,
-            event="dispatch_failed",
-            error=reason,
-        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM dispatch WHERE id=?", (dispatch_id,)).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(dispatch_id)
+            dispatch = self._dispatch(row)
+            if dispatch.status not in {DispatchStatus.RESERVED, DispatchStatus.EXECUTING}:
+                connection.rollback()
+                raise GenerationTransitionError(
+                    f"dispatch {dispatch_id} cannot transition from {dispatch.status}"
+                )
+            now = _now()
+            connection.execute(
+                "UPDATE dispatch SET status=?,updated_at=? WHERE id=?",
+                (DispatchStatus.FAILED, now, dispatch_id),
+            )
+            connection.execute(
+                """UPDATE logical_request
+                   SET status=?,last_error=?,failure_type=?,updated_at=? WHERE id=?""",
+                (
+                    LogicalStatus.FAILED,
+                    reason,
+                    failure_type,
+                    now,
+                    dispatch.logical_request_id,
+                ),
+            )
+            self._event(
+                connection,
+                dispatch.logical_request_id,
+                "dispatch_failed",
+                {"reason": reason, "failure_type": failure_type},
+                dispatch_id=dispatch_id,
+            )
+            connection.commit()
 
     def accept_candidate(self, candidate_id: str, message_id: str) -> None:
         """Record application acceptance idempotently after the session append."""
@@ -1030,6 +1178,7 @@ class GenerationStore:
             candidate_id=row["candidate_id"],
             accepted_candidate_id=row["accepted_candidate_id"],
             last_error=row["last_error"],
+            failure_type=row["failure_type"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

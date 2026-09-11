@@ -370,6 +370,7 @@ def test_paused_synthetic_is_not_reported_as_a_provider_failure(
         "_resolve_configured_model",
         lambda *_args, **_kwargs: ("synthetic-model", identity),
     )
+    adapter._get_generation_store().set_dispatch_enabled("default", False)
 
     response = client.post(
         "/v1/internal/synthetic-governor",
@@ -526,30 +527,35 @@ def test_durable_generation_toggle_is_prominent_and_guarded(product_client, monk
     unavailable = client.get("/v1/generation/settings")
     assert unavailable.status_code == 200
     assert unavailable.json()["available"] is False
-    refused = client.put("/v1/generation/settings", json={"enabled": True})
+    assert unavailable.json()["enabled"] is True
+    assert unavailable.json()["version"] == 0
+    refused = client.put("/v1/generation/settings", json={"enabled": True, "expected_version": 0})
     assert refused.status_code == 503
+    assert refused.json()["failure_type"] == "provider_unavailable"
 
     monkeypatch.setattr(adapter, "MARGINALIA_DURABLE_GENERATION_AVAILABLE", True)
     enabled = client.put(
         "/v1/generation/settings",
-        json={"enabled": True, "fallback_model": "fallback-model"},
+        json={
+            "enabled": True,
+            "expected_version": 0,
+            "fallback_model": "fallback-model",
+        },
     )
     assert enabled.status_code == 200
-    assert enabled.json() == {
-        "available": True,
-        "enabled": True,
-        "fallback_model": "fallback-model",
-        "status": "ag-ng custody ready",
-        "platform": "ag-ng",
-        "classic_fallback": False,
-    }
+    assert enabled.json()["available"] is True
+    assert enabled.json()["enabled"] is True
+    assert enabled.json()["version"] == 1
+    assert enabled.json()["fallback_model"] == "fallback-model"
+    assert enabled.json()["policy_semantics"] == "generation-enabled/v1"
 
     page = client.get("/").text
-    assert "Generation reliability" in page
+    assert ">Generation<" in page
     assert "Generation status…" in page
-    assert 'id="durable-generation"' in page
+    assert 'id="generation-enabled"' in page
+    assert "Generation is paused for this project. Enable generation" in page
     assert 'id="generation-switch"' in page
-    assert "stops new durable dispatches" in page
+    assert "Pausing generation prevents new submissions" in page
 
 
 def test_ag_ng_only_mode_never_falls_back_to_synchronous_generation(
@@ -566,6 +572,53 @@ def test_ag_ng_only_mode_never_falls_back_to_synchronous_generation(
 
     assert response.status_code == 422
     assert "stable client_request_id" in response.json()["detail"]
+
+
+def test_project_pause_prevents_custody_then_authorized_enable_dispatches(
+    product_client, monkeypatch
+) -> None:
+    client, adapter = product_client
+    monkeypatch.setattr(adapter, "MARGINALIA_AG_NG_ONLY", True)
+    monkeypatch.setattr(adapter, "MARGINALIA_DURABLE_GENERATION_AVAILABLE", True)
+    paused = client.put(
+        "/v1/generation/settings",
+        json={"enabled": False, "expected_version": 0},
+    )
+    assert paused.status_code == 200
+    assert paused.json()["version"] == 1
+    session = client.post("/sessions/", json={"title": "Policy", "model": "fiction-model"}).json()
+    request = {
+        "model": "fiction-model",
+        "project_id": "default",
+        "session_id": session["id"],
+        "client_request_id": "policy-boundary-1",
+        "messages": [{"role": "user", "content": "Continue safely."}],
+    }
+
+    refused = client.post("/v1/chat/completions", json=request)
+    assert refused.status_code == 409
+    assert refused.json()["failure_type"] == "project_paused"
+    assert adapter._get_generation_store("default").list_requests() == []
+    assert adapter._governed_chat_adapter.chat_send.await_count == 0
+
+    conflict = client.put(
+        "/v1/generation/settings",
+        json={"enabled": True, "expected_version": 0},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "generation_settings_version_conflict"
+    enabled = client.put(
+        "/v1/generation/settings",
+        json={"enabled": True, "expected_version": 1},
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["version"] == 2
+
+    accepted = client.post("/v1/chat/completions", json=request)
+    assert accepted.status_code == 202
+    assert accepted.json()["outcome"] == "pending"
+    assert len(adapter._get_generation_store("default").list_requests()) == 1
+    assert adapter._governed_chat_adapter.chat_send.await_count == 0
 
 
 def test_ag_ng_health_names_the_real_execution_owners(
@@ -591,7 +644,12 @@ def test_durable_chat_is_idempotent_and_does_not_dispatch_synchronously(
 ) -> None:
     client, adapter = product_client
     monkeypatch.setattr(adapter, "MARGINALIA_DURABLE_GENERATION_AVAILABLE", True)
-    assert client.put("/v1/generation/settings", json={"enabled": True}).status_code == 200
+    assert (
+        client.put(
+            "/v1/generation/settings", json={"enabled": True, "expected_version": 0}
+        ).status_code
+        == 200
+    )
     session = client.post(
         "/sessions/",
         json={"title": "Durable", "model": "fiction-model", "project_id": "default"},
@@ -659,7 +717,12 @@ def test_lost_ack_replay_returns_historical_acceptance_even_after_switch_off(
     keyring = tmp_path / "secrets" / "evidence.json"
     create_keyring(keyring, key_id="test", key=b"k" * 32)
     monkeypatch.setattr(adapter, "MARGINALIA_EVIDENCE_KEY_FILE", str(keyring))
-    assert client.put("/v1/generation/settings", json={"enabled": True}).status_code == 200
+    assert (
+        client.put(
+            "/v1/generation/settings", json={"enabled": True, "expected_version": 0}
+        ).status_code
+        == 200
+    )
     session = client.post(
         "/sessions/",
         json={"title": "Lost acknowledgement", "model": "fiction-model"},
@@ -679,7 +742,12 @@ def test_lost_ack_replay_returns_historical_acceptance_even_after_switch_off(
     assert accepted.json()["outcome"] == "authored"
     assert accepted.json()["client_request_id"] == "lost-ack-1"
 
-    assert client.put("/v1/generation/settings", json={"enabled": False}).status_code == 200
+    assert (
+        client.put(
+            "/v1/generation/settings", json={"enabled": False, "expected_version": 1}
+        ).status_code
+        == 200
+    )
     replay = client.post("/v1/chat/completions", json=request)
     assert replay.status_code == 200
     assert replay.json()["committed_messages"] == accepted.json()["committed_messages"]
@@ -707,7 +775,8 @@ def test_lost_ack_replay_returns_historical_acceptance_even_after_switch_off(
         },
     )
     assert new_delivery.status_code == 409
-    assert "not rerouted" in new_delivery.json()["detail"]
+    assert new_delivery.json()["failure_type"] == "project_paused"
+    assert new_delivery.json()["message"].startswith("Generation is paused")
     assert adapter._governed_chat_adapter.chat_send.await_count == 0
 
 
@@ -719,7 +788,7 @@ def test_two_tabs_from_one_revision_accept_exactly_one_durable_candidate(
     keyring = tmp_path / "secrets" / "evidence.json"
     create_keyring(keyring, key_id="test", key=b"k" * 32)
     monkeypatch.setattr(adapter, "MARGINALIA_EVIDENCE_KEY_FILE", str(keyring))
-    client.put("/v1/generation/settings", json={"enabled": True})
+    client.put("/v1/generation/settings", json={"enabled": True, "expected_version": 0})
     session = client.post("/sessions/", json={"title": "Two tabs", "model": "fiction-model"}).json()
     base = {
         "model": "fiction-model",

@@ -66,7 +66,11 @@ The supported Compose deployment runs the web application, generation worker,
 ag-providerd, backup worker, and synthetic probe. Durable generation is not an
 optional profile. The visible per-project **Generation enabled/paused** switch controls new
 dispatch only; pending inspection, reconciliation, and evidence recovery remain
-available.
+available. Generation policy is revision-checked. A legacy durable-generation
+preference is explicitly retired during schema migration and cannot silently disable
+generation. Backend blocking states and the composer must agree before submission:
+project pause, operator pause, provider unavailability, and execution failure remain
+distinct states with distinct writer-facing actions.
 
 The web process receives only the model catalog and evidence keyring. The worker
 receives the authorization issuer, evidence keyring, and providerctl identity.

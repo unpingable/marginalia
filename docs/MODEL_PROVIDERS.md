@@ -185,6 +185,8 @@ These labels are observational. They do not change admission or retry policy.
 ## Project dispatch switch
 
 Erin can find the switch in two places: the persistent header button labeled
-**Generation enabled** or **Generation paused**, and the first control under **Project direction → Generation
-reliability**. Off means stop new dispatches. It does not cancel, abandon, hide,
+**Generation enabled** or **Generation paused**, and the first control under
+**Project direction → Generation**. Off means generation is paused: the composer
+prevents submission and presents an
+authorized enable control. It does not cancel, abandon, hide,
 or synchronously reroute work already in custody.

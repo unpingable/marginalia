@@ -4,6 +4,7 @@ async function mockWritingRoom(page: Page, available: boolean, enabled = false) 
   const savedSettings: Array<Record<string, unknown>> = [];
   let currentEnabled = enabled;
   let currentFallback: unknown = null;
+  let currentVersion = 0;
   await page.route('**/*', async (route) => {
     const request = route.request();
     if (request.resourceType() === 'document') return route.continue();
@@ -31,13 +32,23 @@ async function mockWritingRoom(page: Page, available: boolean, enabled = false) 
     } else if (path === '/v1/generation/settings') {
       if (request.method() === 'PUT') {
         const saved = JSON.parse(request.postData() || '{}');
+        if (saved.expected_version !== currentVersion) {
+          return route.fulfill({
+            status: 409,
+            contentType: 'application/json',
+            body: JSON.stringify({ detail: { message: 'generation settings version conflict' } }),
+          });
+        }
         savedSettings.push(saved);
         currentEnabled = Boolean(saved.enabled);
         currentFallback = saved.fallback_model;
+        currentVersion += 1;
       }
       body = {
         available,
         enabled: currentEnabled,
+        version: currentVersion,
+        policy_semantics: 'generation-enabled/v1',
         fallback_model: currentFallback,
         status: available ? 'ready' : 'The durable generation worker is unavailable.',
       };
@@ -84,32 +95,46 @@ async function mockWritingRoom(page: Page, available: boolean, enabled = false) 
   return savedSettings;
 }
 
-test('reliability control is prominent and unavailable state is explicit', async ({ page }) => {
+test('generation control is prominent and unavailable state is explicit', async ({ page }) => {
   await mockWritingRoom(page, false);
   await page.goto('/');
   await expect(page.locator('#generation-switch')).toHaveText('Generation unavailable');
   await page.locator('#generation-switch').click();
 
-  await expect(page.getByRole('heading', { name: 'Generation reliability' })).toBeVisible();
-  await expect(page.locator('#durable-generation')).toBeDisabled();
+  await expect(page.getByRole('heading', { name: 'Generation', exact: true })).toBeVisible();
+  await expect(page.locator('#generation-enabled')).toBeDisabled();
   await expect(page.locator('#generation-reliability-status')).toContainText('unavailable');
+  await expect(page.locator('#generation-unavailable-control')).toBeVisible();
+  await expect(page.locator('#prompt')).toBeDisabled();
+  await expect(page.locator('#send')).toBeDisabled();
   await expect(page.getByText('What does this change?')).toBeVisible();
 });
 
-test('writer can enable custody and choose confirmed-failure fallback', async ({ page }) => {
+test('paused composer exposes authorized enablement before submission', async ({ page }) => {
   const saved = await mockWritingRoom(page, true);
   await page.goto('/');
   await expect(page.locator('#generation-switch')).toHaveText('Generation paused');
-  await page.locator('#generation-switch').click();
+  await expect(page.locator('#prompt')).toBeDisabled();
+  await expect(page.locator('#send')).toBeDisabled();
+  const paused = page.locator('#generation-paused-control');
+  await expect(paused).toBeVisible();
+  await expect(paused).toHaveText('Generation is paused for this project. Enable generation');
+  await paused.click();
 
-  await page.locator('#durable-generation').check();
+  await expect(page.locator('#generation-enabled')).toBeFocused();
+  await page.locator('#generation-enabled').check();
   await expect(page.locator('#fallback-model')).toBeEnabled();
   await page.locator('#fallback-model').selectOption('fallback');
   await page.locator('#save-project').click();
 
   await expect.poll(() => saved.length).toBe(1);
-  expect(saved[0]).toMatchObject({ enabled: true, fallback_model: 'fallback' });
+  expect(saved[0]).toMatchObject({
+    enabled: true, expected_version: 0, fallback_model: 'fallback',
+  });
   await expect(page.locator('#generation-switch')).toHaveText('Generation enabled');
+  await expect(page.locator('#generation-paused-control')).toBeHidden();
+  await expect(page.locator('#prompt')).toBeEnabled();
+  await expect(page.locator('#send')).toBeEnabled();
 });
 
 async function mockExistingSession(page: Page, messages: Array<Record<string, unknown>> = []) {

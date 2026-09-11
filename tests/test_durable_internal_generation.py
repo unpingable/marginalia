@@ -27,6 +27,7 @@ async def test_paused_internal_generation_does_not_leave_queued_custody(
     sessions = SessionStore(context / "sessions")
     session = sessions.create("ctx", model="summary-model")
     generations = GenerationStore(context / "marginalia" / "generation.sqlite")
+    generations.set_dispatch_enabled("project", False)
     keyring = tmp_path / "keys.json"
     create_keyring(keyring, key_id="test", key=b"k" * 32)
 

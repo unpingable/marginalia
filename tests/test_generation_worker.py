@@ -47,6 +47,7 @@ def test_paused_queued_work_is_retained_without_worker_error_loop(
         original_route="route",
         request={"context_id": "ctx", "messages": [], "model": "model"},
     ).request
+    store.set_dispatch_enabled("project", False)
     keyring = tmp_path / "keys.json"
     create_keyring(keyring, key_id="test", key=b"k" * 32)
     config = WorkerConfig(

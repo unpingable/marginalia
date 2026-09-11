@@ -35,13 +35,15 @@ You can:
 - compile or export Markdown and DOCX, plus a portable project archive;
 - back up and restore a workspace without turning provider failures into story.
 
-Durable generation is part of every supported deployment. Its project-level
-switch is visible as **Generation enabled/paused** in the application header and is also
-the first control in **Project direction → Generation reliability**. It keeps
+Durable generation is part of every supported deployment. The project-level
+**Generation enabled/paused** control is visible in the application header and under
+**Project direction → Generation**. It enables or pauses generation itself; durable
+custody is no longer an optional reliability mode. Durable custody keeps
 work in custody across tab disconnects, shows an explicit indeterminate state
 while reconciliation continues, and permits an optional fallback only after a
 confirmed failure. Turning it off stops new dispatches; it does not abandon or
-synchronously reroute work already in custody.
+synchronously reroute work already in custody. A paused project disables the composer
+and presents the same authorized enable control before a prompt can be submitted.
 
 ## Install and start writing
 

@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 
 import pytest
 
 from gov_webui.generation_store import (
     DispatchStatus,
     GenerationDisabled,
+    GENERATION_POLICY_SEMANTICS,
+    LEGACY_GENERATION_POLICY_DISPOSITION,
+    GenerationSettingsVersionConflict,
     GenerationStore,
     GenerationTransitionError,
     IdempotencyConflict,
@@ -81,11 +85,55 @@ def test_dispatch_has_immutable_actual_route_and_distinct_identity(tmp_path: Pat
 def test_kill_switch_stops_new_dispatch_but_preserves_inspection(tmp_path: Path) -> None:
     store = GenerationStore(tmp_path / "generation.sqlite")
     request = create(store).request
+    store.set_dispatch_enabled("project-a", False)
 
     with pytest.raises(GenerationDisabled):
         store.reserve_dispatch(request.id)
     assert store.get_request(request.id) == request
     assert store.events(request.id)[0]["event_type"] == "request_created"
+
+
+def test_legacy_disabled_preference_migrates_to_enabled_generation(tmp_path: Path) -> None:
+    path = tmp_path / "generation.sqlite"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """CREATE TABLE generation_settings(
+                   project_id TEXT PRIMARY KEY,
+                   dispatch_enabled INTEGER NOT NULL,
+                   fallback_policy_json TEXT NOT NULL DEFAULT '[]',
+                   updated_at TEXT NOT NULL
+               )"""
+        )
+        connection.execute(
+            "INSERT INTO generation_settings VALUES(?, ?, ?, ?)",
+            ("project-a", 0, "[]", "2026-09-08T07:31:52+00:00"),
+        )
+
+    settings = GenerationStore(path).settings("project-a")
+
+    assert settings.dispatch_enabled is True
+    assert settings.version == 2
+    assert settings.policy_semantics == GENERATION_POLICY_SEMANTICS
+    assert settings.migration_disposition == LEGACY_GENERATION_POLICY_DISPOSITION
+    assert settings.migrated_at is not None
+
+
+def test_generation_setting_update_is_revision_checked(tmp_path: Path) -> None:
+    store = GenerationStore(tmp_path / "generation.sqlite")
+    initial = store.settings("project-a")
+    assert initial.dispatch_enabled is True
+    assert initial.version == 0
+
+    paused = store.set_settings(
+        "project-a", dispatch_enabled=False, expected_version=initial.version
+    )
+    assert paused.dispatch_enabled is False
+    assert paused.version == 1
+
+    with pytest.raises(GenerationSettingsVersionConflict) as conflict:
+        store.set_settings("project-a", dispatch_enabled=True, expected_version=0)
+    assert conflict.value.current_version == 1
+    assert store.settings("project-a") == paused
 
 
 def test_new_undispatched_work_can_be_settled_without_inventing_a_dispatch(

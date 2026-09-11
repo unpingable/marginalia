@@ -121,6 +121,13 @@ or configure deployment-level log retention if post-replacement incident
 correlation is required. Incident diagnostics are operational metadata and must
 never be copied into sessions, canon, artifacts, or model context.
 
+Generation-control semantics are end-to-end: a project pause disables the composer
+and exposes its authorized enable control; operator maintenance shows the maintenance
+notice; provider unavailability and execution failure remain distinct typed outcomes.
+Changing a backend generation policy requires a matching UI state and an integration
+qualification case. An HTTP success from the web process alone does not establish this
+semantic parity.
+
 ## Manual backup, verification, and restore rehearsal
 
 The UI is the normal path. The equivalent operator commands are:
