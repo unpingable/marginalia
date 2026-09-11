@@ -84,6 +84,11 @@ exception.
 - Both witnesses are mandatory, individually bounded steps in the `container`
   GitHub CI job; the central custody witness cannot be omitted by the ordinary
   suite's environment gate.
+- GitHub-hosted CI run
+  [`34623574164`](https://github.com/unpingable/marginalia/actions/runs/34623574164)
+  passed `quality`, `test`, `browser`, and `container` for follow-up commit
+  `ba04a39a1d3fc65bacfd9ef38bfe442b252a9353`; both exact witnesses are visible
+  as successful `container` steps.
 - Focused Python 3.11 suite: 100 passed.
 - Browser suite: 5 passed.
 - Production synthetic: PASS through the real serialized non-Orion path in
