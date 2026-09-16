@@ -313,3 +313,18 @@ on the NFS export (no_root_squash): stage the validated file, then
 'cp /new/providers.json /cfg/.tmp && chmod 0600 /cfg/.tmp && mv /cfg/.tmp /cfg/providers.json'`,
 then `docker compose restart marginalia marginalia-generation`. Don't widen
 `secrets/`.
+
+### Deferred upstream: providerd activation-identity succession
+
+providerd stays pinned to `marginalia:generation-policy-d420ba4-candidate`
+(`MARGINALIA_PROVIDERD_IMAGE`) until upstream resolves what activation
+identity names and — only if identity rotation is genuinely the right
+semantic — qualifies an authorized succession ceremony. The full deferred
+note lives upstream in ag-ng at
+`docs/providerd-activation-succession-disposition.md` (branch
+`marginalia/credential-refusal-v1`, commit `edf9b2e`); Marginalia supplies
+only the motivating witness and does not own the custody primitive. The next
+action is not "implement rotation"; it is "find out whether rotation is even
+the right semantic operation." Do not weaken or bypass the mismatch check to
+permit an upgrade: the readiness noise is bounded and provider-selection
+safety is unaffected.
