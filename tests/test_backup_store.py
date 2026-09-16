@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import zipfile
 from pathlib import Path
 
@@ -204,3 +205,61 @@ def test_remote_required_never_falls_back_to_local_disk(tmp_path):
     assert status["usable"] is False
     with pytest.raises(BackupError, match="must be a remote filesystem"):
         manager.create("erin")
+
+
+def _live_wal_database(directory: Path) -> tuple[Path, sqlite3.Connection]:
+    """One populated WAL database whose connection stays open.
+
+    Closing the last connection would checkpoint and remove the WAL, which is
+    exactly the on-disk shape a busy workspace presents to the backup worker.
+    """
+    path = directory / "state.sqlite"
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("CREATE TABLE records (id INTEGER PRIMARY KEY, body TEXT)")
+    connection.execute("INSERT INTO records (body) VALUES ('lantern')")
+    connection.commit()
+    return path, connection
+
+
+def _assert_snapshot_round_trip(snapshot: bytes, destination: Path) -> None:
+    destination.write_bytes(snapshot)
+    check = sqlite3.connect(destination)
+    try:
+        assert check.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert check.execute("SELECT body FROM records").fetchall() == [("lantern",)]
+    finally:
+        check.close()
+
+
+def test_sqlite_snapshot_round_trips_a_live_wal_database(tmp_path):
+    path, connection = _live_wal_database(tmp_path)
+    try:
+        assert (tmp_path / "state.sqlite-wal").is_file()
+        _assert_snapshot_round_trip(
+            WorkspaceBackupManager._sqlite_snapshot(path), tmp_path / "restored.sqlite"
+        )
+    finally:
+        connection.close()
+
+
+def test_sqlite_snapshot_tolerates_a_read_only_source_directory(tmp_path):
+    """The backup container mounts the data root read-only; WAL recovery must
+    not require creating the ``-shm`` file beside the source.
+
+    A cleanly closed WAL database keeps the WAL journal mode in its header
+    with no sidecar files on disk — the production shape — and opening it
+    read-only still demands a writable source directory for ``-shm``.
+    """
+    directory = tmp_path / "docket-state"
+    directory.mkdir()
+    path, connection = _live_wal_database(directory)
+    connection.close()
+    assert sorted(item.name for item in directory.iterdir()) == ["state.sqlite"]
+    directory.chmod(0o555)
+    try:
+        _assert_snapshot_round_trip(
+            WorkspaceBackupManager._sqlite_snapshot(path), tmp_path / "restored.sqlite"
+        )
+    finally:
+        directory.chmod(0o755)

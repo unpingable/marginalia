@@ -94,30 +94,46 @@ class WorkspaceBackupManager:
 
     @staticmethod
     def _sqlite_snapshot(path: Path) -> bytes:
-        """Return a coherent SQLite backup without copying a live WAL piecemeal."""
-        descriptor, temporary_name = tempfile.mkstemp(suffix=".sqlite")
-        os.close(descriptor)
-        temporary = Path(temporary_name)
-        source: sqlite3.Connection | None = None
-        destination: sqlite3.Connection | None = None
-        try:
-            source = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
-            destination = sqlite3.connect(temporary)
-            source.backup(destination)
-            integrity = destination.execute("PRAGMA integrity_check").fetchone()
-            if integrity is None or integrity[0] != "ok":
-                raise BackupError(f"SQLite snapshot failed integrity check: {path}")
-            destination.close()
-            destination = None
-            return temporary.read_bytes()
-        except sqlite3.Error as exc:
-            raise BackupError(f"cannot snapshot SQLite source {path}: {exc}") from exc
-        finally:
-            if destination is not None:
-                destination.close()
-            if source is not None:
-                source.close()
-            temporary.unlink(missing_ok=True)
+        """Return a coherent SQLite backup without copying a live WAL piecemeal.
+
+        The backup container mounts the data root read-only, and a WAL-mode
+        database cannot be opened even read-only without creating its ``-shm``
+        recovery file beside the source. Stage the database and any WAL
+        sidecars onto a writable filesystem first. WAL recovery validates the
+        frame checksum chain, so a staged copy torn mid-read degrades to a
+        consistent prefix rather than corrupt data, and the destination
+        integrity check remains the final gate.
+        """
+        with tempfile.TemporaryDirectory() as staging_name:
+            staging = Path(staging_name)
+            staged = staging / path.name
+            staged.write_bytes(WorkspaceBackupManager._read_stable(path))
+            for suffix in ("-wal", "-shm"):
+                sidecar = path.with_name(path.name + suffix)
+                if sidecar.is_file():
+                    (staging / sidecar.name).write_bytes(
+                        WorkspaceBackupManager._read_stable(sidecar)
+                    )
+            destination = staging / f"{path.name}.snapshot"
+            source: sqlite3.Connection | None = None
+            target: sqlite3.Connection | None = None
+            try:
+                source = sqlite3.connect(staged, timeout=10)
+                target = sqlite3.connect(destination)
+                source.backup(target)
+                integrity = target.execute("PRAGMA integrity_check").fetchone()
+                if integrity is None or integrity[0] != "ok":
+                    raise BackupError(f"SQLite snapshot failed integrity check: {path}")
+                target.close()
+                target = None
+                return destination.read_bytes()
+            except sqlite3.Error as exc:
+                raise BackupError(f"cannot snapshot SQLite source {path}: {exc}") from exc
+            finally:
+                if target is not None:
+                    target.close()
+                if source is not None:
+                    source.close()
 
     @classmethod
     def _read_context_file(cls, path: Path) -> bytes | None:
