@@ -282,19 +282,32 @@ class AgProviderGateway:
             try:
                 data = json.loads(body)
                 choice = data["choices"][0]
-                content = choice["message"]["content"]
+                if not isinstance(choice, dict) or not isinstance(choice.get("message"), dict):
+                    raise TypeError
+                content = choice["message"].get("content")
+                finish_reason = choice.get("finish_reason")
                 usage_raw = data.get("usage") or {}
                 observed_model = data.get("model")
                 observed_provider = data.get("provider") or data.get("provider_id")
                 if observed_model is not None and observed_model != model.model_id:
-                    raise TypeError
-                if not isinstance(content, str):
                     raise TypeError
                 usage = _usage(
                     usage_raw.get("prompt_tokens", 0), usage_raw.get("completion_tokens", 0)
                 )
             except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise ProviderOutcomeUnknown("provider returned malformed chat completion") from exc
+            if not isinstance(content, str):
+                if content is None and finish_reason in {"stop", "length"}:
+                    # The turn is complete and durably held: nothing more will
+                    # arrive, so custody is settled. An empty prose field is a
+                    # definitive execution outcome (typically the whole output
+                    # budget spent on reasoning), never custody ambiguity.
+                    raise ProviderDefinitiveFailure(
+                        "provider returned a terminal response with no authored text "
+                        f"(finish_reason={finish_reason!r}); the output budget may be "
+                        "exhausted by reasoning"
+                    )
+                raise ProviderOutcomeUnknown("provider returned malformed chat completion")
             return (
                 content,
                 usage,
@@ -316,6 +329,7 @@ class AgProviderGateway:
                     for block in data["content"]
                     if isinstance(block, dict) and block.get("type") == "text"
                 )
+                stop_reason = data.get("stop_reason")
                 raw = data.get("usage") or {}
                 usage = _usage(raw.get("input_tokens", 0), raw.get("output_tokens", 0))
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -323,6 +337,12 @@ class AgProviderGateway:
                     "provider returned malformed Anthropic response"
                 ) from exc
             if not content:
+                if stop_reason in {"end_turn", "max_tokens", "stop_sequence", "refusal"}:
+                    raise ProviderDefinitiveFailure(
+                        "provider returned a terminal response with no authored text "
+                        f"(stop_reason={stop_reason!r}); the output budget may be "
+                        "exhausted by reasoning"
+                    )
                 raise ProviderOutcomeUnknown("provider returned no authored text")
             return (
                 content,
@@ -350,7 +370,13 @@ class AgProviderGateway:
                 observed_model = data.get("model")
             except (KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise ProviderOutcomeUnknown("Claude Code returned malformed output") from exc
-            if not isinstance(content, str) or not content:
+            if isinstance(content, str) and not content:
+                # The CLI completed and emitted its result envelope with empty
+                # prose: a definitive execution outcome, not custody ambiguity.
+                raise ProviderDefinitiveFailure(
+                    "Claude Code returned a terminal result with no authored text"
+                )
+            if not isinstance(content, str):
                 raise ProviderOutcomeUnknown("Claude Code returned no authored text")
             return (
                 content,
@@ -386,7 +412,11 @@ class AgProviderGateway:
                     prompt_tokens = _nonnegative_int(raw.get("input_tokens", 0))
                     completion_tokens = _nonnegative_int(raw.get("output_tokens", 0))
         if not messages:
-            raise ProviderOutcomeUnknown("command provider returned no authored text")
+            # The event stream parsed completely and held no authored message:
+            # the command finished its turn without prose, which is definitive.
+            raise ProviderDefinitiveFailure(
+                "command provider completed its turn with no authored text"
+            )
         return (
             messages[-1],
             _usage(prompt_tokens, completion_tokens),

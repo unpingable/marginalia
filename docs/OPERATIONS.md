@@ -190,6 +190,15 @@ The connect-class transport path also settles through ordinary reconciliation:
 a worker that fetches connect-class evidence for an unknown dispatch applies
 the same transition itself.
 
+A terminal provider response that is complete but carries no authored text —
+for example a reasoning-first model that spends the whole output budget before
+emitting prose (`finish_reason=length` with null content) — is definitive
+execution evidence, not custody ambiguity: reconciliation classifies it as a
+retryable `provider_execution` failure and applies the same evidence-gated
+settlement when the dispatch is already `unknown`. The failure reason names
+the finish condition so the writer can retry with a larger output budget or
+another model.
+
 Generation-control semantics are end-to-end: a project pause disables the composer
 and exposes its authorized enable control; operator maintenance shows the maintenance
 notice; provider unavailability and execution failure remain distinct typed outcomes.

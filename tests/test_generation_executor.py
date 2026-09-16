@@ -16,6 +16,7 @@ from gov_webui.generation_executor import (
     ExecutorError,
     ExecutorPlan,
     GenerationExecutor,
+    ProviderDefinitiveFailure,
     ProviderOutcomeUnknown,
     ProviderRefusedBeforeSend,
 )
@@ -369,6 +370,43 @@ def test_reconcile_predispatch_refusal_settles_unknown_dispatch(tmp_path: Path) 
         "failure_type": "provider_unavailable",
         "disposition": "executor_reconcile",
         "ground": "providerd_transport_connect_predispatch",
+    }
+    # The settlement is terminal: a later reconcile returns the stored outcome.
+    assert executor.reconcile(dispatch) == recovered
+
+
+def test_reconcile_terminal_response_settles_unknown_dispatch(tmp_path: Path) -> None:
+    provider = FakeDurableProvider()
+    provider.fail_execute = True
+    store, request, dispatch, executor = _durable_executor(tmp_path, provider)
+
+    first = executor.execute(dispatch)
+    assert first.outcome == "indeterminate"
+    assert store.get_request(request.id).status is LogicalStatus.UNKNOWN
+
+    def terminal_fetch(dispatch_id, *, selected_model):
+        raise ProviderDefinitiveFailure(
+            "provider returned a terminal response with no authored text "
+            "(finish_reason='length'); the output budget may be exhausted by reasoning"
+        )
+
+    provider.fetch = terminal_fetch
+
+    recovered = executor.reconcile(dispatch)
+
+    assert recovered.outcome == "failure"
+    settled = store.get_request(request.id)
+    assert settled.status is LogicalStatus.FAILED
+    assert settled.failure_type == "provider_execution"
+    assert store.list_dispatches(request.id)[0].status.value == "failed"
+    events = store.events(request.id)
+    assert events[-1]["event_type"] == "dispatch_failed"
+    assert events[-1]["detail"] == {
+        "reason": "provider returned a terminal response with no authored text "
+        "(finish_reason='length'); the output budget may be exhausted by reasoning",
+        "failure_type": "provider_execution",
+        "disposition": "executor_reconcile",
+        "ground": "providerd_terminal_response",
     }
     # The settlement is terminal: a later reconcile returns the stored outcome.
     assert executor.reconcile(dispatch) == recovered

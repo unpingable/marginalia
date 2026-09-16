@@ -14,6 +14,7 @@ import pytest
 from gov_webui.ag_provider_gateway import AgProviderGateway
 from gov_webui.generation_executor import (
     ExecutorError,
+    ProviderDefinitiveFailure,
     ProviderOutcomeUnknown,
     ProviderRefusedBeforeSend,
 )
@@ -413,3 +414,156 @@ def test_endpoint_readiness_refuses_malformed_projections(
 
     with pytest.raises(ExecutorError, match="malformed"):
         gateway.endpoint_readiness()
+
+
+def _anthropic_gateway(tmp_path: Path) -> AgProviderGateway:
+    model_config = tmp_path / "providers.json"
+    model_config.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "default_model": "writer",
+                "providers": [
+                    {
+                        "id": "anthropic-route",
+                        "protocol": "anthropic-messages",
+                        "base_url": "https://provider.invalid/v1",
+                        "api_key_env": "PROVIDER_TEST_KEY",
+                        "models": [{"id": "writer", "model": "upstream-writer", "label": "Writer"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    providerctl = tmp_path / "ag-providerctl"
+    providerctl.write_text("fixture", encoding="utf-8")
+    config = tmp_path / "providerctl.toml"
+    config.write_text("fixture", encoding="utf-8")
+    return AgProviderGateway(providerctl, config, model_config)
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+def test_openai_terminal_empty_content_is_a_definitive_failure(
+    tmp_path: Path, finish_reason: str
+) -> None:
+    gateway = _gateway(tmp_path)
+    body = json.dumps(
+        {
+            "model": "upstream-writer",
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": None},
+                    "finish_reason": finish_reason,
+                }
+            ],
+            "usage": {"prompt_tokens": 19777, "completion_tokens": 4096},
+        }
+    )
+
+    with pytest.raises(ProviderDefinitiveFailure, match="no authored text"):
+        gateway._parse_body(gateway.catalog.resolve("writer"), body)
+
+
+def test_openai_absent_content_with_length_finish_is_a_definitive_failure(
+    tmp_path: Path,
+) -> None:
+    gateway = _gateway(tmp_path)
+    body = json.dumps(
+        {
+            "model": "upstream-writer",
+            "choices": [{"message": {"role": "assistant"}, "finish_reason": "length"}],
+            "usage": {},
+        }
+    )
+
+    with pytest.raises(ProviderDefinitiveFailure, match="no authored text"):
+        gateway._parse_body(gateway.catalog.resolve("writer"), body)
+
+
+@pytest.mark.parametrize("finish_reason", ["content_filter", None])
+def test_openai_empty_content_without_terminal_finish_remains_unknown(
+    tmp_path: Path, finish_reason: str | None
+) -> None:
+    gateway = _gateway(tmp_path)
+    body = json.dumps(
+        {
+            "model": "upstream-writer",
+            "choices": [
+                {"message": {"role": "assistant", "content": None}, "finish_reason": finish_reason}
+            ],
+            "usage": {},
+        }
+    )
+
+    with pytest.raises(ProviderOutcomeUnknown, match="malformed chat completion"):
+        gateway._parse_body(gateway.catalog.resolve("writer"), body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["not json", json.dumps({"choices": [{"message": {"content": 42}}]})],
+)
+def test_openai_malformed_completion_remains_unknown(tmp_path: Path, body: str) -> None:
+    gateway = _gateway(tmp_path)
+
+    with pytest.raises(ProviderOutcomeUnknown, match="malformed chat completion"):
+        gateway._parse_body(gateway.catalog.resolve("writer"), body)
+
+
+@pytest.mark.parametrize("stop_reason", ["end_turn", "max_tokens"])
+def test_anthropic_terminal_empty_content_is_a_definitive_failure(
+    tmp_path: Path, stop_reason: str
+) -> None:
+    gateway = _anthropic_gateway(tmp_path)
+    body = json.dumps(
+        {
+            "model": "upstream-writer",
+            "content": [],
+            "stop_reason": stop_reason,
+            "usage": {"input_tokens": 10, "output_tokens": 4096},
+        }
+    )
+
+    with pytest.raises(ProviderDefinitiveFailure, match="no authored text"):
+        gateway._parse_body(gateway.catalog.resolve("writer"), body)
+
+
+def test_anthropic_empty_content_without_terminal_stop_remains_unknown(tmp_path: Path) -> None:
+    gateway = _anthropic_gateway(tmp_path)
+    body = json.dumps({"model": "upstream-writer", "content": [], "usage": {}})
+
+    with pytest.raises(ProviderOutcomeUnknown, match="no authored text"):
+        gateway._parse_body(gateway.catalog.resolve("writer"), body)
+
+
+def test_claude_code_empty_result_is_a_definitive_failure(tmp_path: Path) -> None:
+    gateway = _command_gateway(tmp_path)
+
+    with pytest.raises(ProviderDefinitiveFailure, match="no authored text"):
+        gateway._parse_body(
+            gateway.catalog.resolve("writer"),
+            json.dumps({"type": "result", "result": "", "usage": {}}),
+        )
+
+
+def test_claude_code_malformed_output_remains_unknown(tmp_path: Path) -> None:
+    gateway = _command_gateway(tmp_path)
+
+    with pytest.raises(ProviderOutcomeUnknown, match="malformed output"):
+        gateway._parse_body(gateway.catalog.resolve("writer"), json.dumps({"type": "result"}))
+
+
+def test_command_jsonl_without_authored_text_is_a_definitive_failure(tmp_path: Path) -> None:
+    gateway = _command_gateway(tmp_path, adapter="kimi-code")
+    body = '{"role":"user","content":"hi"}\n{"role":"tool","content":"ok"}\n'
+
+    with pytest.raises(ProviderDefinitiveFailure, match="no authored text"):
+        gateway._parse_body(gateway.catalog.resolve("writer"), body)
+
+
+def test_command_malformed_jsonl_remains_unknown(tmp_path: Path) -> None:
+    gateway = _command_gateway(tmp_path, adapter="kimi-code")
+
+    with pytest.raises(ProviderOutcomeUnknown, match="malformed JSONL"):
+        gateway._parse_body(gateway.catalog.resolve("writer"), "not json\n")

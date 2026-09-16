@@ -754,7 +754,22 @@ class GenerationExecutor:
             )
         except ProviderDefinitiveFailure as exc:
             reason = str(exc)
-            self.generations.mark_failed(durable.id, reason)
+            current_dispatch = self.generations.get_dispatch(durable.id)
+            if current_dispatch is not None and current_dispatch.status is DispatchStatus.UNKNOWN:
+                # mark_failed refuses to leave unknown, but providerd durably
+                # holds the terminal provider response this verdict is parsed
+                # from, so the settlement is evidence-gated, never elapsed
+                # time or operator attestation.
+                self.generations.settle_unknown_dispatch(
+                    current_dispatch.logical_request_id,
+                    durable.id,
+                    reason,
+                    failure_type="provider_execution",
+                    disposition="executor_reconcile",
+                    ground="providerd_terminal_response",
+                )
+            else:
+                self.generations.mark_failed(durable.id, reason)
             receipt = _digest(
                 "marginalia.executor-failure/v1",
                 {"attempt": dispatch.attempt, "reason": reason},
