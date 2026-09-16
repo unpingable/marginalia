@@ -1,8 +1,9 @@
 # Handoff — missing provider credential wedges generation as "unknown" (2026-09-15)
 
-Audience: Kimi (implementation). Status: **uncommitted handoff packet**; no code
-has been changed for this incident. Production disposition is recorded
-separately at the bottom and must be kept current by the operator.
+Audience: Kimi (implementation). Status: **implemented and deployed**
+(2026-09-16, branch `incident/generation-policy-20260911`). Production
+disposition is recorded separately at the bottom and must be kept current by
+the operator.
 
 ## Symptom
 
@@ -197,6 +198,79 @@ journal to a read-only opener. Confirm or refute after (4).
   VRAM. No new non-terminal work in any context.
 - PENDING: Erin's browser acceptance (refresh, open Doverton, choose Orion or a
   GLM model, complete one ordinary turn).
+
+2026-09-16, fix train deployed:
+
+- 15:12Z verified pre-deploy backup `marginalia-erin-20260916T151209391877Z.zip`,
+  sha256 `9ef809c772eb3f3e04ad5af3b7dd284258f62b11a5f5bef3b7d584e77a5318fe`;
+  maintenance notice enabled for the deploy window.
+- Deployed `marginalia:provider-credential-refusal-51c7ec5-candidate` (branch
+  `incident/generation-policy-20260911`, commits `3073e47`, `b351dfc`,
+  `51c7ec5`; vendored ag-ng `61b56fd8` from upstream
+  `marginalia/credential-refusal-v1`) to web, worker, synthetic, backup.
+  Prior `.env.ag-ng` and compose kept as `*.pre-provider-credential-refusal-20260916`;
+  pre-deploy container logs in `logs-pre-provider-credential-refusal-20260916/`;
+  rollback tag `marginalia:rollback-provider-credential-refusal-20260916`.
+- providerd alone stayed on `marginalia:generation-policy-d420ba4-candidate`
+  (`MARGINALIA_PROVIDERD_IMAGE` pin): the new binary refuses the existing store
+  ("store activation identity mismatch" — activation binds exact binary bytes)
+  and upstream's rotation ceremony is not implemented yet
+  (`ag-ng/docs/deployment.md`). Until providerd rotates, the new pre-dispatch
+  credential/command validation and the EndpointReadiness RPC are dark: the
+  worker logs `provider_readiness_error` ~every 30 s and the web's readiness
+  projection fails open. The three unprovisioned hosted models stay unavailable
+  via catalog config, so selection safety is preserved; per-dispatch
+  pre-validation is not yet live. **Every future ag-ng binary upgrade is
+  blocked on this rotation.**
+- Settlements through the new code: Erin's 09-15 22:34Z GLM wedge
+  `gen_33d65c5f…` → `failed/provider_execution` (ground
+  `providerd_terminal_response`; the provider returned a terminal empty body at
+  the 4,096-token output budget on a reasoning model — not a credential
+  defect), verified `outcome=failure`, `retryable=true` via the status
+  endpoint. Synthetic `gen_8eed3d21…` → `failed/provider_unavailable`.
+  Synthetic `gen_5324f9c9…` (body-class; may have reached OpenRouter) stays
+  `unknown` under persisted exponential backoff (observed intervals
+  4→11→21→41→83 s).
+- Command-log backlog pruned to the 100-triple retention (300 files) for all
+  three reconciled dispatches; worker CPU ~1.2%. The inert 09-15 `gen_895c…`
+  backlog (3,517 triples, 19:44–21:22Z) is retained: the worker no longer
+  selects that request, and with dedupe suppressing writes no prune pass runs
+  for it.
+- Adapter probes (isolated `erin-writing-synthetic` context): Orion PASS
+  23,183 ms receipt `sha256:8c7b6a4e…`; `claude-sonnet-4-20250514` (Claude
+  Code) PASS 4,577 ms receipt `sha256:dcd70868…`; `kimi-code-local` PASS
+  11,586 ms receipt `sha256:53481bf9…`. `codex-default` fails cleanly —
+  terminal provider 502 in 5.6 s, generation settled, no `unknown` residue
+  (last PASS 09-08; unexercised since the pause days; adapter/upstream issue,
+  not a custody wedge).
+- Item 7 confirmed and fixed. `_sqlite_snapshot` could not open a WAL database
+  from the backup container's read-only `/data` mount: WAL recovery must
+  create the `-shm` file beside the source, so even a read-only open fails
+  with "unable to open database file". Deterministic and unrelated to the hot
+  loop — it reproduced 16 minutes after the loop ended, and zero automated
+  backup attempts had succeeded since the ag-ng migration (verified backups to
+  date were operator-made from a writable mount). Fixed in `d52fd5b` (stage
+  db+wal+shm through `_read_stable` into a writable temporary directory; WAL
+  checksum chain plus destination integrity check gate the result) and
+  deployed as `marginalia:provider-credential-refusal-d52fd5b-candidate` to
+  all Python services (providerd pin unchanged; `.env.ag-ng` kept as
+  `.env.ag-ng.pre-backup-fix-20260916`). Live proof: the docket-state source
+  snapshots in 0.03 s; fresh backup
+  `marginalia-erin-20260916T155743313238Z.zip` verified (2 projects, 7
+  conversations, 19,211 files, outer checksum ok, docket-state member
+  present), sha256
+  `d218084dd98adf85c4f42b6b3e75221c46925a5aad29bc2cdf28b05ad3f3eca7`. Watch
+  tomorrow's automated daily attempt in the backup log.
+- 15:58Z maintenance lifted (`maintenance.resolved-20260916T1558Z.txt`) after
+  an Orion re-probe on the final image (PASS 29,647 ms, receipt
+  `sha256:e8a66584…`).
+- Production-shaped acceptance: a forced `/v1/chat/completions` to `kimi-k3`
+  (credential absent) returns `failure/provider_unavailable` ("The selected
+  model provider is unavailable. Choose another available model or try again
+  later.") with no session mutation and no generation row — refusal happens
+  before custody.
+- PENDING: Erin's browser acceptance (refresh, open Doverton, choose Orion or
+  a GLM model, complete one ordinary turn).
 
 ### Loose end: config file modes
 
