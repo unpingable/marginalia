@@ -595,3 +595,45 @@ def test_worker_config_reads_reconcile_command_and_readiness_knobs(
     monkeypatch.setenv("MARGINALIA_GENERATION_RECONCILE_MAX_SECONDS", "1")
     with pytest.raises(GenerationWorkerError, match="invalid"):
         WorkerConfig.from_environment()
+
+
+def test_command_log_prune_is_a_single_directory_pass_over_a_backlog(
+    tmp_path: Path,
+) -> None:
+    config = _worker_config(tmp_path, tmp_path, command_log_retention=100)
+    store = GenerationStore(tmp_path / "ctx" / "marginalia" / "generation.sqlite")
+    request = store.create_request(
+        client_request_id="client",
+        project_id="project",
+        session_id="session",
+        expected_revision=0,
+        canon_fingerprint="canon",
+        guidance_fingerprint="guidance",
+        original_model="model",
+        original_route="route",
+        request={"context_id": "ctx", "messages": [], "model": "model"},
+    ).request
+    store.set_dispatch_enabled("project", True)
+    dispatch = store.reserve_dispatch(request.id)
+    governed = GovernedGeneration(config, store, request, dispatch)
+    governed.logs_dir.mkdir(parents=True)
+    for sequence in range(1, 501):
+        for suffix in ("stdout", "stderr", "command.json"):
+            (governed.logs_dir / f"{sequence:04d}-recover.{suffix}").write_bytes(b"x")
+
+    glob_calls = 0
+    original = governed._command_log_triples
+
+    def counting_triples():
+        nonlocal glob_calls
+        glob_calls += 1
+        return original()
+
+    governed._command_log_triples = counting_triples
+    governed._prune_command_logs()
+
+    assert glob_calls == 1
+    remaining = sorted(path.name for path in governed.logs_dir.iterdir())
+    assert len(remaining) == 300
+    assert remaining[0].startswith("0401-")
+    assert remaining[-1].startswith("0500-")

@@ -451,33 +451,46 @@ class GovernedGeneration:
         except json.JSONDecodeError as exc:
             raise GenerationWorkerError(f"ag-loopctl {arguments[0]} returned invalid JSON") from exc
 
+    def _command_log_triples(self) -> dict[int, list[Path]]:
+        """All retained command-log triples keyed by sequence, in one scan.
+
+        A reconcile hot-loop can leave hundreds of thousands of files behind,
+        so every consumer must share this single pass: re-globbing per
+        sequence is quadratic in the backlog size and never finishes.
+        """
+        triples: dict[int, list[Path]] = {}
+        for path in self.logs_dir.glob("*-*"):
+            prefix = path.name.partition("-")[0]
+            if prefix.isdecimal():
+                triples.setdefault(int(prefix), []).append(path)
+        return triples
+
     def _matches_previous_triple(self, operation: str, stdout: bytes, stderr: bytes) -> bool:
         """Whether the newest retained triple already holds this exact result."""
-        previous = self._sequence - 1
-        while previous >= 1:
-            candidate = next(self.logs_dir.glob(f"{previous:04d}-*.command.json"), None)
-            if candidate is not None:
-                break
-            previous -= 1
-        if previous < 1:
+        triples = self._command_log_triples()
+        retained = [sequence for sequence in triples if sequence < self._sequence]
+        if not retained:
             return False
-        stem = candidate.name[: -len(".command.json")]
-        logged_operation = stem.partition("-")[2]
-        return (
-            logged_operation == operation
-            and (self.logs_dir / f"{stem}.stdout").read_bytes() == stdout
-            and (self.logs_dir / f"{stem}.stderr").read_bytes() == stderr
-        )
+        command_jsons = [
+            path for path in triples[max(retained)] if path.name.endswith(".command.json")
+        ]
+        if len(command_jsons) != 1:
+            return False
+        stem = command_jsons[0].name[: -len(".command.json")]
+        if stem.partition("-")[2] != operation:
+            return False
+        return (self.logs_dir / f"{stem}.stdout").read_bytes() == stdout and (
+            self.logs_dir / f"{stem}.stderr"
+        ).read_bytes() == stderr
 
     def _prune_command_logs(self) -> None:
         """Retain at most the newest configured triples for this dispatch."""
-        sequences = sorted(
-            int(path.name.partition("-")[0])
-            for path in self.logs_dir.glob("*-*.command.json")
-            if path.name.partition("-")[0].isdecimal()
-        )
-        for sequence in sequences[: max(0, len(sequences) - self.config.command_log_retention)]:
-            for path in self.logs_dir.glob(f"{sequence:04d}-*"):
+        triples = self._command_log_triples()
+        excess = len(triples) - self.config.command_log_retention
+        if excess <= 0:
+            return
+        for sequence in sorted(triples)[:excess]:
+            for path in triples[sequence]:
                 path.unlink()
 
     def _last_command_sequence(self) -> int:
