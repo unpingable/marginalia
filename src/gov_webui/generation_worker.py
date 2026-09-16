@@ -11,12 +11,14 @@ import subprocess
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from gov_webui.ag_provider_gateway import AgProviderGateway
 from gov_webui.generation_boundaries import (
     OBSERVATION_BASIS_TYPE,
     OBSERVATION_RESOLVER_ID,
@@ -36,6 +38,7 @@ from gov_webui.generation_store import (
     LogicalStatus,
 )
 from gov_webui.state_layout import contexts_root as application_contexts_root
+from gov_webui.state_layout import shared_root as application_shared_root
 
 
 class GenerationWorkerError(RuntimeError):
@@ -87,6 +90,12 @@ class WorkerConfig:
     model_config: Path = Path("/etc/marginalia/providers.json")
     retention_days: int = 30
     poll_seconds: float = 2.0
+    reconcile_base_seconds: float = 5.0
+    reconcile_max_seconds: float = 300.0
+    command_timeout_seconds: float = 300.0
+    command_log_retention: int = 100
+    readiness_interval_seconds: float = 30.0
+    readiness_path: Path = Path("/data/.marginalia/shared/provider-readiness.json")
 
     @classmethod
     def from_environment(cls) -> WorkerConfig:
@@ -100,12 +109,32 @@ class WorkerConfig:
         poll = float(os.environ.get("MARGINALIA_GENERATION_POLL_SECONDS", "2"))
         if not 1 <= retention <= 3650 or not 0.1 <= poll <= 300:
             raise GenerationWorkerError("invalid retention or worker poll interval")
+        reconcile_base = float(os.environ.get("MARGINALIA_GENERATION_RECONCILE_BASE_SECONDS", "5"))
+        reconcile_max = float(os.environ.get("MARGINALIA_GENERATION_RECONCILE_MAX_SECONDS", "300"))
+        command_timeout = float(
+            os.environ.get("MARGINALIA_GENERATION_COMMAND_TIMEOUT_SECONDS", "300")
+        )
+        command_log_retention = int(
+            os.environ.get("MARGINALIA_GENERATION_COMMAND_LOG_RETENTION", "100")
+        )
+        readiness_interval = float(
+            os.environ.get("MARGINALIA_PROVIDER_READINESS_INTERVAL_SECONDS", "30")
+        )
+        if (
+            not 0.1 <= reconcile_base <= 3600
+            or not reconcile_base <= reconcile_max <= 86400
+            or not 1 <= command_timeout <= 3600
+            or not 1 <= command_log_retention <= 100000
+            or not 1 <= readiness_interval <= 3600
+        ):
+            raise GenerationWorkerError(
+                "invalid reconcile backoff, command bound, or readiness interval"
+            )
+        data_root = Path(os.environ.get("MARGINALIA_DATA_ROOT", "/data"))
         return cls(
             contexts_root=absolute(
                 "MARGINALIA_CONTEXTS_DIR",
-                str(
-                    application_contexts_root(Path(os.environ.get("MARGINALIA_DATA_ROOT", "/data")))
-                ),
+                str(application_contexts_root(data_root)),
             ),
             ag_loopctl=absolute("MARGINALIA_AG_LOOPCTL", "/usr/local/bin/ag-loopctl"),
             docket=absolute("MARGINALIA_DOCKET", "/usr/local/bin/docket"),
@@ -136,6 +165,15 @@ class WorkerConfig:
             ),
             retention_days=retention,
             poll_seconds=poll,
+            reconcile_base_seconds=reconcile_base,
+            reconcile_max_seconds=reconcile_max,
+            command_timeout_seconds=command_timeout,
+            command_log_retention=command_log_retention,
+            readiness_interval_seconds=readiness_interval,
+            readiness_path=absolute(
+                "MARGINALIA_PROVIDER_READINESS_FILE",
+                str(application_shared_root(data_root) / "provider-readiness.json"),
+            ),
         )
 
 
@@ -377,14 +415,33 @@ class GovernedGeneration:
     def _run(self, *arguments: str) -> dict[str, Any]:
         self._sequence += 1
         command = [str(self.config.ag_loopctl), *arguments]
-        completed = subprocess.run(command, capture_output=True, check=False)
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                timeout=self.config.command_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise GenerationWorkerError(
+                f"ag-loopctl {arguments[0]} exceeded its "
+                f"{self.config.command_timeout_seconds:g}-second command bound"
+            ) from exc
         prefix = self.logs_dir / f"{self._sequence:04d}-{arguments[0]}"
-        self._write_bytes(prefix.with_suffix(".stdout"), completed.stdout)
-        self._write_bytes(prefix.with_suffix(".stderr"), completed.stderr)
-        self._write_exact(
-            prefix.with_suffix(".command.json"),
-            {"argv": command, "returncode": completed.returncode},
-        )
+        if completed.returncode == 0 and self._matches_previous_triple(
+            arguments[0], completed.stdout, completed.stderr
+        ):
+            # A repeated identical result (the reconcile inspect/recover loop's
+            # steady state) carries no new information; keep only the first.
+            pass
+        else:
+            self._write_bytes(prefix.with_suffix(".stdout"), completed.stdout)
+            self._write_bytes(prefix.with_suffix(".stderr"), completed.stderr)
+            self._write_exact(
+                prefix.with_suffix(".command.json"),
+                {"argv": command, "returncode": completed.returncode},
+            )
+            self._prune_command_logs()
         if completed.returncode != 0:
             raise GenerationWorkerError(
                 f"ag-loopctl {arguments[0]} refused; see {prefix.with_suffix('.stderr')}"
@@ -393,6 +450,35 @@ class GovernedGeneration:
             return json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
             raise GenerationWorkerError(f"ag-loopctl {arguments[0]} returned invalid JSON") from exc
+
+    def _matches_previous_triple(self, operation: str, stdout: bytes, stderr: bytes) -> bool:
+        """Whether the newest retained triple already holds this exact result."""
+        previous = self._sequence - 1
+        while previous >= 1:
+            candidate = next(self.logs_dir.glob(f"{previous:04d}-*.command.json"), None)
+            if candidate is not None:
+                break
+            previous -= 1
+        if previous < 1:
+            return False
+        stem = candidate.name[: -len(".command.json")]
+        logged_operation = stem.partition("-")[2]
+        return (
+            logged_operation == operation
+            and (self.logs_dir / f"{stem}.stdout").read_bytes() == stdout
+            and (self.logs_dir / f"{stem}.stderr").read_bytes() == stderr
+        )
+
+    def _prune_command_logs(self) -> None:
+        """Retain at most the newest configured triples for this dispatch."""
+        sequences = sorted(
+            int(path.name.partition("-")[0])
+            for path in self.logs_dir.glob("*-*.command.json")
+            if path.name.partition("-")[0].isdecimal()
+        )
+        for sequence in sequences[: max(0, len(sequences) - self.config.command_log_retention)]:
+            for path in self.logs_dir.glob(f"{sequence:04d}-*"):
+                path.unlink()
 
     def _last_command_sequence(self) -> int:
         sequences = []
@@ -469,6 +555,41 @@ class GovernedGeneration:
             os.close(directory)
 
 
+def _reconcile_deferred(request: LogicalRequest) -> bool:
+    """Whether an unknown request must wait out its persisted reconcile backoff."""
+    if request.next_reconcile_at is None:
+        return False
+    try:
+        deferred_until = datetime.fromisoformat(request.next_reconcile_at)
+    except ValueError:
+        return False
+    return deferred_until > datetime.now(timezone.utc)
+
+
+def _update_reconcile_backoff(
+    config: WorkerConfig, store: GenerationStore, request_id: str
+) -> None:
+    """Back an unresolved unknown off exponentially; clear bookkeeping on exit."""
+    refreshed = store.get_request(request_id)
+    if refreshed is None:
+        return
+    if refreshed.status is LogicalStatus.UNKNOWN:
+        # The exponent is clamped so a long-lived request cannot overflow the
+        # float multiplication; 2**20 already exceeds any permitted cap.
+        delay = min(
+            config.reconcile_base_seconds * 2.0 ** min(refreshed.reconcile_attempts, 20),
+            config.reconcile_max_seconds,
+        )
+        next_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        store.schedule_reconciliation(
+            request_id,
+            next_reconcile_at=next_at.isoformat(),
+            reconcile_attempts=refreshed.reconcile_attempts + 1,
+        )
+    elif refreshed.next_reconcile_at is not None or refreshed.reconcile_attempts:
+        store.clear_reconciliation_backoff(request_id)
+
+
 def process_one(config: WorkerConfig, store: GenerationStore, request: LogicalRequest) -> str:
     dispatches = store.list_dispatches(request.id)
     if not dispatches:
@@ -520,6 +641,10 @@ def run_once(config: WorkerConfig) -> list[dict[str, str]]:
                 request.project_id
             ):
                 continue
+            # An unresolved unknown re-drives only after its persisted backoff
+            # instant; until then it waits silently instead of hot-looping.
+            if request.status is LogicalStatus.UNKNOWN and _reconcile_deferred(request):
+                continue
             if request.status is LogicalStatus.FAILED:
                 used = len(store.list_dispatches(request.id))
                 available = 1 + len(request.fallback_policy)
@@ -540,6 +665,8 @@ def run_once(config: WorkerConfig) -> list[dict[str, str]]:
                 results.append({"request_id": request.id, "state": state})
             except Exception as exc:
                 results.append({"request_id": request.id, "state": "error", "error": str(exc)})
+            if request.status is LogicalStatus.UNKNOWN:
+                _update_reconcile_backoff(config, store, request.id)
         evidence = EncryptedEvidenceStore(
             path.parent / "generation-evidence",
             config.evidence_keyring,
@@ -553,10 +680,48 @@ def run_once(config: WorkerConfig) -> list[dict[str, str]]:
     return results
 
 
+def refresh_provider_readiness(config: WorkerConfig) -> dict[str, Any]:
+    """Project providerd's content-free endpoint readiness where web can read it.
+
+    The web process deliberately holds no provider credentials, so the worker
+    publishes the daemon's readiness verdicts — statuses only, never values or
+    paths — into the shared application volume. The write is atomic; a failed
+    refresh leaves the previous projection in place.
+    """
+    gateway = AgProviderGateway(
+        config.providerctl,
+        config.providerctl_config,
+        config.model_config,
+    )
+    endpoints = gateway.endpoint_readiness()
+    document = {
+        "schema": "marginalia.provider-readiness/v1",
+        "refreshed_at": datetime.now(timezone.utc).isoformat(),
+        "endpoints": endpoints,
+    }
+    path = config.readiness_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return {"state": "provider_readiness_refreshed", "endpoints": len(endpoints)}
+
+
 def main() -> int:
     config = WorkerConfig.from_environment()
     print(json.dumps({"event": "generation_worker_started"}), flush=True)
+    readiness_refreshed_at = float("-inf")
     while True:
+        if time.monotonic() - readiness_refreshed_at >= config.readiness_interval_seconds:
+            readiness_refreshed_at = time.monotonic()
+            try:
+                readiness = refresh_provider_readiness(config)
+            except Exception as exc:
+                readiness = {"state": "provider_readiness_error", "error": str(exc)}
+            print(json.dumps({"event": "generation_worker_result", **readiness}), flush=True)
         for result in run_once(config):
             print(json.dumps({"event": "generation_worker_result", **result}), flush=True)
         time.sleep(config.poll_seconds)

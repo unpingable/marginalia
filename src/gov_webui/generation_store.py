@@ -97,6 +97,8 @@ class LogicalRequest:
     failure_type: str | None
     created_at: str
     updated_at: str
+    next_reconcile_at: str | None = None
+    reconcile_attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -179,7 +181,7 @@ def delivery_digest(
 class GenerationStore:
     """SQLite custody index shared by the web and worker processes."""
 
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -339,6 +341,13 @@ class GenerationStore:
                 )
             if "failure_type" not in request_columns:
                 connection.execute("ALTER TABLE logical_request ADD COLUMN failure_type TEXT")
+            if "next_reconcile_at" not in request_columns:
+                connection.execute("ALTER TABLE logical_request ADD COLUMN next_reconcile_at TEXT")
+            if "reconcile_attempts" not in request_columns:
+                connection.execute(
+                    "ALTER TABLE logical_request ADD COLUMN reconcile_attempts "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
             connection.commit()
 
@@ -808,7 +817,10 @@ class GenerationStore:
                 (DispatchStatus.CANDIDATE, candidate_id, now, dispatch_id),
             )
             connection.execute(
-                "UPDATE logical_request SET status=?,candidate_id=?,updated_at=? WHERE id=?",
+                """UPDATE logical_request
+                   SET status=?,candidate_id=?,next_reconcile_at=NULL,reconcile_attempts=0,
+                       updated_at=?
+                   WHERE id=?""",
                 (LogicalStatus.CANDIDATE, candidate_id, now, dispatch.logical_request_id),
             )
             self._event(
@@ -880,6 +892,147 @@ class GenerationStore:
                 dispatch_id=dispatch_id,
             )
             connection.commit()
+
+    def settle_unknown_dispatch(
+        self,
+        logical_request_id: str,
+        dispatch_id: str,
+        reason: str,
+        *,
+        failure_type: str = "provider_unavailable",
+        disposition: str,
+        ground: str,
+        expected_updated_at: str | None = None,
+    ) -> None:
+        """Settle exactly one unknown dispatch as failed against typed evidence.
+
+        UNKNOWN retains custody precisely because the provider outcome could
+        not be proven. Leaving it is legal only with a typed evidence ``ground``
+        (never elapsed time), under compare-and-set preconditions that prove
+        the operator and this transaction saw the same rows. Every check runs
+        inside one immediate transaction and each UPDATE must land on exactly
+        one row.
+        """
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+
+            def refuse(message: str) -> None:
+                connection.rollback()
+                raise GenerationTransitionError(message)
+
+            request_row = connection.execute(
+                "SELECT * FROM logical_request WHERE id=?", (logical_request_id,)
+            ).fetchone()
+            if request_row is None:
+                connection.rollback()
+                raise KeyError(logical_request_id)
+            dispatch_row = connection.execute(
+                "SELECT * FROM dispatch WHERE id=?", (dispatch_id,)
+            ).fetchone()
+            if dispatch_row is None:
+                connection.rollback()
+                raise KeyError(dispatch_id)
+            request = self._logical(request_row)
+            dispatch = self._dispatch(dispatch_row)
+            if dispatch.logical_request_id != logical_request_id:
+                refuse(f"dispatch {dispatch_id} does not belong to {logical_request_id}")
+            if (
+                request.status is not LogicalStatus.UNKNOWN
+                or dispatch.status is not DispatchStatus.UNKNOWN
+            ):
+                refuse("only a request and dispatch that are both unknown can be settled")
+            if expected_updated_at is not None and (
+                request.updated_at != expected_updated_at
+                or dispatch.updated_at != expected_updated_at
+            ):
+                refuse("unknown custody changed since the caller's evidence snapshot")
+            if dispatch.candidate_id is not None:
+                refuse("a dispatch holding a candidate can never be settled as failed")
+            candidate_rows = connection.execute(
+                "SELECT COUNT(*) FROM generation_candidate WHERE dispatch_id=?",
+                (dispatch_id,),
+            ).fetchone()[0]
+            if candidate_rows:
+                refuse("a dispatch holding a candidate can never be settled as failed")
+            now = _now()
+            cursor = connection.execute(
+                "UPDATE dispatch SET status=?,updated_at=? WHERE id=? AND status=?",
+                (DispatchStatus.FAILED, now, dispatch_id, DispatchStatus.UNKNOWN),
+            )
+            if cursor.rowcount != 1:
+                refuse("dispatch settlement did not land on exactly one row")
+            cursor = connection.execute(
+                """UPDATE logical_request
+                   SET status=?,last_error=?,failure_type=?,next_reconcile_at=NULL,
+                       reconcile_attempts=0,updated_at=?
+                   WHERE id=? AND status=?""",
+                (
+                    LogicalStatus.FAILED,
+                    reason,
+                    failure_type,
+                    now,
+                    logical_request_id,
+                    LogicalStatus.UNKNOWN,
+                ),
+            )
+            if cursor.rowcount != 1:
+                refuse("request settlement did not land on exactly one row")
+            self._event(
+                connection,
+                logical_request_id,
+                "dispatch_failed",
+                {
+                    "reason": reason,
+                    "failure_type": failure_type,
+                    "disposition": disposition,
+                    "ground": ground,
+                },
+                dispatch_id=dispatch_id,
+            )
+            connection.commit()
+
+    def schedule_reconciliation(
+        self,
+        logical_request_id: str,
+        *,
+        next_reconcile_at: str,
+        reconcile_attempts: int,
+    ) -> None:
+        """Persist the next permitted reconcile instant for an unresolved unknown.
+
+        ``updated_at`` deliberately stays put: it is the operator's
+        compare-and-set token for custody settlement, and reconcile backoff is
+        bookkeeping, not a custody change.
+        """
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status FROM logical_request WHERE id=?", (logical_request_id,)
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(logical_request_id)
+            if LogicalStatus(row["status"]) is not LogicalStatus.UNKNOWN:
+                connection.rollback()
+                raise GenerationTransitionError(
+                    "reconcile backoff applies only while a request is unknown"
+                )
+            connection.execute(
+                """UPDATE logical_request
+                   SET next_reconcile_at=?,reconcile_attempts=? WHERE id=?""",
+                (next_reconcile_at, reconcile_attempts, logical_request_id),
+            )
+            connection.commit()
+
+    def clear_reconciliation_backoff(self, logical_request_id: str) -> None:
+        """Drop reconcile bookkeeping once a request has left unknown."""
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE logical_request
+                   SET next_reconcile_at=NULL,reconcile_attempts=0
+                   WHERE id=? AND (next_reconcile_at IS NOT NULL OR reconcile_attempts<>0)""",
+                (logical_request_id,),
+            )
 
     def accept_candidate(self, candidate_id: str, message_id: str) -> None:
         """Record application acceptance idempotently after the session append."""
@@ -1181,6 +1334,8 @@ class GenerationStore:
             failure_type=row["failure_type"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            next_reconcile_at=row["next_reconcile_at"],
+            reconcile_attempts=int(row["reconcile_attempts"]),
         )
 
     @staticmethod

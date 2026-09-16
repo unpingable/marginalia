@@ -12,7 +12,11 @@ from pathlib import Path
 import pytest
 
 from gov_webui.ag_provider_gateway import AgProviderGateway
-from gov_webui.generation_executor import ExecutorError
+from gov_webui.generation_executor import (
+    ExecutorError,
+    ProviderOutcomeUnknown,
+    ProviderRefusedBeforeSend,
+)
 
 
 def _gateway(tmp_path: Path) -> AgProviderGateway:
@@ -272,3 +276,140 @@ def test_command_records_model_only_when_tool_attests_it(tmp_path: Path) -> None
         "model_id": "physically-returned-model",
         "status": "attested",
     }
+
+
+def _fetch_event_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, event: dict
+) -> tuple[AgProviderGateway, str]:
+    gateway = _gateway(tmp_path)
+    dispatch = "sha256:" + "f" * 64
+    encoded = json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
+    exact = "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+    def run(command, **_kwargs):
+        result = {
+            "status": "ok",
+            "response": {
+                "kind": "inference",
+                "dispatch": dispatch,
+                "event_stream": base64.b64encode(encoded).decode(),
+                "exact_event_stream": exact,
+            },
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(result).encode(), b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return gateway, dispatch
+
+
+def test_connect_transport_failure_is_a_definitive_predispatch_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gateway, dispatch = _fetch_event_gateway(
+        tmp_path, monkeypatch, {"event": "transport_failure", "class": "connect"}
+    )
+
+    with pytest.raises(ProviderRefusedBeforeSend):
+        gateway.fetch(dispatch, selected_model="writer")
+
+
+def test_body_transport_failure_remains_indeterminate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gateway, dispatch = _fetch_event_gateway(
+        tmp_path, monkeypatch, {"event": "transport_failure", "class": "body"}
+    )
+
+    with pytest.raises(ProviderOutcomeUnknown):
+        gateway.fetch(dispatch, selected_model="writer")
+
+
+def test_wire_unavailable_is_a_definitive_predispatch_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gateway = _gateway(tmp_path)
+
+    def run(command, **_kwargs):
+        result = {"status": "error", "code": "unavailable"}
+        return subprocess.CompletedProcess(command, 0, json.dumps(result).encode(), b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(ProviderRefusedBeforeSend):
+        gateway.fetch("sha256:" + "0" * 64, selected_model="writer")
+
+
+def test_wire_indeterminate_remains_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gateway = _gateway(tmp_path)
+
+    def run(command, **_kwargs):
+        result = {"status": "error", "code": "indeterminate"}
+        return subprocess.CompletedProcess(command, 0, json.dumps(result).encode(), b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(ProviderOutcomeUnknown):
+        gateway.fetch("sha256:" + "0" * 64, selected_model="writer")
+
+
+def test_endpoint_readiness_returns_exact_content_free_statuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gateway = _gateway(tmp_path)
+    seen = {}
+
+    def run(command, **kwargs):
+        seen["command"] = command
+        seen["timeout"] = kwargs.get("timeout")
+        result = {
+            "endpoints": [
+                {"endpoint_id": "openai-api", "status": "credential_unavailable"},
+                {"endpoint_id": "ollama-local", "status": "ready"},
+                {"endpoint_id": "claude-command", "status": "command_unavailable"},
+            ]
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(result).encode(), b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    readiness = gateway.endpoint_readiness()
+
+    assert readiness == {
+        "openai-api": "credential_unavailable",
+        "ollama-local": "ready",
+        "claude-command": "command_unavailable",
+    }
+    assert seen["command"][-1] == "endpoint-readiness"
+    assert seen["timeout"] == 30
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {},
+        {"endpoints": {}},
+        {"endpoints": [{"endpoint_id": "openai-api"}]},
+        {"endpoints": [{"endpoint_id": "openai-api", "status": "degraded"}]},
+        {"endpoints": [{"endpoint_id": "", "status": "ready"}]},
+        {"endpoints": [{"endpoint_id": "a", "status": "ready", "extra": True}]},
+        {
+            "endpoints": [
+                {"endpoint_id": "a", "status": "ready"},
+                {"endpoint_id": "a", "status": "ready"},
+            ]
+        },
+    ],
+)
+def test_endpoint_readiness_refuses_malformed_projections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, document: dict
+) -> None:
+    gateway = _gateway(tmp_path)
+
+    def run(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 0, json.dumps(document).encode(), b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(ExecutorError, match="malformed"):
+        gateway.endpoint_readiness()

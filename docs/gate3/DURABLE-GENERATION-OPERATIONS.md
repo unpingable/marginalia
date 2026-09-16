@@ -10,7 +10,7 @@ recovery, and acceptance of already-dispatched work available.
 Every service uses one image built from one committed Marginalia candidate. The
 image embeds:
 
-- ag-ng `1bd4225a94fa82df066923612f713a93ba93a7bb`;
+- ag-ng `61b56fd868b1892d8e1b97869a1afb04cf054dfe`;
 - Docket `181589f910b76030b312d6478bd0ac813a630855`.
 
 The runtime is five services: web, Docket generation worker, ag-providerd,

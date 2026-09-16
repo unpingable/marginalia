@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -252,12 +254,15 @@ def test_context_maintenance_model_is_not_writer_selectable(provider_client) -> 
     assert adapter._governed_chat_adapter.chat_send.await_count == 0
 
 
-def test_model_api_and_new_session_use_an_available_default(provider_client) -> None:
+def test_model_api_and_new_session_fail_open_without_readiness_projection(
+    provider_client,
+) -> None:
     client, adapter = provider_client
     config_path = Path(adapter.MARGINALIA_MODEL_CONFIG)
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["providers"][0]["api_key_env"] = "UNSET_PROVIDER_TEST_KEY"
     config_path.write_text(json.dumps(config), encoding="utf-8")
+    assert not Path(adapter.MARGINALIA_PROVIDER_READINESS_FILE).exists()
 
     response = client.get("/v1/models")
 
@@ -268,15 +273,175 @@ def test_model_api_and_new_session_use_an_available_default(provider_client) -> 
 
     created = client.post("/sessions/", json={"title": "Available default"})
     assert created.status_code == 200
-    # Provider availability is owned by credential-isolated providerd. The web
-    # process retains the configured selection instead of probing secrets.
+    # With no worker readiness projection, web availability falls back to the
+    # configured catalog; executor-side refusal classification keeps a
+    # mis-selection from wedging.
     assert created.json()["model"] == "fiction-model"
 
-    refused = client.post(
-        "/sessions/",
-        json={"title": "Explicit unavailable", "model": "fiction-model"},
+
+def _write_readiness_projection(
+    adapter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, endpoints: dict[str, str]
+) -> Path:
+    path = tmp_path / "provider-readiness.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "marginalia.provider-readiness/v1",
+                "refreshed_at": "2026-09-16T00:00:00+00:00",
+                "endpoints": endpoints,
+            }
+        ),
+        encoding="utf-8",
     )
-    assert refused.status_code == 200
+    monkeypatch.setattr(adapter, "MARGINALIA_PROVIDER_READINESS_FILE", str(path))
+    return path
+
+
+def test_readiness_projection_marks_credential_less_model_unavailable(
+    provider_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client, adapter = provider_client
+    _write_readiness_projection(
+        adapter,
+        monkeypatch,
+        tmp_path,
+        {"provider-a": "credential_unavailable", "provider-b": "ready"},
+    )
+
+    listed = client.get("/v1/models")
+    assert listed.status_code == 200
+    unavailable = next(item for item in listed.json()["data"] if item["id"] == "fiction-model")
+    assert unavailable["available"] is False
+    assert unavailable["unavailable_reason"] == "provider credential is not provisioned"
+    available = next(item for item in listed.json()["data"] if item["id"] == "fiction-model-b")
+    assert available["available"] is True
+    assert available["unavailable_reason"] is None
+
+    detail = client.get("/v1/models/fiction-model")
+    assert detail.status_code == 200
+    assert detail.json()["available"] is False
+    assert detail.json()["unavailable_reason"] == "provider credential is not provisioned"
+
+    # The default now resolves to a model providerd cannot authenticate, so
+    # session creation is refused; an explicitly ready model still works.
+    refused = client.post("/sessions/", json={"title": "Unavailable default"})
+    assert refused.status_code == 503
+    assert refused.json()["detail"]["code"] == "missing_credential"
+    created = client.post(
+        "/sessions/",
+        json={"title": "Ready selection", "model": "fiction-model-b"},
+    )
+    assert created.status_code == 200
+    assert created.json()["model"] == "fiction-model-b"
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "fiction-model",
+            "messages": [{"role": "user", "content": "Do not dispatch."}],
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["failure_type"] == "provider_unavailable"
+    adapter._governed_chat_adapter.chat_send.assert_not_awaited()
+
+
+def test_readiness_projection_marks_missing_command_unavailable(
+    provider_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client, adapter = provider_client
+    _write_readiness_projection(
+        adapter, monkeypatch, tmp_path, {"provider-a": "command_unavailable"}
+    )
+
+    listed = client.get("/v1/models")
+    assert listed.status_code == 200
+    unavailable = next(item for item in listed.json()["data"] if item["id"] == "fiction-model")
+    assert unavailable["available"] is False
+    assert unavailable["unavailable_reason"] == "provider command is not installed"
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "fiction-model",
+            "messages": [{"role": "user", "content": "Do not dispatch."}],
+        },
+    )
+    assert response.status_code == 503
+    adapter._governed_chat_adapter.chat_send.assert_not_awaited()
+
+
+def test_stale_readiness_projection_fails_open(
+    provider_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client, adapter = provider_client
+    path = _write_readiness_projection(
+        adapter, monkeypatch, tmp_path, {"provider-a": "credential_unavailable"}
+    )
+    stale = time.time() - 3600
+    os.utime(path, (stale, stale))
+
+    listed = client.get("/v1/models")
+    assert listed.status_code == 200
+    assert all(item["available"] is True for item in listed.json()["data"])
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "fiction-model",
+            "messages": [{"role": "user", "content": "Continue."}],
+        },
+    )
+    assert response.status_code == 200
+
+
+def test_readiness_refusal_happens_before_any_dispatch_is_reserved(
+    provider_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client, adapter = provider_client
+    monkeypatch.setattr(adapter, "MARGINALIA_DURABLE_GENERATION_AVAILABLE", True)
+    _write_readiness_projection(
+        adapter, monkeypatch, tmp_path, {"provider-a": "credential_unavailable"}
+    )
+    project = adapter._project_record(None)
+    session = adapter._get_session_store(project.id).create(
+        project.context_id, model="fiction-model"
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "fiction-model",
+            "project_id": project.id,
+            "session_id": session.id,
+            "client_request_id": "readiness-refusal-1",
+            "messages": [{"role": "user", "content": "Do not dispatch."}],
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["failure_type"] == "provider_unavailable"
+    store = adapter._get_generation_store(project.id)
+    assert store.list_requests() == []
+    adapter._governed_chat_adapter.chat_send.assert_not_awaited()
+
+
+def test_health_ready_reports_readiness_projection_state(
+    provider_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client, adapter = provider_client
+    monkeypatch.setattr(
+        adapter,
+        "MARGINALIA_PROVIDER_READINESS_FILE",
+        str(tmp_path / "missing-readiness.json"),
+    )
+
+    absent = client.get("/health/ready")
+    assert absent.json()["provider_readiness"] == {"state": "absent"}
+
+    _write_readiness_projection(adapter, monkeypatch, tmp_path, {"provider-a": "ready"})
+    fresh = client.get("/health/ready")
+    assert fresh.json()["provider_readiness"]["state"] == "fresh"
 
 
 def test_operator_unavailable_model_is_visible_but_disabled(provider_client) -> None:

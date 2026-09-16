@@ -187,6 +187,16 @@ MARGINALIA_MAINTENANCE_FILE = os.environ.get(
     "MARGINALIA_MAINTENANCE_FILE",
     str(shared_root(Path(MARGINALIA_DATA_ROOT)) / "maintenance.txt"),
 )
+# The generation worker projects providerd's content-free endpoint readiness
+# here; web composes it into model availability and fails open when it is
+# missing or stale.
+MARGINALIA_PROVIDER_READINESS_FILE = os.environ.get(
+    "MARGINALIA_PROVIDER_READINESS_FILE",
+    str(shared_root(Path(MARGINALIA_DATA_ROOT)) / "provider-readiness.json"),
+)
+MARGINALIA_PROVIDER_READINESS_STALE_SECONDS = float(
+    os.environ.get("MARGINALIA_PROVIDER_READINESS_STALE_SECONDS", "120")
+)
 MARGINALIA_CONTEXTS_DIR = os.environ.get(
     "MARGINALIA_CONTEXTS_DIR", str(contexts_root(Path(MARGINALIA_DATA_ROOT)))
 )
@@ -670,6 +680,85 @@ def _configured_provider_catalog() -> ProviderCatalog | None:
     return load_provider_catalog(MARGINALIA_MODEL_CONFIG)
 
 
+_PROVIDER_READINESS_SCHEMA = "marginalia.provider-readiness/v1"
+_PROVIDER_READINESS_STATUSES = {"ready", "credential_unavailable", "command_unavailable"}
+# Endpoint status → (typed provider error code, writer-safe reason).
+_READINESS_UNAVAILABLE = {
+    "credential_unavailable": (
+        "missing_credential",
+        "provider credential is not provisioned",
+    ),
+    "command_unavailable": (
+        "unavailable_command",
+        "provider command is not installed",
+    ),
+}
+
+
+def _provider_readiness() -> dict[str, str] | None:
+    """Read the worker's providerd readiness projection when it is fresh.
+
+    A missing, stale, or malformed projection fails open to configured
+    availability: executor-side refusal classification keeps a mis-selection
+    from wedging, so absence of the projection must not disable models.
+    """
+    path = Path(MARGINALIA_PROVIDER_READINESS_FILE)
+    try:
+        if time.time() - path.stat().st_mtime > MARGINALIA_PROVIDER_READINESS_STALE_SECONDS:
+            return None
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict) or document.get("schema") != _PROVIDER_READINESS_SCHEMA:
+        return None
+    endpoints = document.get("endpoints")
+    if not isinstance(endpoints, dict):
+        return None
+    readiness: dict[str, str] = {}
+    for endpoint_id, status in endpoints.items():
+        if not isinstance(endpoint_id, str) or status not in _PROVIDER_READINESS_STATUSES:
+            return None
+        readiness[endpoint_id] = status
+    return readiness
+
+
+def _provider_readiness_state() -> dict[str, Any]:
+    """Report projection freshness for /health/ready detail without gating."""
+    path = Path(MARGINALIA_PROVIDER_READINESS_FILE)
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return {"state": "absent"}
+    return {
+        "state": "stale" if age > MARGINALIA_PROVIDER_READINESS_STALE_SECONDS else "fresh",
+        "age_seconds": round(age, 1),
+    }
+
+
+def _readiness_availability(
+    model: ConfiguredModel, readiness: dict[str, str] | None
+) -> tuple[str, str] | None:
+    """Typed refusal when providerd reports the model's endpoint not ready."""
+    if readiness is None:
+        return None
+    status = readiness.get(model.provider_id)
+    if status is None:
+        return None
+    return _READINESS_UNAVAILABLE.get(status)
+
+
+def _model_info(model: ConfiguredModel, readiness: dict[str, str] | None) -> ModelInfo:
+    """Public model view with providerd readiness composed over configuration."""
+    info = model.public_dict(include_runtime=False)
+    if info["available"]:
+        refusal = _readiness_availability(model, readiness)
+        if refusal is not None:
+            _, reason = refusal
+            info["available"] = False
+            info["unavailable_reason"] = reason
+    return ModelInfo(**info, owned_by=model.provider_id)
+
+
 def _resolve_configured_model(
     requested_model: str,
     *,
@@ -683,13 +772,22 @@ def _resolve_configured_model(
         # In the ag-ng topology the web process owns selection while providerd
         # owns credentials and command executables. Their deliberate isolation
         # means web-process environment inspection cannot establish transport
-        # availability.
+        # availability; the worker's readiness projection can.
         model = catalog.resolve(requested_model)
         unavailable = model.availability_error(include_runtime=False)
         if unavailable:
             raise ProviderError(
                 "configured_model_unavailable",
                 unavailable,
+                provider_id=model.provider_id,
+                model_id=model.model_id,
+            )
+        readiness_refusal = _readiness_availability(model, _provider_readiness())
+        if readiness_refusal is not None:
+            code, reason = readiness_refusal
+            raise ProviderError(
+                code,
+                reason,
                 provider_id=model.provider_id,
                 model_id=model.model_id,
             )
@@ -995,13 +1093,11 @@ async def list_models() -> ModelList:
     try:
         catalog = _configured_provider_catalog()
         if catalog is not None:
+            readiness = _provider_readiness()
             return ModelList(
                 default_model=catalog.default_model,
                 data=[
-                    ModelInfo(
-                        **model.public_dict(include_runtime=False),
-                        owned_by=model.provider_id,
-                    )
+                    _model_info(model, readiness)
                     for model in catalog.models
                     if model.purpose == "writing"
                 ],
@@ -1026,10 +1122,7 @@ async def get_model(model_id: str) -> ModelInfo:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         if model.purpose != "writing":
             raise HTTPException(status_code=404, detail=f"model {model_id!r} is not exposed")
-        return ModelInfo(
-            **model.public_dict(include_runtime=False),
-            owned_by=model.provider_id,
-        )
+        return _model_info(model, _provider_readiness())
     raise HTTPException(
         status_code=500,
         detail="MARGINALIA_MODEL_CONFIG is required by the ag-ng-only runtime",
@@ -6637,6 +6730,7 @@ async def health_ready() -> JSONResponse:
             "runtime": runtime,
             "migration": preflight,
             "context_preparation": context_preparation,
+            "provider_readiness": _provider_readiness_state(),
             "deployment": deployment_metadata(),
         },
     )

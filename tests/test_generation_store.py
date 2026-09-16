@@ -241,3 +241,280 @@ def test_fallback_is_stopped_by_kill_switch_and_exhaustion(tmp_path: Path) -> No
     store.mark_failed(fallback.id, "qualified fallback refusal")
     with pytest.raises(GenerationTransitionError, match="exhausted"):
         store.reserve_fallback(request.id)
+
+
+def unknown_dispatch(store: GenerationStore):
+    request = create(store).request
+    store.set_dispatch_enabled("project-a", True)
+    dispatch = store.reserve_dispatch(request.id)
+    store.mark_executing(dispatch.id, "provider-operation-1")
+    store.mark_unknown(dispatch.id, "browser wait ended; provider outcome unavailable")
+    return store.get_request(request.id), store.get_dispatch(dispatch.id)
+
+
+def test_unknown_settlement_is_compare_and_set_with_typed_ground(tmp_path: Path) -> None:
+    store = GenerationStore(tmp_path / "generation.sqlite")
+    request, dispatch = unknown_dispatch(store)
+
+    store.settle_unknown_dispatch(
+        request.id,
+        dispatch.id,
+        "operator-settled unknown dispatch; ground: providerd_refused_before_send",
+        failure_type="provider_unavailable",
+        disposition="operator_settlement",
+        ground="providerd_refused_before_send",
+        expected_updated_at=request.updated_at,
+    )
+
+    settled = store.get_request(request.id)
+    assert settled.status is LogicalStatus.FAILED
+    assert settled.failure_type == "provider_unavailable"
+    assert store.get_dispatch(dispatch.id).status is DispatchStatus.FAILED
+    event = store.events(request.id)[-1]
+    assert event["event_type"] == "dispatch_failed"
+    assert event["dispatch_id"] == dispatch.id
+    assert event["detail"] == {
+        "reason": "operator-settled unknown dispatch; ground: providerd_refused_before_send",
+        "failure_type": "provider_unavailable",
+        "disposition": "operator_settlement",
+        "ground": "providerd_refused_before_send",
+    }
+    # A second settlement is refused: the rows are no longer unknown.
+    with pytest.raises(GenerationTransitionError):
+        store.settle_unknown_dispatch(
+            request.id,
+            dispatch.id,
+            "repeat",
+            disposition="operator_settlement",
+            ground="providerd_refused_before_send",
+        )
+
+
+def test_unknown_settlement_event_extends_mark_failed_shape_exactly(tmp_path: Path) -> None:
+    failed_store = GenerationStore(tmp_path / "failed.sqlite")
+    request = create(failed_store).request
+    failed_store.set_dispatch_enabled("project-a", True)
+    dispatch = failed_store.reserve_dispatch(request.id)
+    failed_store.mark_executing(dispatch.id)
+    failed_store.mark_failed(dispatch.id, "same reason", failure_type="provider_unavailable")
+    mark_failed_detail = failed_store.events(request.id)[-1]["detail"]
+
+    settled_store = GenerationStore(tmp_path / "settled.sqlite")
+    settled_request, settled_dispatch = unknown_dispatch(settled_store)
+    settled_store.settle_unknown_dispatch(
+        settled_request.id,
+        settled_dispatch.id,
+        "same reason",
+        failure_type="provider_unavailable",
+        disposition="executor_reconcile",
+        ground="providerd_transport_connect_predispatch",
+    )
+    settled_detail = settled_store.events(settled_request.id)[-1]["detail"]
+
+    assert mark_failed_detail == {"reason": "same reason", "failure_type": "provider_unavailable"}
+    assert settled_detail == {
+        **mark_failed_detail,
+        "disposition": "executor_reconcile",
+        "ground": "providerd_transport_connect_predispatch",
+    }
+
+
+def test_unknown_settlement_refuses_stale_evidence_snapshot(tmp_path: Path) -> None:
+    store = GenerationStore(tmp_path / "generation.sqlite")
+    request, dispatch = unknown_dispatch(store)
+
+    with pytest.raises(GenerationTransitionError, match="evidence snapshot"):
+        store.settle_unknown_dispatch(
+            request.id,
+            dispatch.id,
+            "stale",
+            disposition="operator_settlement",
+            ground="operator_attested_no_send",
+            expected_updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+    assert store.get_request(request.id).status is LogicalStatus.UNKNOWN
+    assert store.get_dispatch(dispatch.id).status is DispatchStatus.UNKNOWN
+
+
+def test_unknown_settlement_refuses_a_dispatch_holding_a_candidate(tmp_path: Path) -> None:
+    store = GenerationStore(tmp_path / "generation.sqlite")
+    request, dispatch = unknown_dispatch(store)
+    candidate = store.record_candidate(
+        dispatch.id,
+        response_digest="sha256:response",
+        evidence_ref="evidence:key-1:blob-1",
+    )
+    assert store.get_dispatch(dispatch.id).candidate_id == candidate.id
+    # Simulate inconsistent custody: candidate rows exist while both rows were
+    # forced back to unknown outside the store's transitions.
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("UPDATE dispatch SET status='unknown' WHERE id=?", (dispatch.id,))
+        connection.execute("UPDATE logical_request SET status='unknown' WHERE id=?", (request.id,))
+
+    with pytest.raises(GenerationTransitionError, match="candidate"):
+        store.settle_unknown_dispatch(
+            request.id,
+            dispatch.id,
+            "must not settle",
+            disposition="operator_settlement",
+            ground="operator_attested_no_send",
+        )
+
+    assert store.get_candidate(candidate.id) is not None
+    assert store.get_dispatch(dispatch.id).candidate_id == candidate.id
+
+
+def test_unknown_settlement_requires_unknown_rows_and_exact_identity(tmp_path: Path) -> None:
+    store = GenerationStore(tmp_path / "generation.sqlite")
+    request = create(store).request
+    store.set_dispatch_enabled("project-a", True)
+    dispatch = store.reserve_dispatch(request.id)
+
+    with pytest.raises(GenerationTransitionError, match="both unknown"):
+        store.settle_unknown_dispatch(
+            request.id,
+            dispatch.id,
+            "not unknown",
+            disposition="operator_settlement",
+            ground="operator_attested_no_send",
+        )
+    other = create(store, client_id="client-2").request
+    with pytest.raises(GenerationTransitionError, match="does not belong"):
+        store.settle_unknown_dispatch(
+            other.id,
+            dispatch.id,
+            "wrong owner",
+            disposition="operator_settlement",
+            ground="operator_attested_no_send",
+        )
+    with pytest.raises(KeyError):
+        store.settle_unknown_dispatch(
+            request.id,
+            "dsp_missing",
+            "missing",
+            disposition="operator_settlement",
+            ground="operator_attested_no_send",
+        )
+
+    assert store.get_request(request.id).status is LogicalStatus.DISPATCHING
+    assert store.get_dispatch(dispatch.id).status is DispatchStatus.RESERVED
+
+
+def test_reconcile_backoff_schedules_and_clears_without_touching_updated_at(
+    tmp_path: Path,
+) -> None:
+    store = GenerationStore(tmp_path / "generation.sqlite")
+    request, dispatch = unknown_dispatch(store)
+
+    store.schedule_reconciliation(
+        request.id,
+        next_reconcile_at="2026-09-16T00:00:30+00:00",
+        reconcile_attempts=3,
+    )
+    scheduled = store.get_request(request.id)
+    assert scheduled.next_reconcile_at == "2026-09-16T00:00:30+00:00"
+    assert scheduled.reconcile_attempts == 3
+    assert scheduled.updated_at == request.updated_at
+
+    with pytest.raises(GenerationTransitionError, match="unknown"):
+        other = create(store, client_id="client-2").request
+        store.schedule_reconciliation(
+            other.id,
+            next_reconcile_at="2026-09-16T00:00:30+00:00",
+            reconcile_attempts=1,
+        )
+
+    store.clear_reconciliation_backoff(request.id)
+    cleared = store.get_request(request.id)
+    assert cleared.next_reconcile_at is None
+    assert cleared.reconcile_attempts == 0
+    assert cleared.updated_at == request.updated_at
+    assert store.get_dispatch(dispatch.id).status is DispatchStatus.UNKNOWN
+
+
+def test_leaving_unknown_clears_reconcile_backoff(tmp_path: Path) -> None:
+    store = GenerationStore(tmp_path / "generation.sqlite")
+    request, dispatch = unknown_dispatch(store)
+    store.schedule_reconciliation(
+        request.id,
+        next_reconcile_at="2026-09-16T00:00:30+00:00",
+        reconcile_attempts=2,
+    )
+
+    store.record_candidate(
+        dispatch.id,
+        response_digest="sha256:response",
+        evidence_ref="evidence:key-1:blob-1",
+    )
+    assert store.get_request(request.id).next_reconcile_at is None
+    assert store.get_request(request.id).reconcile_attempts == 0
+
+
+def test_reconcile_backoff_columns_migrate_additively(tmp_path: Path) -> None:
+    path = tmp_path / "generation.sqlite"
+    with sqlite3.connect(path) as connection:
+        # The schema-5 logical_request shape: every existing column except the
+        # two reconcile-bookkeeping additions.
+        connection.execute(
+            """CREATE TABLE logical_request(
+                   id TEXT PRIMARY KEY,
+                   client_request_id TEXT NOT NULL,
+                   project_id TEXT NOT NULL,
+                   session_id TEXT NOT NULL,
+                   purpose TEXT NOT NULL DEFAULT 'conversation',
+                   expected_revision INTEGER NOT NULL,
+                   canon_fingerprint TEXT NOT NULL,
+                   guidance_fingerprint TEXT NOT NULL,
+                   original_model TEXT NOT NULL,
+                   original_route TEXT NOT NULL,
+                   fallback_policy_json TEXT NOT NULL,
+                   delivery_digest TEXT,
+                   estimated_prompt_tokens INTEGER,
+                   request_digest TEXT NOT NULL,
+                   request_json TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   candidate_id TEXT,
+                   accepted_candidate_id TEXT,
+                   last_error TEXT,
+                   failure_type TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   UNIQUE(project_id, client_request_id)
+               )"""
+        )
+        connection.execute(
+            """INSERT INTO logical_request(
+                   id,client_request_id,project_id,session_id,purpose,expected_revision,
+                   canon_fingerprint,guidance_fingerprint,original_model,original_route,
+                   fallback_policy_json,request_digest,request_json,status,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "gen_legacy",
+                "client",
+                "project-a",
+                "session-a",
+                "conversation",
+                0,
+                "canon",
+                "guidance",
+                "model",
+                "route",
+                "[]",
+                "digest",
+                "{}",
+                "unknown",
+                "2026-09-01T00:00:00+00:00",
+                "2026-09-01T00:00:00+00:00",
+            ),
+        )
+
+    store = GenerationStore(path)
+
+    migrated = store.get_request("gen_legacy")
+    assert migrated.next_reconcile_at is None
+    assert migrated.reconcile_attempts == 0
+    with sqlite3.connect(path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+    assert version == GenerationStore.SCHEMA_VERSION
+    assert GenerationStore.SCHEMA_VERSION == 6

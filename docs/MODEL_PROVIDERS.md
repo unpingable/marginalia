@@ -112,6 +112,28 @@ material. The selection remains visible and disabled; a direct API request is
 refused before authorization or dispatch. Removing the provider from the
 catalog is not the mechanism for reporting temporary unavailability.
 
+Runtime readiness composes with that declared availability. Providerd reports
+each endpoint `ready`, `credential_unavailable` (the credential file is absent
+or invalid), or `command_unavailable` (the command executable is absent); the
+generation worker projects those verdicts, content-free, into the shared
+volume, and the web marks any model whose endpoint is not ready
+`available: false` with the typed reason ("provider credential is not
+provisioned" / "provider command is not installed"). Such a model cannot be
+submitted: the refusal happens before any dispatch is reserved. The projection
+refreshes about every 30 seconds; a missing or stale projection fails open to
+the declared catalog availability, and a mis-selection then still fails
+definitively at the executor instead of wedging as an unknown outcome. Before
+activating a catalog, confirm every endpoint with providerd's own check:
+
+```bash
+docker compose exec -T marginalia-providerd \
+  ag-providerd --check-credentials --config /etc/marginalia/providerd.toml
+```
+
+The check enumerates endpoints and reports which credentials are absent or
+invalid without printing values; it exits nonzero when any endpoint is not
+ready.
+
 Configured context ceilings, discovery evidence, and observed successful prompt
 sizes are different facts. A successful prompt establishes only a tested lower
 bound. Never describe it as the provider maximum.

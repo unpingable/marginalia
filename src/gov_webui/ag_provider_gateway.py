@@ -15,6 +15,7 @@ from gov_webui.generation_executor import (
     ExecutorError,
     ProviderDefinitiveFailure,
     ProviderOutcomeUnknown,
+    ProviderRefusedBeforeSend,
 )
 from gov_webui.model_providers import ConfiguredModel, ProviderCatalog, load_provider_catalog
 
@@ -132,6 +133,37 @@ class AgProviderGateway:
         if response.get("kind") != "inference_custody_acknowledged":
             raise ProviderOutcomeUnknown("provider custody acknowledgment was not committed")
 
+    def endpoint_readiness(self) -> dict[str, str]:
+        """Return providerd's content-free per-endpoint readiness projection.
+
+        Only statuses are returned — never credential values, paths, or
+        endpoint configuration. A malformed projection is a boundary error,
+        not a readiness verdict.
+        """
+        result = self._invoke(
+            "endpoint-readiness",
+            {"schema": "ag.providerctl.endpoint-readiness/v1"},
+            timeout=30,
+        )
+        endpoints = result.get("endpoints")
+        if not isinstance(endpoints, list):
+            raise ExecutorError("ag-providerctl readiness projection is malformed")
+        readiness: dict[str, str] = {}
+        for entry in endpoints:
+            if not isinstance(entry, dict) or set(entry) != {"endpoint_id", "status"}:
+                raise ExecutorError("ag-providerctl readiness projection is malformed")
+            endpoint_id = entry["endpoint_id"]
+            status = entry["status"]
+            if (
+                not isinstance(endpoint_id, str)
+                or not endpoint_id
+                or endpoint_id in readiness
+                or status not in {"ready", "credential_unavailable", "command_unavailable"}
+            ):
+                raise ExecutorError("ag-providerctl readiness projection is malformed")
+            readiness[endpoint_id] = status
+        return readiness
+
     def _request(self, payload: dict[str, Any]) -> tuple[ConfiguredModel, dict[str, Any], str]:
         if not isinstance(payload, dict) or set(payload) != {"context_id", "messages", "model"}:
             raise ExecutorError("frozen provider request does not have the exact v1 shape")
@@ -188,8 +220,16 @@ class AgProviderGateway:
             raise ProviderOutcomeUnknown("provider custody event is not an object")
         kind = event.get("event")
         if kind == "transport_failure":
+            transport_class = event.get("class", "unknown")
+            if transport_class == "connect":
+                # ag-ng qualifies connect-class failures as provably pre-send:
+                # the request bytes never left providerd, so custody is
+                # definitively closed rather than merely unresolved.
+                raise ProviderRefusedBeforeSend(
+                    "provider transport failed before any request was sent: connect"
+                )
             raise ProviderOutcomeUnknown(
-                f"provider transport ended without complete response: {event.get('class', 'unknown')}"
+                f"provider transport ended without complete response: {transport_class}"
             )
         if kind == "response_limit_exceeded":
             raise ProviderOutcomeUnknown("provider response exceeded durable custody bound")
@@ -388,6 +428,11 @@ class AgProviderGateway:
     def _ok_response(result: dict[str, Any]) -> dict[str, Any]:
         if result.get("status") != "ok" or not isinstance(result.get("response"), dict):
             code = result.get("code", "unknown")
+            if code == "unavailable":
+                # Definitive pre-dispatch refusal: providerd holds no
+                # reservation and nothing was sent (credential or command
+                # executable unavailable).
+                raise ProviderRefusedBeforeSend(f"provider refused before send: {code}")
             if code in {"indeterminate", "not_found"}:
                 raise ProviderOutcomeUnknown(f"provider custody is unresolved: {code}")
             raise ExecutorError(f"ag-providerd refused the request: {code}")

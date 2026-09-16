@@ -19,13 +19,26 @@ from gov_webui.context_ops import ContextOperations, run_build
 from gov_webui.context_summary import ContextSummaryError, ContextSummaryStore
 
 from gov_webui.artifact_store import ArtifactIndex
+from gov_webui.ag_provider_gateway import AgProviderGateway
 from gov_webui.backup_store import BackupError, WorkspaceBackupManager
 from gov_webui.canon_review_store import CanonReviewState
 from gov_webui.creative_project import CreativeProjectConfig
+from gov_webui.generation_executor import (
+    ExecutorError,
+    ProviderDefinitiveFailure,
+    ProviderOutcomeUnknown,
+    ProviderRefusedBeforeSend,
+)
+from gov_webui.generation_store import (
+    DispatchStatus,
+    GenerationStore,
+    GenerationTransitionError,
+    LogicalStatus,
+)
 from gov_webui.library_store import LibraryStore
 from gov_webui.manuscript_store import ManuscriptState
 from gov_webui.snapshot_store import SnapshotIndex
-from gov_webui.state_layout import discovered_contexts_root, discovered_shared_root
+from gov_webui.state_layout import contexts_root, discovered_contexts_root, discovered_shared_root
 
 
 def application_version() -> str:
@@ -289,6 +302,154 @@ def migration_preflight(
     }
 
 
+SETTLE_UNKNOWN_GROUNDS = (
+    "providerd_refused_before_send",
+    "providerd_transport_connect_predispatch",
+    "operator_attested_no_send",
+)
+
+# The live providerd phase that remains consistent with each typed ground. A
+# completed response held by providerd is never consistent: settling would
+# discard candidate-grade custody.
+_GROUND_CONSISTENT_PHASES = {
+    "providerd_refused_before_send": (ProviderOutcomeUnknown, ProviderRefusedBeforeSend),
+    "providerd_transport_connect_predispatch": (ProviderRefusedBeforeSend,),
+    "operator_attested_no_send": (ProviderOutcomeUnknown, ProviderRefusedBeforeSend),
+}
+
+
+def settle_unknown_dispatch(
+    *,
+    data_root: Path,
+    request_id: str,
+    dispatch_id: str,
+    expected_updated_at: str,
+    ground: str,
+    apply: bool = False,
+    providerctl: Path | None = None,
+    providerctl_config: Path | None = None,
+    model_config: Path | None = None,
+    gateway: Any | None = None,
+) -> dict[str, Any]:
+    """Apply an operator disposition to exactly one unknown dispatch.
+
+    Unknown custody settles only against typed evidence, never elapsed time.
+    The live providerd phase is verified against the claimed ground before
+    anything is written; the store's compare-and-set then re-proves every
+    precondition inside one immediate transaction. Dry run is the default.
+    """
+    if ground not in SETTLE_UNKNOWN_GROUNDS:
+        return {"ready": False, "applied": False, "errors": [f"unsupported ground: {ground}"]}
+    located: list[tuple[Path, Any]] = []
+    for store_path in sorted(contexts_root(data_root).glob("*/marginalia/generation.sqlite")):
+        candidate = GenerationStore(store_path).get_request(request_id)
+        if candidate is not None:
+            located.append((store_path, candidate))
+    if len(located) != 1:
+        return {
+            "ready": False,
+            "applied": False,
+            "errors": [
+                f"request {request_id} must resolve to exactly one generation store; "
+                f"found {len(located)}"
+            ],
+        }
+    store_path, request = located[0]
+    store = GenerationStore(store_path)
+    dispatch = store.get_dispatch(dispatch_id)
+    errors: list[str] = []
+    if dispatch is None:
+        errors.append(f"dispatch {dispatch_id} does not exist")
+    elif dispatch.logical_request_id != request_id:
+        errors.append(f"dispatch {dispatch_id} does not belong to request {request_id}")
+    if request.status is not LogicalStatus.UNKNOWN:
+        errors.append(f"request is {request.status}, not unknown")
+    if dispatch is not None and dispatch.status is not DispatchStatus.UNKNOWN:
+        errors.append(f"dispatch is {dispatch.status}, not unknown")
+    if dispatch is not None and dispatch.candidate_id is not None:
+        errors.append("dispatch holds a candidate and can never be settled as failed")
+    if dispatch is not None and (
+        request.updated_at != expected_updated_at or dispatch.updated_at != expected_updated_at
+    ):
+        errors.append("updated_at no longer matches the operator's evidence snapshot")
+    provider_dispatch = dispatch.provider_execution_id if dispatch is not None else None
+    if dispatch is not None and not provider_dispatch:
+        errors.append("dispatch records no provider execution to verify against providerd")
+    if errors:
+        return {"ready": False, "applied": False, "errors": errors}
+
+    assert dispatch is not None and provider_dispatch is not None
+    if gateway is None:
+        if providerctl is None or providerctl_config is None or model_config is None:
+            return {
+                "ready": False,
+                "applied": False,
+                "errors": [
+                    "providerctl, providerctl config, and model config are required "
+                    "to verify the live providerd phase"
+                ],
+            }
+        gateway = AgProviderGateway(providerctl, providerctl_config, model_config)
+    try:
+        gateway.fetch(provider_dispatch, selected_model=dispatch.actual_model)
+    except _GROUND_CONSISTENT_PHASES[ground] as exc:
+        live_phase = type(exc).__name__
+    except ProviderDefinitiveFailure:
+        return {
+            "ready": False,
+            "applied": False,
+            "errors": [
+                "providerd holds a terminal provider response; this is not a "
+                "no-send settlement and must be reconciled as execution evidence"
+            ],
+        }
+    except ExecutorError as exc:
+        return {
+            "ready": False,
+            "applied": False,
+            "errors": [f"live providerd phase could not be verified: {exc}"],
+        }
+    else:
+        return {
+            "ready": False,
+            "applied": False,
+            "errors": [
+                "providerd holds a completed response for this dispatch; reconcile "
+                "it as a candidate instead of settling it as failed"
+            ],
+        }
+
+    reason = f"operator-settled unknown dispatch; ground: {ground}"
+    result: dict[str, Any] = {
+        "ready": True,
+        "applied": False,
+        "request_id": request_id,
+        "dispatch_id": dispatch_id,
+        "context": store_path.parent.parent.name,
+        "provider_dispatch": provider_dispatch,
+        "ground": ground,
+        "live_provider_phase": live_phase,
+        "failure_type": "provider_unavailable",
+    }
+    if not apply:
+        return result
+    try:
+        store.settle_unknown_dispatch(
+            request_id,
+            dispatch_id,
+            reason,
+            failure_type="provider_unavailable",
+            disposition="operator_settlement",
+            ground=ground,
+            expected_updated_at=expected_updated_at,
+        )
+    except (GenerationTransitionError, KeyError) as exc:
+        return {**result, "ready": False, "errors": [str(exc)]}
+    result["applied"] = True
+    result["reason"] = reason
+    return result
+
+
 def _manager(args: argparse.Namespace) -> WorkspaceBackupManager:
     return WorkspaceBackupManager(
         data_root=Path(args.data_root),
@@ -327,6 +488,17 @@ def _parser() -> argparse.ArgumentParser:
     restore = commands.add_parser("restore")
     restore.add_argument("archive")
     restore.add_argument("--target-data-root", required=True)
+    settle = commands.add_parser("settle-unknown-dispatch")
+    settle.add_argument("--request-id", required=True)
+    settle.add_argument("--dispatch-id", required=True)
+    settle.add_argument("--expected-updated-at", required=True)
+    settle.add_argument("--ground", required=True, choices=SETTLE_UNKNOWN_GROUNDS)
+    settle.add_argument("--apply", action="store_true")
+    settle.add_argument("--providerctl", default=os.environ.get("MARGINALIA_AG_PROVIDERCTL", ""))
+    settle.add_argument(
+        "--providerctl-config",
+        default=os.environ.get("MARGINALIA_AG_PROVIDERCTL_CONFIG", ""),
+    )
     for name in ("context-plan", "context-build", "context-validate"):
         command = commands.add_parser(name)
         command.add_argument("--workspace-id")
@@ -368,6 +540,20 @@ def main() -> int:
         elif args.command == "restore":
             result = _manager(args).restore(
                 Path(args.archive), target_data_root=Path(args.target_data_root)
+            )
+        elif args.command == "settle-unknown-dispatch":
+            result = settle_unknown_dispatch(
+                data_root=Path(args.data_root),
+                request_id=args.request_id,
+                dispatch_id=args.dispatch_id,
+                expected_updated_at=args.expected_updated_at,
+                ground=args.ground,
+                apply=args.apply,
+                providerctl=Path(args.providerctl) if args.providerctl else None,
+                providerctl_config=Path(args.providerctl_config)
+                if args.providerctl_config
+                else None,
+                model_config=Path(args.model_config) if args.model_config else None,
             )
         else:
             operations = _context_operations(args)

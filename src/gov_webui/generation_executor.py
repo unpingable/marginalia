@@ -38,6 +38,15 @@ class ProviderDefinitiveFailure(ExecutorError):
     """Qualified provider evidence establishes a terminal failure."""
 
 
+class ProviderRefusedBeforeSend(ExecutorError):
+    """The provider daemon definitively refused before any request was sent.
+
+    Missing or invalid credentials and a missing command executable are
+    configuration facts, not executions: providerd proves no dispatch left the
+    host and holds no reservation for the refused work.
+    """
+
+
 class AttemptState(StrEnum):
     RESERVED = "reserved"
     EXECUTING = "executing"
@@ -623,6 +632,25 @@ class GenerationExecutor:
                 else self.provider(payload)  # type: ignore[operator]
             )
             return self._retain_success(dispatch, durable, response, provider)
+        except ProviderRefusedBeforeSend as exc:
+            # The provider daemon proves nothing was sent and holds no
+            # reservation, so the dispatch is a qualified pre-dispatch failure
+            # exactly like a refused preparation.
+            reason = str(exc) or type(exc).__name__
+            receipt = _digest(
+                "marginalia.executor-predispatch-failure/v1",
+                {"attempt": dispatch.attempt, "reason": reason},
+            )
+            self.generations.mark_failed(
+                durable.id,
+                reason,
+                failure_type="provider_unavailable",
+            )
+            return self.attempts.finish(
+                dispatch,
+                ExecutorOutcome(dispatch.attempt, dispatch.marker, receipt, "failure"),
+                evidence_ref=receipt,
+            )
         except ProviderDefinitiveFailure as exc:
             receipt = _digest(
                 "marginalia.executor-failure/v1",
@@ -684,6 +712,46 @@ class GenerationExecutor:
                 )
             response = provider.fetch(provider_dispatch, selected_model=durable.actual_model)
             return self._retain_success(dispatch, durable, response, provider)
+        except ProviderRefusedBeforeSend as exc:
+            reason = str(exc) or type(exc).__name__
+            if candidate is not None:
+                # A retained candidate contradicts a pre-send refusal; response
+                # custody outranks the refusal, so the outcome stays ambiguous.
+                if durable.status in {DispatchStatus.RESERVED, DispatchStatus.EXECUTING}:
+                    self.generations.mark_unknown(durable.id, reason)
+                receipt = _digest(
+                    "marginalia.executor-indeterminate/v1",
+                    {"attempt": dispatch.attempt, "reason": reason},
+                )
+                return ExecutorOutcome(dispatch.attempt, dispatch.marker, receipt, "indeterminate")
+            receipt = _digest(
+                "marginalia.executor-predispatch-failure/v1",
+                {"attempt": dispatch.attempt, "reason": reason},
+            )
+            current_dispatch = self.generations.get_dispatch(durable.id)
+            if current_dispatch is not None and current_dispatch.status is DispatchStatus.UNKNOWN:
+                # mark_failed refuses to leave unknown; the compare-and-set
+                # settlement does, gated on the connect-class transport
+                # evidence providerd reported before any send.
+                self.generations.settle_unknown_dispatch(
+                    current_dispatch.logical_request_id,
+                    durable.id,
+                    reason,
+                    failure_type="provider_unavailable",
+                    disposition="executor_reconcile",
+                    ground="providerd_transport_connect_predispatch",
+                )
+            else:
+                self.generations.mark_failed(
+                    durable.id,
+                    reason,
+                    failure_type="provider_unavailable",
+                )
+            return self.attempts.finish(
+                dispatch,
+                ExecutorOutcome(dispatch.attempt, dispatch.marker, receipt, "failure"),
+                evidence_ref=receipt,
+            )
         except ProviderDefinitiveFailure as exc:
             reason = str(exc)
             self.generations.mark_failed(durable.id, reason)

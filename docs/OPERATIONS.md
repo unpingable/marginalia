@@ -88,7 +88,10 @@ docker compose exec -T marginalia \
   catalog, and durable records to be ready; it returns HTTP 503 otherwise. Its separate
   `context_preparation` field reports whether long-fiction derived context is
   ready, required, or currently running without declaring the whole appliance
-  unhealthy while resumable preparation is pending.
+  unhealthy while resumable preparation is pending. Its `provider_readiness`
+  field reports the worker's endpoint-readiness projection as `fresh`,
+  `stale`, or `absent`; the projection informs model availability but never
+  gates readiness.
 - `/health` retains the concise runtime/provider report.
 - `/v1/system` reports application version, image/build/deployment identity,
   supported schemas, preflight results, and backup destination state.
@@ -120,6 +123,72 @@ removes the old container. Capture the old container's logs before replacement
 or configure deployment-level log retention if post-replacement incident
 correlation is required. Incident diagnostics are operational metadata and must
 never be copied into sessions, canon, artifacts, or model context.
+
+## Provider readiness projection
+
+The web process deliberately holds no provider credentials, so the generation
+worker projects providerd's content-free endpoint readiness into the shared
+application volume at `/data/.marginalia/shared/provider-readiness.json`,
+once at startup and about every
+`MARGINALIA_PROVIDER_READINESS_INTERVAL_SECONDS` (default 30). The file holds
+endpoint ids and statuses only — `ready`, `credential_unavailable`, or
+`command_unavailable` — never credential values or paths. The write is atomic
+(tmp + rename); a failed refresh keeps the previous file.
+
+The web composes the projection into `/v1/models` and model selection: a model
+whose endpoint is not ready is reported `available: false` with a typed reason,
+and selecting it is refused with the typed `provider_unavailable` outcome
+before any dispatch is reserved. A missing projection or one older than
+`MARGINALIA_PROVIDER_READINESS_STALE_SECONDS` (default 120) fails open to
+configured catalog availability, because the executor and gateway now classify
+a providerd pre-send refusal as a definitive `provider_unavailable` failure
+rather than wedging custody as unknown.
+
+## Unknown custody: reconcile backoff and operator settlement
+
+A dispatch whose provider outcome is `unknown` retains custody; it is never
+retried automatically and never settled by elapsed time. The worker re-drives
+reconciliation under a persisted per-request exponential backoff instead of
+every poll, so a stuck request cannot hot-loop command logs or journal churn:
+
+- `MARGINALIA_GENERATION_RECONCILE_BASE_SECONDS` (default 5) is the first
+  delay; each still-unresolved drive doubles it up to
+  `MARGINALIA_GENERATION_RECONCILE_MAX_SECONDS` (default 300). Both bounds and
+  the per-request `next_reconcile_at`/`reconcile_attempts` bookkeeping live in
+  `generation.sqlite` (schema 6) and survive worker restarts; the bookkeeping
+  clears when the request leaves `unknown`.
+- `MARGINALIA_GENERATION_COMMAND_TIMEOUT_SECONDS` (default 300) bounds every
+  `ag-loopctl` invocation so a hung command cannot block the worker loop.
+- Repeated identical command results are written once, and at most
+  `MARGINALIA_GENERATION_COMMAND_LOG_RETENTION` (default 100)
+  stdout/stderr/command triples are retained per dispatch, oldest pruned.
+
+When typed evidence establishes that no request was sent — providerd's
+definitive pre-dispatch refusal, a connect-class transport failure, or an
+operator's own attestation — one exact unknown dispatch can be settled as
+`provider_unavailable`:
+
+```bash
+docker compose exec -T marginalia-generation \
+  python3 -m gov_webui.ops --data-root /data \
+  settle-unknown-dispatch \
+  --request-id gen_... --dispatch-id dsp_... \
+  --expected-updated-at 2026-09-16T00:00:00+00:00 \
+  --ground providerd_refused_before_send
+```
+
+Grounds are `providerd_refused_before_send`,
+`providerd_transport_connect_predispatch`, and `operator_attested_no_send`. The
+command is a dry run unless `--apply` is given. It locates the one generation
+store holding the request, verifies the live providerd phase through
+`ag-providerctl` against the claimed ground, and refuses when providerd holds a
+completed or terminal response, when a candidate exists, when either row is no
+longer `unknown`, or when `updated_at` moved past the operator's evidence
+snapshot. Applying writes the same `dispatch_failed` event shape as a qualified
+failure, with the disposition and typed ground recorded in the event detail.
+The connect-class transport path also settles through ordinary reconciliation:
+a worker that fetches connect-class evidence for an unknown dispatch applies
+the same transition itself.
 
 Generation-control semantics are end-to-end: a project pause disables the composer
 and exposes its authorized enable control; operator maintenance shows the maintenance

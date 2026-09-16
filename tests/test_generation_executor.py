@@ -17,6 +17,7 @@ from gov_webui.generation_executor import (
     ExecutorPlan,
     GenerationExecutor,
     ProviderOutcomeUnknown,
+    ProviderRefusedBeforeSend,
 )
 from gov_webui.generation_executor_cli import run
 from gov_webui.generation_store import GenerationStore, LogicalStatus
@@ -286,3 +287,88 @@ def test_prepare_failure_is_definitive_before_provider_boundary(tmp_path: Path) 
     assert provider.execute_calls == 0
     assert store.get_request(request.id).status is LogicalStatus.FAILED
     assert store.get_request(request.id).failure_type == "provider_unavailable"
+
+
+def test_execute_predispatch_refusal_is_definitive_provider_unavailable(tmp_path: Path) -> None:
+    provider = FakeDurableProvider()
+
+    def refuse(transaction, *, selected_model):
+        provider.execute_calls += 1
+        raise ProviderRefusedBeforeSend("provider refused before send: unavailable")
+
+    provider.execute = refuse
+    store, request, dispatch, executor = _durable_executor(tmp_path, provider)
+
+    result = executor.execute(dispatch)
+
+    assert result.outcome == "failure"
+    assert store.get_request(request.id).status is LogicalStatus.FAILED
+    assert store.get_request(request.id).failure_type == "provider_unavailable"
+    events = store.events(request.id)
+    assert events[-1]["event_type"] == "dispatch_failed"
+    assert events[-1]["detail"] == {
+        "reason": "provider refused before send: unavailable",
+        "failure_type": "provider_unavailable",
+    }
+
+
+def test_reconcile_predispatch_refusal_fails_executing_dispatch(tmp_path: Path) -> None:
+    provider = FakeDurableProvider()
+
+    def interrupt(_transaction, *, selected_model):
+        raise KeyboardInterrupt
+
+    provider.execute = interrupt
+    store, request, dispatch, executor = _durable_executor(tmp_path, provider)
+
+    # A crash after the mechanics boundary leaves the attempt executing and the
+    # durable dispatch executing without an unknown projection.
+    with pytest.raises(KeyboardInterrupt):
+        executor.execute(dispatch)
+    assert store.get_request(request.id).status is LogicalStatus.DISPATCHING
+
+    def refuse_fetch(dispatch_id, *, selected_model):
+        raise ProviderRefusedBeforeSend("provider refused before send: unavailable")
+
+    provider.fetch = refuse_fetch
+
+    recovered = executor.reconcile(dispatch)
+
+    assert recovered.outcome == "failure"
+    assert store.get_request(request.id).status is LogicalStatus.FAILED
+    assert store.get_request(request.id).failure_type == "provider_unavailable"
+
+
+def test_reconcile_predispatch_refusal_settles_unknown_dispatch(tmp_path: Path) -> None:
+    provider = FakeDurableProvider()
+    provider.fail_execute = True
+    store, request, dispatch, executor = _durable_executor(tmp_path, provider)
+
+    first = executor.execute(dispatch)
+    assert first.outcome == "indeterminate"
+    assert store.get_request(request.id).status is LogicalStatus.UNKNOWN
+
+    def refuse_fetch(dispatch_id, *, selected_model):
+        raise ProviderRefusedBeforeSend(
+            "provider transport failed before any request was sent: connect"
+        )
+
+    provider.fetch = refuse_fetch
+
+    recovered = executor.reconcile(dispatch)
+
+    assert recovered.outcome == "failure"
+    settled = store.get_request(request.id)
+    assert settled.status is LogicalStatus.FAILED
+    assert settled.failure_type == "provider_unavailable"
+    assert store.list_dispatches(request.id)[0].status.value == "failed"
+    events = store.events(request.id)
+    assert events[-1]["event_type"] == "dispatch_failed"
+    assert events[-1]["detail"] == {
+        "reason": "provider transport failed before any request was sent: connect",
+        "failure_type": "provider_unavailable",
+        "disposition": "executor_reconcile",
+        "ground": "providerd_transport_connect_predispatch",
+    }
+    # The settlement is terminal: a later reconcile returns the stored outcome.
+    assert executor.reconcile(dispatch) == recovered
