@@ -269,15 +269,47 @@ journal to a read-only opener. Confirm or refute after (4).
   model provider is unavailable. Choose another available model or try again
   later.") with no session mutation and no generation row — refusal happens
   before custody.
+- 17:44Z output-budget tuning installed (`providers.json` 4,410 bytes, sha256
+  `e83509c7e48a9045b27c2bd632327d59563c681f04f30af7d5b5da4e56e856d9`):
+  `max_output_tokens` 16,384 for `openrouter-glm-5.3` and
+  `openrouter-glm-5.3-flash`, 12,288 for `orion-local` (schema cap 32,768;
+  Orion bounded by `num_ctx` 24,576 minus prompt room). Installed atomically
+  through container root on the no_root_squash NFS export, mode kept 0600;
+  `docker compose restart marginalia marginalia-generation` re-installed the
+  private copies. providerd does not parse `providers.json` and was not
+  restarted. Rollback copy
+  `/opt/marginalia-local/ag-ng-config-providers.json.pre-token-budget-20260916`;
+  staged file alongside it as `…token-budget-20260916`.
+- 17:44–17:45Z self-inflicted ~2-minute web+worker outage: the NFS sources
+  had been relaxed to 0644 per the earlier loose-end guess, and
+  `install_private_file` refuses group/world-readable sources, crash-looping
+  both containers until 0600 was restored. The loose-end section below is
+  corrected; the relaxation recommendation is withdrawn.
+- Verification: both containers resolve the new budgets; a GLM 5.3
+  reasoning-heavy turn (dice-sum enumeration, two derivations) completed
+  correctly in 27 s with full content; an Orion product-shaped prose turn
+  (396 words) completed in 39 s. Orion on the same adversarial math prompt
+  exhausts even 12,288 tokens of pure reasoning and fails typed ("provider
+  returned no usable authored content"; settled, no custody residue) — that
+  is the `num_ctx` 24,576 ceiling, not a budget defect; GLM is the routing
+  answer for reasoning-heavy turns, and any further Orion headroom means
+  raising `num_ctx` in the model tag (VRAM trade-off, owning-layer decision).
 - PENDING: Erin's browser acceptance (refresh, open Doverton, choose Orion or
   a GLM model, complete one ordinary turn).
 
-### Loose end: config file modes
+### Loose end: config file modes — resolved 2026-09-16, do not relax
 
 The NFS production config files (`providers.json`, `providerd.toml`,
-`providerctl.toml`) are `root:root 0600` from the 09-08 repair, which made a
-routine catalog edit require sudo. `providers.json` and `providerd.toml` hold
-no secret values (credential names only). Entrypoints already re-install
-them as private copies inside containers (`install_private_file`), so the
-NFS source modes can likely be relaxed; decide deliberately, don't widen
+`providerctl.toml`) are `root:root 0600` from the 09-08 repair. An earlier
+draft of this note guessed the modes "can likely be relaxed" because
+entrypoints re-install private copies; that guess is **disproven**.
+`install_private_file` refuses a group/world-readable source
+("Refusing model catalog with group/world permissions (644)"), so a `0644`
+source crash-loops web and worker at their next restart (verified the hard
+way: ~2 minutes of downtime on 2026-09-16 before the modes were restored to
+0600). Keep the sources at 0600. A catalog edit goes through container root
+on the NFS export (no_root_squash): stage the validated file, then
+`docker run --rm --entrypoint sh -v …/config:/cfg <image> -c
+'cp /new/providers.json /cfg/.tmp && chmod 0600 /cfg/.tmp && mv /cfg/.tmp /cfg/providers.json'`,
+then `docker compose restart marginalia marginalia-generation`. Don't widen
 `secrets/`.
