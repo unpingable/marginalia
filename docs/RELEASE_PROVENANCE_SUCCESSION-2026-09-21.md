@@ -24,10 +24,11 @@ to the OCI image above. The deployed image labels name the three exact source
 revisions. A second build from the clean context and the recorded build
 arguments reproduced the same image ID.
 
-The active deployment adds the image-only override
+The active deployment adds the image/provenance-only override
 `/opt/marginalia-local/compose.release-provenance-20260921.yaml` to the existing
-base and AG-ng overlay. Existing secret/configuration files were neither read
-into this record nor changed.
+base and AG-ng overlay. It also sets the non-secret deployment identity to
+`marginalia-release-provenance-20260921` for web and backup manifests. Existing
+secret/configuration files were neither read into this record nor changed.
 
 ## Source recovery
 
@@ -96,13 +97,18 @@ canonical successor.
   product decision. These results preserve, rather than resolve, the gaps.
 - Clean-context rebuild reproduced OCI image
   `sha256:bfde456d03c4f26b8289c21cfdd6a08392b9ce1b6454ab0aabd154602b4d2ca5`.
-- Fresh backup:
+- Pre-transition recovery backup:
   `marginalia-erin-20260921T214707107752Z.zip`, SHA-256
   `5008effb7c35650369f333842642aa77b841bb9d5791995256b23e2e54db1804`.
 - The archive passed outer/member verification, the built-in isolated restore
   rehearsal, and a separate restore into the blank volume
-  `marginalia_restore_provenance_20260921`. The deployed canonical backup
-  service repeated verify and restore-test successfully.
+  `marginalia_restore_provenance_20260921`.
+- Canonical post-deploy backup:
+  `marginalia-erin-20260921T221834415821Z.zip`, SHA-256
+  `51db5de260c9401f8bed95a815fabaff012c3aaa2a4be53f32839598410efe93`.
+  The canonical backup service created and verified it with deployment identity
+  `marginalia-release-provenance-20260921`, then repeated the isolated
+  restore-test successfully.
 - The stopped pre-transition providerd volume is retained as an opaque recovery
   archive with SHA-256
   `3bfdb6eddaa6467581818f16658d25376e8cfd7d6c08d5b7b076d88e07a8a9db`.
@@ -125,6 +131,7 @@ After maintenance was lifted:
 - `provider_readiness`: fresh (the predecessor protocol had reported absent);
 - backup destination: writable remote NFS;
 - maintenance: inactive;
+- deployment identity: `marginalia-release-provenance-20260921`;
 - all five containers: running on the same canonical image digest;
 - provider selection: the configured default and every availability decision
   are projected without a smoke call;

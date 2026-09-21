@@ -1,13 +1,17 @@
-# Image-only production overlay. Compose with the established private base and
-# AG-ng overlay; this file intentionally contains no credentials or host paths.
+# Image/provenance-only production overlay. Compose with the established
+# private base and AG-ng overlay; this file contains no credentials or host paths.
 services:
   marginalia:
     image: marginalia:provenance-succession-380037c-candidate
+    environment:
+      MARGINALIA_DEPLOYMENT_ID: marginalia-release-provenance-20260921
   marginalia-generation:
     image: marginalia:provenance-succession-380037c-candidate
   marginalia-providerd:
     image: marginalia:provenance-succession-380037c-candidate
   marginalia-backup:
     image: marginalia:provenance-succession-380037c-candidate
+    environment:
+      MARGINALIA_DEPLOYMENT_ID: marginalia-release-provenance-20260921
   marginalia-synthetic:
     image: marginalia:provenance-succession-380037c-candidate
