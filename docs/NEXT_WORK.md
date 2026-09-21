@@ -280,11 +280,11 @@ The regression is
    reasoning **is** permitted; and a model-derived narrowing that tries to
    authorize a repair and must be refused.
 
-   Deferred rather than built, and recorded in the constellation item
-   `skunkworks/research/DEFERRED-SEMANTIC-AUTHORITY-NONAMPLIFICATION-2026-09-05.md`
-   §8, because the closure question is not fiction-specific and should be
-   crosswalked against existing open/closed-world and refinement work before
-   anything is invented here.
+   Deferred rather than built, and recorded in §8 of the private development
+   environment's `DEFERRED-SEMANTIC-AUTHORITY-NONAMPLIFICATION-2026-09-05.md`
+   research note, because the closure question is not fiction-specific and
+   should be crosswalked against existing open/closed-world and refinement work
+   before anything is invented here.
 
 7. **TEMPORALIZED-CANON — deferred campaign function.** Fiction carries four
    distinct orderings that Marginalia currently flattens: when a fact is true
@@ -508,6 +508,63 @@ foundation for invisible retry and failover, so it comes first.
 
 Telemetry must remain content-free. Human product validation is separate from
 deterministic qualification and synthetic behavioral fuzzing.
+
+## Related cross-project candidate (not roadmap work)
+
+Cartography preserves
+[Evidence-backed briefings and delegated personal expression](https://github.com/unpingable/cartography/blob/main/studies/evidence-backed-briefings-and-delegated-personal-expression/README.md)
+as a candidate use case spanning Marginalia and Felt/Puppet. Marginalia's
+relevant question is authorship and canon: a proposed characterization is not
+an author-established fact. In the personal-expression case, generated drafts
+and model inferences likewise must not become evidence of the user's beliefs.
+
+The linked note does not assign this use case to Marginalia, authorize an
+implementation campaign, or place it in this backlog.
+
+## Open gaps from the 2026-09-17 synthetic-user qualification
+
+The qualification campaign's repaired clusters (new-project generation policy,
+lost-acknowledgement rendering, working-copy destruction on commit, artifact
+error surfacing, typed stale-context blocks, and `project_id` documentation
+drift) are closed. Three gaps were deliberately left open because each needs a
+product decision rather than more code.
+
+1. **F5 — no destination for a model-driven revision of an existing draft.**
+   Every artifact content write is either create-new, a commit of the writer's
+   own editor text, a working-copy autosave, or a restore. Nothing applies a
+   generated revision to an artifact. The manuscript outline's **Draft** action
+   seeds the prompt with the section's current draft, which implies a round
+   trip; keeping the result creates a *second* artifact and repoints the
+   outline node, so the section's revision history splits in two and both
+   near-identical drafts stay in the list. Nothing is lost and the original
+   remains, so this is an information-architecture gap, not data loss.
+
+   The decision needed before any implementation: does a generated revision
+   target the existing artifact, create a pending candidate revision, replace
+   the manuscript pointer, or remain exploratory — and what does "accept" mean
+   for a draft, given that artifacts are explicitly not canon? Seam recorded as
+   a skipped test in `tests/test_qualification_repairs_20260917.py`.
+
+2. **F2b — one working-copy slot, no writer identity.** Two editors of the same
+   draft (two tabs, or two people in a household workspace) both autosave from
+   the same base version, both receive HTTP 200 and a "Working copy autosaved"
+   confirmation, and the first writer's unsaved text is gone. A token/etag CAS
+   on `save_working_copy` is mechanically small. What is missing is the
+   resolution experience: a stale writer would then hold text that exists only
+   in the DOM and can never be saved, which is not obviously better than the
+   current silent loss. Decide the recovery path — keep mine / keep theirs /
+   show both — before implementing the token. Pinned as a strict `xfail`.
+
+3. **S23 — a prompt typed before any conversation exists is not restored.**
+   `persistPromptDraft` stores it under the `:new` key, but `start()` never
+   calls `restorePromptDraft()`, so an ordinary reload silently drops the first
+   thing a new writer types. A draft typed inside an open conversation is
+   restored correctly when that conversation is reopened. Pinned as a strict
+   `xfail` in `tests/test_qualification_repairs_20260917.py`.
+
+F2b, F5, and S23 are explicit successor work. Release-provenance and providerd
+succession closure must preserve these tests and must not claim the gaps are
+resolved.
 
 ## Cold-start checklist
 

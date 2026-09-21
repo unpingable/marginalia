@@ -63,6 +63,29 @@ Conversation acceptance:
 Every supported canon and project-guidance writer participates in the same lock
 order. Any external editing path that cannot participate must stop acceptance.
 
+A failed check at step 3 is a context race. It settles the request as `blocked`
+with `failure_type=stale_context`, commits nothing, and keeps the writer's
+prompt. `stale_context` is the single machine-readable representation of that
+state across the synchronous and durable paths; clients must branch on it rather
+than on the human-readable reason. Because the losing work was never applied and
+the conversation has since moved on, the writer is shown the newer turns and
+decides whether to resend. Marginalia does not present a resubmit as
+automatically safe.
+
+## Draft autosave and committed revisions
+
+A committed artifact revision clears the autosaved working copy. If that working
+copy holds text the commit would not preserve, the write fails closed with
+`divergent_working_copy` rather than discarding unsaved typing; the caller must
+resend with an explicit discard. Marginalia does not merge the two texts, and a
+working copy identical to the committed text is not a divergence.
+
+A working copy is a single per-artifact slot with no writer identity, so two
+concurrent editors of the same draft can still overwrite each other's unsaved
+text. That remains an open gap; see `docs/NEXT_WORK.md`.
+
+## Canon and ontology authority
+
 Model-proposed canon or ontology changes remain proposals. Restrictions and
 contradictions never modify accepted canon automatically. Repair submission
 checks the operator's actual permission. Adversarial review is advisory unless a

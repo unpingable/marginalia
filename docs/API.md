@@ -23,8 +23,21 @@ This is the ordinary fiction-product surface. Mutating endpoints require
 | `/v1/search` | GET | Search conversations, messages, artifacts, manuscript nodes, and canon |
 | `/v1/entities` | GET | List accepted characters with exploration backlinks |
 
-Project-aware endpoints accept `project_id` as a query parameter for reads or a
-request field for writes. The project file is context-bound. A stale update
+Project-aware endpoints select their project with `project_id`, but the two
+families differ and the difference is not interchangeable:
+
+- **Collection creates and project-scoped writes** (`POST /v1/artifacts`,
+  `POST /v1/manuscript`, `POST /sessions/`, `PUT /v1/generation/settings`)
+  read `project_id` from the **request body**.
+- **Every per-resource route addressed by id** — including all
+  `/v1/artifacts/{artifact_id}` methods (`GET`, `PUT`, `PATCH`, `DELETE`,
+  `working-copy`, `version/{version}`, `compare`, `restore`,
+  `canon-comparison`) — reads `project_id` only as a **query parameter**.
+  These request models have no `project_id` field, so a body value is ignored
+  and the call resolves against the default project. That normally surfaces as
+  `404 artifact_not_found`, because artifact ids are project-local.
+
+The project file is context-bound. A stale update
 returns `409`; a file whose embedded context does not match the selected
 context also fails closed. Existing conversations are enrolled into the
 `Default project` without rewriting their session files.
@@ -59,6 +72,13 @@ first, Marginalia returns a `409` failure with `failure_type=stale_context`.
 framing but waits for the transactional `chat.send` result before emitting
 content because AG contract v1 does not type provider failures in partial
 chunks.
+
+A `blocked` durable outcome carries `failure_type` from the same taxonomy as
+failures, so a context race is machine-identifiable without matching on prose.
+A generation whose session revision, accepted canon, or project guidance moved
+while the provider was working reports `failure_type=stale_context` and commits
+nothing. `failure_type` is `null` for a deliberate story-boundary block that
+the writer resolves through the pending-review card.
 
 Clients must inspect `outcome` before reading `choices`. Only `authored`
 responses carry assistant choices. Blocked and failure payloads are operational
@@ -118,6 +138,15 @@ until the writer explicitly accepts it.
 `GET /v1/artifacts` supports `view=active|trash|all`, `q`, `status`, and
 `tag`. Status values are `idea`, `drafting`, `revised`, and `final`. Trash is
 reversible; hard deletion remains an explicit API operation.
+
+Committing a revision clears the autosaved working copy. When the working copy
+holds text the commit would not preserve, `PUT /v1/artifacts/{id}` and
+`POST /v1/artifacts/{id}/version/{version}/restore` fail closed with `409`
+`divergent_working_copy` instead of discarding it. The response `details`
+carry `working_copy_base_version`, `current_version`, and
+`resolution: "discard_working_copy"`. Resend with `discard_working_copy: true`
+to accept the loss deliberately. A working copy identical to the committed
+text is not a divergence and never blocks an ordinary save.
 
 Allowed `artifact_type` values are `draft`, `scene`, `character`,
 `world_rule`, and `note`. A promoted output records `conversation_id`,
