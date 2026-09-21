@@ -266,3 +266,95 @@ test('rapid double submit creates one browser delivery', async ({ page }) => {
     'marginalia:draft:default:session-1',
   ))).toBe('Other tab draft.');
 });
+
+// --- 2026-09-17 qualification repairs -----------------------------------
+// F1b: a definite server refusal must render as an actionable failure, never
+// as the uncertain-custody notice reserved for work whose fate is unknown.
+
+test('a received refusal is a failure card, not a lost acknowledgement', async ({ page }) => {
+  await mockWritingRoom(page, true, true);
+  await mockExistingSession(page);
+  await page.route('**/v1/chat/completions', async (route) => {
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        outcome: 'failure',
+        failure_type: 'project_paused',
+        message: 'Generation is paused for this project. Enable generation to continue.',
+        retryable: false,
+        incident_id: 'gen-test-0001',
+      }),
+    });
+  });
+
+  await page.goto('/');
+  await page.locator('button.session', { hasText: 'Interrupted scene' }).click();
+  await page.locator('#prompt').fill('Write the next scene.');
+  await page.locator('#composer').evaluate((form: HTMLFormElement) => form.requestSubmit());
+
+  // Scope to the rendered message card; the hidden #generation-paused-control
+  // button carries similar wording.
+  await expect(
+    page.locator('.message-body', { hasText: 'Generation is paused for this project.' }),
+  ).toBeVisible();
+  await expect(page.getByText('Incident: gen-test-0001')).toBeVisible();
+  // The reserved uncertainty wording must not appear for an answered request.
+  await expect(page.getByText('browser lost the acknowledgement')).toHaveCount(0);
+  await expect(page.getByText('Delivery not yet confirmed')).toHaveCount(0);
+});
+
+test('an untyped server refusal still avoids the uncertain-custody notice', async ({ page }) => {
+  // The exact pre-repair first-run shape: HTTP 409 with only `detail`.
+  await mockWritingRoom(page, true, true);
+  await mockExistingSession(page);
+  await page.route('**/v1/chat/completions', async (route) => {
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'new dispatches are disabled for this project' }),
+    });
+  });
+
+  await page.goto('/');
+  await page.locator('button.session', { hasText: 'Interrupted scene' }).click();
+  await page.locator('#prompt').fill('Write the next scene.');
+  await page.locator('#composer').evaluate((form: HTMLFormElement) => form.requestSubmit());
+
+  await expect(page.getByText('new dispatches are disabled for this project')).toBeVisible();
+  await expect(page.getByText('browser lost the acknowledgement')).toHaveCount(0);
+  await expect(page.getByText('Delivery not yet confirmed')).toHaveCount(0);
+});
+
+// F4: a stale-context block explains itself and does not imply that blindly
+// resubmitting is safe.
+
+test('a stale-context block explains itself without inviting a blind resubmit', async ({ page }) => {
+  await mockWritingRoom(page, true, true);
+  await mockExistingSession(page);
+  await page.route('**/v1/chat/completions', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        outcome: 'blocked',
+        request_id: 'gen-blocked-1',
+        client_request_id: 'cr-1',
+        message: 'session revision changed',
+        failure_type: 'stale_context',
+      }),
+    });
+  });
+
+  await page.goto('/');
+  await page.locator('button.session', { hasText: 'Interrupted scene' }).click();
+  await page.locator('#prompt').fill('Write the next scene.');
+  await page.locator('#composer').evaluate((form: HTMLFormElement) => form.requestSubmit());
+
+  await expect(page.getByText('This conversation changed while Marginalia was writing')).toBeVisible();
+  await expect(page.getByText('Nothing was saved from it')).toBeVisible();
+  // The raw internal reason is not the writer-facing copy.
+  await expect(page.getByText('session revision changed')).toHaveCount(0);
+  // The prompt is preserved for a deliberate decision, not discarded.
+  await expect(page.locator('#prompt')).toHaveValue('Write the next scene.');
+});
