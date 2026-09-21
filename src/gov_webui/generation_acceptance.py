@@ -12,6 +12,7 @@ from gov_webui.evidence_store import EncryptedEvidenceStore
 from gov_webui.generation_outcome import (
     AuthoredGeneration,
     BlockedGeneration,
+    GenerationFailureKind,
     InvalidGenerationResult,
     classify_daemon_result,
 )
@@ -31,6 +32,13 @@ class AcceptanceResult:
     status: AcceptanceStatus
     message_id: str | None = None
     reason: str | None = None
+    failure_type: str | None = None
+    """Machine-readable class from the shared taxonomy, for BLOCKED results.
+
+    A context race (session revision, accepted canon, or project guidance moved
+    while the provider was working) reports `stale_context`. Callers and the
+    browser must branch on this rather than on `reason` prose.
+    """
 
 
 def accept_candidate(
@@ -71,13 +79,33 @@ def accept_candidate(
 
         session = session_store.get(request.session_id)
         if session is None:
-            return _block(generation_store, candidate_id, "target session no longer exists")
+            return _block(
+                generation_store,
+                candidate_id,
+                "target session no longer exists",
+                failure_type=GenerationFailureKind.STALE_CONTEXT,
+            )
         if session.revision != request.expected_revision:
-            return _block(generation_store, candidate_id, "session revision changed")
+            return _block(
+                generation_store,
+                candidate_id,
+                "session revision changed",
+                failure_type=GenerationFailureKind.STALE_CONTEXT,
+            )
         if canon_fingerprint(context_root) != request.canon_fingerprint:
-            return _block(generation_store, candidate_id, "accepted canon changed")
+            return _block(
+                generation_store,
+                candidate_id,
+                "accepted canon changed",
+                failure_type=GenerationFailureKind.STALE_CONTEXT,
+            )
         if guidance_fingerprint(context_root) != request.guidance_fingerprint:
-            return _block(generation_store, candidate_id, "project guidance changed")
+            return _block(
+                generation_store,
+                candidate_id,
+                "project guidance changed",
+                failure_type=GenerationFailureKind.STALE_CONTEXT,
+            )
 
         response = evidence_store.read_reference(
             candidate.evidence_ref, actor="generation-acceptance"
@@ -85,7 +113,12 @@ def accept_candidate(
         try:
             outcome = classify_daemon_result(response, dispatch.actual_model)
         except InvalidGenerationResult as exc:
-            return _block(generation_store, candidate_id, f"response is not authored output: {exc}")
+            return _block(
+                generation_store,
+                candidate_id,
+                f"response is not authored output: {exc}",
+                failure_type=GenerationFailureKind.INVALID_RESULT,
+            )
         if isinstance(outcome, BlockedGeneration):
             return _block(generation_store, candidate_id, "governor response requires review")
         assert isinstance(outcome, AuthoredGeneration)
@@ -94,7 +127,12 @@ def accept_candidate(
         if corrected_text is not None:
             authored_content = corrected_text.strip()
             if not authored_content:
-                return _block(generation_store, candidate_id, "corrected response is empty")
+                return _block(
+                    generation_store,
+                    candidate_id,
+                    "corrected response is empty",
+                    failure_type=GenerationFailureKind.INVALID_RESULT,
+                )
 
         # Deterministic application policy remains outside ag-ng. The provider
         # response is evidence, not acceptance authority. Warning-only reports
@@ -138,7 +176,12 @@ def accept_candidate(
             None,
         )
         if not isinstance(pending_user, str) or not pending_user.strip():
-            return _block(generation_store, candidate_id, "frozen request has no user turn")
+            return _block(
+                generation_store,
+                candidate_id,
+                "frozen request has no user turn",
+                failure_type=GenerationFailureKind.INVALID_RESULT,
+            )
         try:
             accounting = (
                 accounting_resolver(
@@ -156,6 +199,7 @@ def accept_candidate(
                 generation_store,
                 candidate_id,
                 "provider evidence identity differs from the frozen dispatch",
+                failure_type=GenerationFailureKind.INVALID_RESULT,
             )
         messages = [
             SessionMessage.create(role="user", content=pending_user),
@@ -177,9 +221,19 @@ def accept_candidate(
             messages,
         )
         if result is CandidateWriteResult.CONFLICT:
-            return _block(generation_store, candidate_id, "session revision changed")
+            return _block(
+                generation_store,
+                candidate_id,
+                "session revision changed",
+                failure_type=GenerationFailureKind.STALE_CONTEXT,
+            )
         if result is CandidateWriteResult.NOT_FOUND:
-            return _block(generation_store, candidate_id, "target session no longer exists")
+            return _block(
+                generation_store,
+                candidate_id,
+                "target session no longer exists",
+                failure_type=GenerationFailureKind.STALE_CONTEXT,
+            )
         assert message_id is not None
         generation_store.accept_candidate(candidate_id, message_id)
         status = (
@@ -195,7 +249,8 @@ def _block(
     candidate_id: str,
     reason: str,
     *,
+    failure_type: str | None = None,
     detail: dict[str, Any] | None = None,
 ) -> AcceptanceResult:
-    store.block_candidate(candidate_id, reason, detail=detail)
-    return AcceptanceResult(AcceptanceStatus.BLOCKED, reason=reason)
+    store.block_candidate(candidate_id, reason, failure_type=failure_type, detail=detail)
+    return AcceptanceResult(AcceptanceStatus.BLOCKED, reason=reason, failure_type=failure_type)

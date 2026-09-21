@@ -709,6 +709,10 @@
         try {
           body = await response.json();
           detail = body.detail?.message || body.detail || detail;
+          // Artifact routes answer {"ok":false,"error":{"code","message",...}}.
+          // Without this the writer saw only "409 Conflict" for every artifact
+          // conflict, and the actionable server sentence was discarded.
+          if (typeof body.error?.message === "string") detail = body.error.message;
           if (body.outcome === "failure") detail = body.message || detail;
           if (typeof detail !== "string") detail = JSON.stringify(detail);
         } catch (_) {}
@@ -1620,6 +1624,19 @@
       return wrapper;
     }
 
+    // A blocked generation is an operational state, never story text. A context
+    // race (stale_context) is reported with the typed code rather than prose, so
+    // the writer is told the conversation moved on and that resending is their
+    // decision to make deliberately -- not invited to resubmit blindly.
+    function blockedGenerationMessage(terminal) {
+      if (terminal?.failure_type === "stale_context") {
+        return "This conversation changed while Marginalia was writing, so that "
+          + "response was not added. Nothing was saved from it. Your prompt is kept "
+          + "below — read the newer messages first, then decide whether to send it again.";
+      }
+      return terminal?.message || "The retained generation could not be accepted.";
+    }
+
     async function waitForDurableGeneration(requestId, notice) {
       while (true) {
         const result = await api(projectPath(`/v1/generations/${encodeURIComponent(requestId)}`));
@@ -1669,7 +1686,9 @@
           clearDurableRequest(terminal.client_request_id || saved?.id);
           renderGenerationNotice(
             terminal.outcome === "blocked" ? "blocked" : "failure",
-            terminal.message || "The retained generation could not be accepted.",
+            terminal.outcome === "blocked"
+              ? blockedGenerationMessage(terminal)
+              : (terminal.message || "The retained generation could not be accepted."),
             terminal.outcome === "failure" ? "provider_execution" : "",
           );
         }
@@ -1757,7 +1776,14 @@
         if (terminalResponse.outcome === "blocked") {
           clearDurableRequest(clientRequestId);
           prompt.value = content;
-          renderGenerationNotice("blocked", terminalResponse.message);
+          persistPromptDraft(content);
+          renderGenerationNotice("blocked", blockedGenerationMessage(terminalResponse));
+          if (terminalResponse.failure_type === "stale_context") {
+            // Show the turns that won the race, so "send again" is an informed choice.
+            state.activeSession = await api(`/sessions/${encodeURIComponent(state.activeSession.id)}`);
+            renderConversation();
+            renderGenerationNotice("blocked", blockedGenerationMessage(terminalResponse));
+          }
           await refreshPending();
           return;
         }
@@ -1801,7 +1827,12 @@
         $$(".thinking").forEach((node) => node.closest(".message")?.remove());
         const failure = error.payload?.outcome === "failure" ? error.payload : null;
         if (failure) clearDurableRequest(clientRequestId);
-        if (!failure && state.generationSettings?.enabled && savedDurableRequest()?.id) {
+        // `error.status` is set only when a server response actually arrived.
+        // A received refusal is a definite answer, so it must never enter the
+        // uncertain-custody branch ("do not submit this prompt again yet"),
+        // which is reserved for a request whose fate is genuinely unknown.
+        const answered = typeof error.status === "number";
+        if (!failure && !answered && state.generationSettings?.enabled && savedDurableRequest()?.id) {
           const uncertain = renderGenerationNotice(
             "unknown",
             "The browser lost the acknowledgement. Marginalia is checking durable custody; do not submit this prompt again yet."
@@ -2325,15 +2356,31 @@
       if (!state.activeArtifact) return;
       clearTimeout(saveArtifact.autosaveTimer);
       try {
-        const result = await api(projectPath(`/v1/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}`), {
+        const commit = (discardWorkingCopy) => api(projectPath(`/v1/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}`), {
           method: "PUT",
           body: JSON.stringify({
             title: $("#artifact-title").value,
             content: $("#artifact-content").value,
             expected_current_version: state.activeArtifact.artifact.current_version,
             source: "edit",
+            discard_working_copy: discardWorkingCopy,
           }),
         });
+        let result;
+        try {
+          // The ordinary case commits exactly the autosaved text and never conflicts.
+          result = await commit(false);
+        } catch (conflict) {
+          if (conflict.payload?.error?.code !== "divergent_working_copy") throw conflict;
+          const proceed = window.confirm(
+            "This draft has autosaved changes that differ from what is on screen — "
+            + "usually another open tab.\n\n"
+            + "Saving now commits the text on screen and discards those autosaved changes.\n\n"
+            + "Cancel to reopen the draft and review them first."
+          );
+          if (!proceed) return toast("Save cancelled; reopen the draft to see the autosaved changes");
+          result = await commit(true);
+        }
         state.activeArtifact = result;
         await loadArtifacts();
         await openArtifact(result.artifact.id);
@@ -2510,11 +2557,29 @@
       const version = Number($("#revision-select").value);
       const current = state.activeArtifact.artifact.current_version;
       if (version === current) return toast("That is already the current revision");
-      if (!window.confirm(`Restore revision ${version} as a new revision? Existing history will be retained.`)) return;
+      if (!window.confirm(`Restore revision ${version} as a new revision? Committed revisions are all retained.`)) return;
       try {
-        const result = await api(projectPath(`/v1/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}/version/${version}/restore`), {
-          method: "POST", body: JSON.stringify({expected_current_version: current}),
+        const restore = (discardWorkingCopy) => api(projectPath(`/v1/artifacts/${encodeURIComponent(state.activeArtifact.artifact.id)}/version/${version}/restore`), {
+          method: "POST",
+          body: JSON.stringify({
+            expected_current_version: current,
+            discard_working_copy: discardWorkingCopy,
+          }),
         });
+        let result;
+        try {
+          result = await restore(false);
+        } catch (conflict) {
+          // Unsaved autosaved typing would be lost. Never discard it silently.
+          if (conflict.payload?.error?.code !== "divergent_working_copy") throw conflict;
+          const proceed = window.confirm(
+            "You have unsaved changes in this draft that are not part of any revision.\n\n"
+            + "Restoring will discard them permanently.\n\n"
+            + "Cancel to keep them (use “Save revision” first), or OK to discard and restore."
+          );
+          if (!proceed) return toast("Restore cancelled; your unsaved changes are still here");
+          result = await restore(true);
+        }
         state.activeArtifact = result;
         await loadArtifacts();
         await openArtifact(result.artifact.id);

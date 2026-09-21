@@ -70,6 +70,33 @@ class StaleArtifactVersionError(ArtifactStoreError):
         )
 
 
+class DivergentWorkingCopyError(ArtifactStoreError):
+    """Raised when a commit would silently destroy unsaved autosaved typing.
+
+    The editor promises that typing is autosaved as a working copy, so a commit
+    carrying different text (most visibly a revision restore) must not discard
+    it in silence. The caller has to resolve the divergence deliberately by
+    re-sending with `discard_working_copy=True`.
+    """
+
+    def __init__(
+        self,
+        artifact_id: str,
+        working_copy_base_version: int | None,
+        current_version: int,
+        index_version: int,
+    ) -> None:
+        self.artifact_id = artifact_id
+        self.working_copy_base_version = working_copy_base_version
+        self.current_version = current_version
+        self.index_version = index_version
+        super().__init__(
+            f"Artifact {artifact_id} has unsaved autosaved changes that are not in any "
+            f"revision. Saving this text would discard them. Keep the unsaved text, or "
+            f"discard it explicitly to continue."
+        )
+
+
 class ArtifactValidationError(ArtifactStoreError):
     """Raised for invalid inputs (bad kind, oversized content, empty title)."""
 
@@ -400,8 +427,15 @@ class ArtifactStore:
         source: str = "manual",
         message_id: str | None = None,
         source_turn_seq: int | None = None,
+        discard_working_copy: bool = False,
     ) -> tuple[ArtifactMeta, str, int]:
-        """Update an artifact, creating a new version. Returns (meta, content, index_version)."""
+        """Update an artifact, creating a new version. Returns (meta, content, index_version).
+
+        Committing always clears the autosaved working copy. When that working
+        copy holds text the commit would not preserve, the caller must opt in
+        with `discard_working_copy=True`; otherwise `DivergentWorkingCopyError`
+        is raised so unsaved typing cannot disappear without a decision.
+        """
         self._validate_source(source)
         self._validate_content(content)
         if title is not None:
@@ -424,6 +458,20 @@ class ArtifactStore:
                     current_version=meta.current_version,
                     index_version=index.version,
                 )
+
+            # Unsaved autosaved typing is only safe to drop when the commit
+            # preserves it, or when the caller has explicitly chosen to lose it.
+            if not discard_working_copy and meta.working_copy_updated_at is not None:
+                working_path = self._working_path(artifact_id)
+                if working_path.exists():
+                    working_text = working_path.read_text(encoding="utf-8")
+                    if working_text != content:
+                        raise DivergentWorkingCopyError(
+                            artifact_id=artifact_id,
+                            working_copy_base_version=meta.working_copy_base_version,
+                            current_version=meta.current_version,
+                            index_version=index.version,
+                        )
 
             now = _now_iso()
             new_version = meta.current_version + 1

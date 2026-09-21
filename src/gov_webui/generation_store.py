@@ -54,6 +54,15 @@ LEGACY_GENERATION_POLICY_DISPOSITION = (
     "legacy durable-generation preference retired; generation enabled"
 )
 
+# The single source of truth for a project that has never written a generation
+# policy row.  Reporting (`settings`) and enforcement (`_read_dispatch_enabled`,
+# consulted by dispatch reservation) MUST derive the default from this one
+# constant.  They disagreed before: reporting defaulted enabled while the
+# reservation path defaulted disabled, so every project created after the
+# policy migration showed "Generation enabled" and refused every dispatch.
+DEFAULT_DISPATCH_ENABLED = True
+DEFAULT_GENERATION_POLICY_DISPOSITION = "generation enabled by default; no legacy setting existed"
+
 
 class LogicalStatus(StrEnum):
     QUEUED = "queued"
@@ -437,12 +446,12 @@ class GenerationStore:
             ).fetchone()
         if row is None:
             return GenerationSettings(
-                True,
+                DEFAULT_DISPATCH_ENABLED,
                 (),
                 None,
                 0,
                 GENERATION_POLICY_SEMANTICS,
-                "generation enabled by default; no legacy setting existed",
+                DEFAULT_GENERATION_POLICY_DISPOSITION,
                 None,
             )
         fallbacks = self._fallbacks(json.loads(row["fallback_policy_json"]))
@@ -457,12 +466,13 @@ class GenerationStore:
         )
 
     def dispatch_enabled(self, project_id: str) -> bool:
+        """Report the effective dispatch policy.
+
+        Shares `_read_dispatch_enabled` with the reservation path so reporting
+        and enforcement cannot drift apart again.
+        """
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT dispatch_enabled FROM generation_settings WHERE project_id=?",
-                (project_id,),
-            ).fetchone()
-        return bool(row[0]) if row is not None else True
+            return self._read_dispatch_enabled(connection, project_id)
 
     def create_request(
         self,
@@ -656,7 +666,7 @@ class GenerationStore:
                 connection.rollback()
                 raise KeyError(logical_request_id)
             request = self._logical(row)
-            if not self._dispatch_enabled(connection, request.project_id):
+            if not self._read_dispatch_enabled(connection, request.project_id):
                 connection.rollback()
                 raise GenerationDisabled("new dispatches are disabled for this project")
             required_status = LogicalStatus.FAILED if fallback else LogicalStatus.QUEUED
@@ -1091,9 +1101,15 @@ class GenerationStore:
         candidate_id: str,
         reason: str,
         *,
+        failure_type: str | None = None,
         detail: dict[str, Any] | None = None,
     ) -> None:
-        """Record a current application refusal without erasing response custody."""
+        """Record a current application refusal without erasing response custody.
+
+        `failure_type` is the machine-readable classification from the shared
+        generation failure taxonomy. Clients must be able to recognise a
+        context race without matching on the human-readable `reason` prose.
+        """
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -1117,14 +1133,21 @@ class GenerationStore:
                 (DispatchStatus.BLOCKED, now, candidate.dispatch_id),
             )
             connection.execute(
-                "UPDATE logical_request SET status=?,last_error=?,updated_at=? WHERE id=?",
-                (LogicalStatus.BLOCKED, reason, now, candidate.logical_request_id),
+                "UPDATE logical_request SET status=?,last_error=?,failure_type=?,updated_at=? "
+                "WHERE id=?",
+                (
+                    LogicalStatus.BLOCKED,
+                    reason,
+                    failure_type,
+                    now,
+                    candidate.logical_request_id,
+                ),
             )
             self._event(
                 connection,
                 candidate.logical_request_id,
                 "candidate_blocked",
-                {"reason": reason, **(detail or {})},
+                {"reason": reason, "failure_type": failure_type, **(detail or {})},
                 dispatch_id=candidate.dispatch_id,
                 candidate_id=candidate_id,
             )
@@ -1278,11 +1301,19 @@ class GenerationStore:
             connection.commit()
 
     @staticmethod
-    def _dispatch_enabled(connection: sqlite3.Connection, project_id: str) -> bool:
+    def _read_dispatch_enabled(connection: sqlite3.Connection, project_id: str) -> bool:
+        """Resolve the effective dispatch policy for one project.
+
+        This is the only place a stored row is interpreted, and the only place
+        the no-row default is applied, so `settings`, `dispatch_enabled`, and
+        dispatch reservation always agree.
+        """
         row = connection.execute(
             "SELECT dispatch_enabled FROM generation_settings WHERE project_id=?", (project_id,)
         ).fetchone()
-        return bool(row[0]) if row is not None else False
+        if row is None:
+            return DEFAULT_DISPATCH_ENABLED
+        return bool(row[0])
 
     @staticmethod
     def _event(

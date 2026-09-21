@@ -1956,6 +1956,7 @@ def _generation_status_payload(project_id: str, request_id: str) -> dict[str, An
                 "request_id": request_id,
                 "client_request_id": logical.client_request_id,
                 "message": accepted.reason,
+                "failure_type": accepted.failure_type,
             }
     if logical.status is LogicalStatus.ACCEPTED and logical.accepted_candidate_id:
         return {
@@ -1984,6 +1985,7 @@ def _generation_status_payload(project_id: str, request_id: str) -> dict[str, An
             "request_id": request_id,
             "client_request_id": logical.client_request_id,
             "message": logical.last_error,
+            "failure_type": logical.failure_type,
         }
     if logical.status is LogicalStatus.FAILED:
         failure_type = logical.failure_type or GenerationFailureKind.PROVIDER_EXECUTION.value
@@ -3555,9 +3557,15 @@ async def chat_completions(
             except IdempotencyConflict as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             except GenerationDisabled as exc:
+                # A definite server refusal, not an uncertain delivery. It must
+                # carry the typed failure shape so the browser renders an
+                # actionable failure card instead of its lost-acknowledgement
+                # ("do not submit this prompt again yet") custody notice.
                 if created is not None and created.created:
                     durable_store.block_undispatched(created.request.id, str(exc))
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
+                return _failure_response(
+                    _generation_failure(ProjectGenerationPausedError(project.id))
+                )
         return JSONResponse(
             status_code=202,
             content={
@@ -4782,6 +4790,8 @@ class ArtifactUpdateRequest(BaseModel):
     source: str = "manual"
     message_id: str | None = None
     source_turn_seq: int | None = None
+    # Explicit acknowledgement that unsaved autosaved typing may be lost.
+    discard_working_copy: bool = False
 
 
 class ArtifactLifecycleRequest(BaseModel):
@@ -4797,6 +4807,8 @@ class ArtifactWorkingCopyRequest(BaseModel):
 
 class ArtifactRestoreRequest(BaseModel):
     expected_current_version: int = Field(ge=1)
+    # Explicit acknowledgement that unsaved autosaved typing may be lost.
+    discard_working_copy: bool = False
 
 
 class ArtifactCanonProposalRequest(BaseModel):
@@ -7832,8 +7844,23 @@ def _artifact_exception_response(exc: Exception) -> JSONResponse:
         ArtifactNotFoundError,
         ArtifactValidationError,
         ArtifactVersionNotFoundError,
+        DivergentWorkingCopyError,
         StaleArtifactVersionError,
     )
+
+    if isinstance(exc, DivergentWorkingCopyError):
+        return _artifact_error(
+            status_code=409,
+            code="divergent_working_copy",
+            message=str(exc),
+            details={
+                "artifact_id": exc.artifact_id,
+                "working_copy_base_version": exc.working_copy_base_version,
+                "current_version": exc.current_version,
+                "index_version": exc.index_version,
+                "resolution": "discard_working_copy",
+            },
+        )
 
     if isinstance(exc, ArtifactNotFoundError):
         return _artifact_error(
@@ -8159,6 +8186,7 @@ async def artifacts_update(
             source=request.source,
             message_id=request.message_id,
             source_turn_seq=request.source_turn_seq,
+            discard_working_copy=request.discard_working_copy,
         )
         return _artifact_detail_response(
             meta=meta,
@@ -8345,6 +8373,7 @@ async def artifacts_restore_version(
             content=content,
             expected_current_version=request.expected_current_version,
             source="restore",
+            discard_working_copy=request.discard_working_copy,
         )
         return _artifact_detail_response(
             meta=meta,
